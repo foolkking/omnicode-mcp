@@ -4,12 +4,13 @@ Manages global service instances and provides dependency injection
 """
 
 from typing import Optional
-from semantic_search import SemanticSearchEngine
-from semantic_search.directory_lister import DirectoryLister
-from code_tools import WritePipeline, EditPipeline
-from code_tools.git_manager import GitManager
+from omnicode.search import SemanticSearchEngine, DirectoryLister
+from omnicode.pipelines.write import WritePipeline
+from omnicode.pipelines.edit import EditPipeline
+from omnicode.git_context import GitManager
 from memory_system import MemoryManager
 from project_structure.project_manager import ProjectStructureManager
+
 
 
 # Global service instances

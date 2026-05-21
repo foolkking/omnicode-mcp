@@ -9,8 +9,9 @@ from fastapi import APIRouter, Query, HTTPException
 from core import get_write_pipeline, get_edit_pipeline, get_search_engine
 from core.config import get_settings
 from schemas.requests import WriteRequest, EditRequestAPI, FileRequest
-from code_tools import EditRequest
+from omnicode.pipelines.edit import EditRequest
 from utils import (
+
     create_success_response,
     create_error_response,
     create_detailed_error_response,

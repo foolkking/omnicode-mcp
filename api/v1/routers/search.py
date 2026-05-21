@@ -8,8 +8,9 @@ from fastapi import APIRouter, Query, HTTPException
 
 from core import get_search_engine
 from core.config import get_settings
-from semantic_search.models import SearchRequest
+from omnicode.search.models import SearchRequest
 from utils import (
+
     create_success_response,
     create_error_response,
     validate_file_path,

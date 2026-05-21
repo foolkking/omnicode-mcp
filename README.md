@@ -1,343 +1,121 @@
-# Codebase MCP
+# OmniCode-MCP 🚀
 
-> **Privacy-first AI development assistant via MCP** | Turn Claude into your personal coding assistant | Semantic code search • AI-assisted editing • Quality-checked generation • Persistent memory | Free open-source alternative to Cursor & paid AI coding tools | Python, React, TypeScript, FastAPI
-
-Open Source**
-
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/Python-3.11+-green.svg)](https://www.python.org/downloads/)
-[![MCP](https://img.shields.io/badge/MCP-Compatible-purple.svg)](https://modelcontextprotocol.io)
-[![Version](https://img.shields.io/badge/version-1.0.0--beta-orange.svg)](https://github.com/danyQe/codebase-mcp/releases)
-
-**Codebase MCP** is an open-source AI-powered development assistant that connects Claude Desktop (or any MCP-compatible LLM) to your codebase through the Model Context Protocol. Stop paying for separate coding assistants - if you already have a Claude subscription, that's all you need.
-
-📖 **[Read Full Documentation](https://danyqe.github.io/codebase-mcp/)** | 🏗️ **[Architecture](docs/architecture.png)** | 🤝 **[Contributing](./CONTRIBUTING.md)**
+> **OmniCode-MCP** 是一款专为 AI 辅助软件工程设计的高阶、企业级 Codebase 理解与操作 MCP（Model Context Protocol）服务端。
+> 它是对传统代码理解工具的革命性升级，旨在通过引入**时间维度（Git 历史感知）**、**高精度跨语言语法树（Tree-sitter AST）**、**全天候多模型智能路由网关**以及**主动静态分析代码质量门禁**，为 Claude Desktop、Cursor、VS Code 等主流 AI 终端提供无可比拟的代码阅读与编写上下文。
 
 ---
 
-## 🌟 Why Codebase MCP?
+## ✨ 核心创新特性 (Premium Features)
 
-### The Problem
-Modern AI coding assistants like Cursor, Windsurf, and others charge **$20-40+/month** on top of your existing LLM subscription. If you already pay for Claude, why pay again for a coding assistant?
+### 1. 🌌 四维时空代码溯源：Git-Aware Context
+*   **痛点**：传统 AI 工具仅能感知当前代码的静态空间，在修改老旧代码时，经常由于“无知”而破坏前人为了应对某个隐蔽边缘 Bug 而特意编写的看似“不合理”但实则极其关键的防御性补丁逻辑。
+*   **创新**：集成了 Git 深度分析模块。当 AI 请求或修改某段代码时，MCP 不仅能提取最新的代码段，还能自动注入该段代码的 `git blame` 历史、最近关联的 Commit Messages，甚至是该次变更关联的 Issue/PR 记录，让大模型在修改代码前洞悉其背后的“历史因果”。
 
-### The Solution
-**Codebase MCP** turns your existing Claude subscription into a powerful coding assistant:
-- ✅ **One subscription** - Use your existing Claude Pro/Team plan
-- ✅ **Privacy-first** - Local embeddings and processing (except edit operations)
-- ✅ **Open source** - Apache 2.0 license, community-driven
-- ✅ **Extensible** - Works with any MCP-compatible LLM via Model Context Protocol
-- ✅ **Lightweight** - ~100MB memory footprint for medium projects
-- ✅ **Fast** - Sub-second semantic search with local FAISS indexing
+### 2. 🌳 精准跨语言抽象语法树检索：AST-Driven RAG
+*   **痛点**：基于正则表达式或单纯以行数切分的 Code Chunker 会在遇到 JS/TS 的复杂模板字符串或 C++ / Rust 的高级嵌套宏时发生碎裂，导致上下文缺失或提取错误。
+*   **创新**：全面集成 `tree-sitter`，支持 **Python, JS, TS, C++, Java, Go, Rust** 7 种语言的高精度 AST 解析。不再依赖粗暴的正则，而是以真实的类、函数、块级 AST 边界为单位进行分块，并自动合并导入依赖，生成超高精度的局部调用关系图谱。
+
+### 3. 🚦 全天候智能模型路由网关：Multi-API Router
+*   **痛点**：单一模型 API 的硬编码（如强绑定单一 API 密钥或模型）无法兼顾开发过程中的“高智商任务”与“海量扫库任务”，且在遇到 API 频控 (Rate Limit) 或高并发时容易发生死锁。
+*   **创新**：集成 `LiteLLM` 的强健模型网关抽象。支持多厂商（Anthropic, OpenAI, DeepSeek, Gemini, Ollama 本地模型）API 密钥的统一热插拔。内建智能分级路由策略（如 `CostOptimized` 低成本扫库、`QualityFirst` 复杂重构），并支持指数退避的优雅降级重试与备用 API 自动 Fallback。
+
+### 4. ✂️ 智能上下文剪裁：Smart Token Compressor
+*   **痛点**：全量发送依赖代码会导致上下文迅速膨胀，既容易爆掉模型的 Token 限制，又会带来极高的 API 账单开销。
+*   **创新**：引入 Tiktoken 精密 Token 计算拦截器。当发现提取的上下文超过目标模型的 Context Window 时，执行动态剪裁：保留核心逻辑与指令 ➡️ 规范化无关的空白符 ➡️ 合并重复的导入语句 ➡️ 剥离纯修饰性注释（保留 TODO/FIXME）➡️ 折叠不相关的函数体为单行签名，最大化地榨取每一位 Token 的黄金价值。
+
+### 5. 🛡️ 主动防御质量门禁：Proactive Guard
+*   **痛点**：AI 生成的代码可能存在低级的语法错误、类型不匹配或内存泄露，导致本地构建频繁失败，折损开发效率。
+*   **创新**：集成了本地静态分析防御。在 AI 修改/生成文件后，静默调用相应的工具（Python ➡️ mypy/ruff；JS/TS ➡️ eslint/tsc；C++ ➡️ cppcheck）进行即时诊断。若检测到致命错误，系统将触发**自动纠偏反馈循环 (Feedback Loop)**，把诊断报告重新作为上下文投喂给大模型进行自我修正，确保输出到您本地的代码百分之百能通过构建！
 
 ---
 
-## ⚡ Quick Start
+## 🛠️ 项目架构设计 (Architecture)
 
-### Prerequisites
-- **Python 3.11+**
-- **Claude Desktop** (or any MCP-compatible client)
-- **Git** installed
-- **[uv](https://github.com/astral-sh/uv)** package manager (recommended)
+`OmniCode-MCP` 继承并优化了 **FastMCP Gateway (stdio) ⬅️➡️ FastAPI (HTTP REST)** 的双层解耦拓扑：
 
-### Installation
-
-**1. Clone the repository:**
-```bash
-git clone https://github.com/danyQe/codebase-mcp.git
-cd codebase-mcp
+```
+                +-----------------------------------------+
+                |          Any MCP Client                 |
+                |   (Claude Desktop, VS Code, Cursor)     |
+                +-----------------------------------------+
+                                     |
+                                  (stdio)
+                                     v
+                +-----------------------------------------+
+                |         mcp_server.py (MCP Server)      |
+                +-----------------------------------------+
+                                     |
+                                (HTTP REST)
+                                     v
+                +-----------------------------------------+
+                |        FastAPI Backend (:6789)          |
+                +-----------------------------------------+
+                     /               |               \
+                    /                |                \
+    +-----------------+     +-----------------+     +-----------------+
+    |   omnicode/     |     |   omnicode/     |     |   omnicode/     |
+    |   llm/          |     |   ast_engine/   |     |   guard/        |
+    |  - MultiRouter  |     |  - Tree-sitter  |     |  - mypy/ruff    |
+    |  - Compressor   |     |  - AST Chunker  |     |  - eslint/tsc   |
+    +-----------------+     +-----------------+     +-----------------+
+            |                        |                       |
+      (Claude/OpenAI/         (FAISS / Hybrid        (Automatic Error
+     DeepSeek/Gemini/Ollama)    Semantic Search)      Feedback Loop)
 ```
 
-**2. Install globally (recommended):**
-```bash
-# Install uv if you haven't
-pip install uv
+---
 
-# Create virtual environment and install dependencies
-uv venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-uv pip install -r requirements.txt
+## 🚀 部署与快速上手 (Quick Start)
 
-# Install formatters globally (required for code formatting)
-pip install black ruff
+具体部署与环境搭建细节，请参阅我们为您准备的持续更新持久化文档：  
+📖 **[deployment_build_record.md](deployment_build_record.md)**
+
+### 1. 克隆与配置
+```powershell
+# 克隆本项目
+git clone https://github.com/your-username/omnicode-mcp.git
+cd omnicode-mcp
+
+# 准备环境变量
+copy .env.example .env
+```
+*(请在 `.env` 中填入您要激活的模型的 API Key)*
+
+### 2. 本地虚拟环境一键构建
+```powershell
+# 创建虚拟环境
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+
+# 以可编辑模式安装所有依赖（由 pyproject.toml 声明）
+pip install -e .
 ```
 
-**3. Configure Gemini API (for edit tool):**
-```bash
-# Create .env file
-cp .env.example .env
-
-# Get free API key from: https://aistudio.google.com/app/apikey
-# Add to .env:
-GEMINI_API_KEY=your_api_key_here
-```
-
-**4. Configure Claude Desktop:**
-
-Add to your `claude_desktop_config.json`:
-```json
-{
-  "mcpServers": {
-    "codebase-manager": {
-      "command": "/path/to/your/.venv/bin/python",
-      "args": [
-        "/path/to/codebase-mcp/mcp_server.py"
-      ]
+### 3. 运行 API 服务与 MCP 网关
+*   **后端启动**：
+    ```powershell
+    uvicorn main:app --port 6789 --reload
+    ```
+*   **Claude Desktop 配置**：
+    在 `C:/Users/<Username>/AppData/Roaming/Claude/claude_desktop_config.json` 中配置您的 stdio 入口：
+    ```json
+    "mcpServers": {
+      "omnicode-mcp": {
+        "command": "python",
+        "args": ["/path/to/omnicode-mcp/mcp_server.py"],
+        "env": {
+          "ENV_FILE": "/path/to/omnicode-mcp/.env"
+        }
+      }
     }
-  }
-}
-```
-
-**5. Start the FastAPI server:**
-```bash
-# In a separate terminal, navigate to your project directory
-python main.py /path/to/your/project
-
-# Server starts on http://localhost:6789
-# You can access the web dashboard at: http://localhost:6789
-```
-
-**6. Use with Claude Desktop:**
-- Restart Claude Desktop
-- Start chatting - Claude now has access to 13+ MCP tools for codebase management!
+    ```
 
 ---
 
-## 🎯 Key Features
+## 🤝 参与贡献 (Contributing)
 
-### 🔍 **Semantic Code Search**
-- AI-powered code understanding with local embeddings
-- Multi-language support (Python, JavaScript, TypeScript)
-- Symbol-level indexing (functions, classes, interfaces)
-- Fuzzy search and exact matching modes
-
-### 🧠 **Persistent Memory System**
-- Remember context across chat sessions
-- Categorize learnings: progress, mistakes, solutions, architecture
-- Semantic memory search with importance scoring
-- Never repeat the same mistake twice
-
-### 🌿 **Session-Based Git Workflow**
-- Isolated development branches for each feature
-- Automatic commit tracking in `.codebase` directory
-- Separate from user's `.git` - track AI changes independently
-- Auto-merge support with quality gates
-
-### ✍️ **Intelligent Code Writing**
-- **Write Tool**: Create new files with auto-formatting and quality scoring
-- **Edit Tool**: AI-assisted editing with Gemini integration (inspired by Cursor)
-- **Quality Gates**: Auto-commit only when code quality ≥ 80%
-- **Dependency Checking**: Prevent code duplication and missing imports
-
-### 🎨 **Auto-Formatting**
-- **Python**: Black + Ruff (PEP 8 compliant)
-- **TypeScript/JavaScript**: Prettier + ESLint
-- **Quality Scoring**: Automatic code quality assessment
-- **Error Recovery**: Intelligent retry with corrections
-
-### 📊 **Project Intelligence**
-- Real-time codebase analysis
-- File structure visualization
-- Dependency tracking
-- Symbol extraction and indexing
+欢迎任何形式的 Issue、PR 与架构讨论！详细开发约定及模块设计哲学，请阅读：  
+📄 **[CONTRIBUTING.md](CONTRIBUTING.md)**
 
 ---
-
-## 🏗️ Architecture
-
-```
-┌─────────────────┐
-│ Claude Desktop  │  User interacts via chat
-└────────┬────────┘
-         │ MCP Protocol (stdio)
-         ↓
-┌─────────────────┐
-│   MCP Server    │  13+ Tools (proxy layer)
-│  (mcp_server.py)│  Lightweight, fast
-└────────┬────────┘
-         │ HTTP/REST
-         ↓
-┌─────────────────┐
-│ FastAPI Server  │  Port 6789 (main.py)
-│   Core Engine   │  40+ API endpoints
-└────────┬────────┘
-         │
-    ┌────┴─────┬─────────┬──────────┐
-    ↓          ↓         ↓          ↓
-┌────────┐ ┌──────┐ ┌────────┐ ┌───────────┐
-│Semantic│ │Memory│ │  Git   │ │Code Tools │
-│ Search │ │System│ │Manager │ │  Pipeline │
-└────────┘ └──────┘ └────────┘ └───────────┘
-    │          │         │          │
-    └──────────┴─────────┴──────────┘
-               ↓
-    ┌──────────────────────┐
-    │   Local Storage      │
-    │ • FAISS (vectors)    │
-    │ • SQLite (metadata)  │
-    │ • .codebase (git)    │
-    └──────────────────────┘
-```
-
-**Privacy Note:** All processing is local except the edit tool, which uses Google's free Gemini API for AI-assisted code editing. Only the edited file is sent to Gemini - no project context or history.
-
-
-![View Detailed Architecture Diagram](./docs/architecture.png)
-
----
-
-## 🛠️ Available Tools
-
-Codebase MCP provides **13 specialized MCP tools** for comprehensive development automation:
-
-| Tool | Purpose | Key Features |
-|------|---------|--------------|
-| `session_tool` | Manage dev sessions | Create branches, auto-commit, merge |
-| `memory_tool` | Store/retrieve knowledge | Persistent context, semantic search |
-| `git_tool` | Git operations | Status, diff, log, commit, branches |
-| `write_tool` | Intelligent file creation | Auto-format, quality scoring, dependency check |
-| `edit_file` | AI-assisted editing | Gemini-powered, error recovery, format validation |
-| `search_tool` | Semantic code search | 4 modes: semantic, fuzzy, text, symbol |
-| `read_code_tool` | Smart code reading | Symbol-level, line ranges, whole file |
-| `project_context_tool` | Project analysis | Structure, dependencies, overview |
-| `list_directory_tool` | Directory exploration | Tree view, metadata, gitignore support |
-| `code_analysis_tool` | Code quality checks | Syntax, linting, imports, dependencies |
-| `list_file_symbols_tool` | Symbol extraction | Functions, classes, interfaces |
-| `read_symbol_from_database` | DB symbol lookup | Fast indexed retrieval |
-| `project_structure_tool` | Project visualization | Enhanced tree with stats |
-
----
-
-## 📈 Performance
-
-- **Semantic Search:** Sub-second response for typical codebases
-- **Memory Footprint:** ~100MB for medium projects (<20k lines)
-- **Indexing Speed:** ~30 seconds for 10k lines initial index
-- **Edit Operations:** 5-15 seconds (Gemini API + formatting)
-- **Optimal Project Size:** <20,000 lines (tested and verified)
-
-**Note:** Edit tool can be slow due to Gemini API latency and code formatting. Claude Desktop may timeout on very large edits (use smaller, focused edits).
-
----
-
-## 🎓 Usage Examples
-
-### Creating a New Feature
-```
-User: "Create a FastAPI endpoint for user authentication with JWT tokens"
-
-Claude:
-✅ Searching for existing auth patterns...
-✅ Creating session: feat/user-auth
-✅ Writing authentication.py with JWT implementation
-✅ Auto-formatted with Black + Ruff
-✅ Quality score: 95% - Auto-committed
-✅ Storing solution in memory
-```
-
-### Refactoring Code
-```
-User: "Refactor the user service to use dependency injection"
-
-Claude:
-✅ Reading current user service implementation
-✅ Searching for DI patterns in codebase
-✅ Editing with AI assistance (Gemini)
-✅ Validating changes with quality gates
-✅ Session: refactor/user-di ready for review
-```
-
-### Memory-Driven Development
-```
-User: "Continue working on the payment integration"
-
-Claude:
-✅ Loading memory context...
-✅ Found previous progress: Stripe API setup complete
-✅ Found previous mistake: Don't use synchronous requests in async endpoints
-✅ Continuing from last checkpoint...
-```
-
----
-
-## 🔐 Privacy & Security
-
-### Privacy-First Design
-- **Local Embeddings**: AllMiniLM-L6-v2 runs entirely on your machine
-- **Local Processing**: FAISS vector store, SQLite metadata - all local
-- **No Cloud Dependencies**: Except for Gemini API (edit tool only)
-
-### Gemini API Usage
-- **Scope**: Only `edit_file` tool uses Gemini
-- **Data Sent**: Only the file being edited (no project context)
-- **Alternative**: Contributors can add local LLM support (GPU required)
-- **Cost**: Free tier (15 RPM, 250K TPM, 1K RPD)
-
-### Security Best Practices
-- Never commit `.env` with API keys
-- Use `.gitignore` for sensitive files
-- Review AI-generated code before production deployment
-- Keep dependencies updated
-
----
-
-## 🤝 Contributing
-
-We welcome contributions! This project was built to be community-driven and extensible.
-
-**Priority Areas:**
-- 🌐 **Language Support**: Add Java, Go, Rust, PHP, etc.
-- 🧠 **Local LLM Integration**: Replace Gemini with local models
-- 🔍 **Search Improvements**: Enhanced semantic algorithms
-- 📊 **UI/UX**: Improve web dashboard
-- ⚡ **Performance**: Optimization for larger codebases
-
-**See [CONTRIBUTING.md](./CONTRIBUTING.md) for detailed guidelines.**
-
----
-
-## 📄 License
-
-This project is licensed under the **Apache License 2.0** - see [LICENSE](./LICENSE) file for details.
-
-**Credits:**
-- Edit tool techniques inspired by [Cursor](https://cursor.sh/)
-- Built with [Claude Sonnet 4 and 4.5](https://www.anthropic.com/)
-- Powered by [Model Context Protocol](https://modelcontextprotocol.io)
-
----
-
-## 🗺️ Roadmap
-
-**Current Version: v1.0.0-beta**
-
-**Upcoming Features:**
-- Community-driven enhancements
-- More language support
-- Local LLM alternatives
-- Performance optimizations
-- Advanced prompt engineering templates
-
----
-
-## 📞 Support
-
-- 📖 **Documentation**: https://danyqe.github.io/codebase-mcp/
-- 🐛 **Issues**: https://github.com/danyQe/codebase-mcp/issues
-- 💬 **Discussions**: https://github.com/danyQe/codebase-mcp/discussions
-- 🌟 **Star this repo** if you find it useful!
-
----
-
-## 🎉 Acknowledgments
-
-Special thanks to:
-- **Anthropic** for Claude and the Model Context Protocol
-- **Google** for the free Gemini API
-- **Cursor team** for pioneering AI-assisted editing techniques
-- **Open source community** for making this possible
-
----
-
-**Made with ❤️ by developers, for developers**
-
-*Stop paying for coding assistants. Start building with your own LLM.*
+*OmniCode-MCP — 让您的 AI 助手拥有完美的时间与空间代码视野。*

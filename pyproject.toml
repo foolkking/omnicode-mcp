@@ -1,0 +1,75 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "omnicode-mcp"
+version = "1.0.0-beta"
+description = "A privacy-first AI development assistant via MCP"
+authors = [
+    {name = "OmniCode-MCP Contributors"}
+]
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp",
+    "httpx",
+    "fastapi",
+    "uvicorn",
+    "ruff",
+    "black",
+    "flake8",
+    "requests",
+    "sentence-transformers",
+    "faiss-cpu",
+    "numpy",
+    "pydantic",
+    "pydantic-settings",
+    "psutil",
+    "google-generativeai>=0.3.0",
+    "litellm>=1.40.0",
+    "tree-sitter>=0.22.0",
+    "tree-sitter-python",
+    "tree-sitter-javascript",
+    "tree-sitter-typescript",
+    "tree-sitter-cpp",
+    "tree-sitter-java",
+    "tree-sitter-go",
+    "tree-sitter-rust",
+    "gitpython>=3.1.0",
+    "tiktoken",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["omnicode"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "C",  # flake8-comprehensions
+    "B",  # flake8-bugbear
+]
+ignore = [
+    "E501",  # line too long, handled by black
+]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
