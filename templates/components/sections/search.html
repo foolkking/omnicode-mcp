@@ -416,25 +416,34 @@ async function viewCodeByIndex(idx) {
     }
     
     const filePath = result.file_path;
-    const startLine = result.line_start || result.line_number;
-    const endLine = result.line_end || (startLine + 20);
+    const startLine = result.line_start || result.line_number || 1;
+    const endLine = result.line_end || (startLine + 40);
+    // Pad context above/below the matched range so the user sees surrounding code
+    const padBefore = Math.max(1, startLine - 5);
+    const padAfter = endLine + 5;
     
     showLoading('Loading code...');
     
     const apiResult = await apiRoutes.files.read(filePath, {
-        startLine,
-        endLine,
+        startLine: padBefore,
+        endLine: padAfter,
         withLineNumbers: true
     });
     
     hideLoading();
     
     if (apiResult.success && apiResult.data.result) {
-        showCodePreviewModal(filePath, apiResult.data.result.content);
+        const payload = apiResult.data.result;
+        showCodePreviewModal(filePath, payload.content, {
+            startLine: payload.start_line || padBefore,
+            highlightLine: startLine,
+            title: result.symbol_name ? `${result.symbol_name} — ${filePath}` : filePath,
+        });
     }
 }
 
-function showCodePreviewModal(filePath, content) {
+function showCodePreviewModal(filePath, content, options) {
+    options = options || {};
     var existing = document.getElementById('codePreviewModal');
     if (existing) existing.remove();
 
@@ -443,39 +452,106 @@ function showCodePreviewModal(filePath, content) {
             .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     };
 
+    var rawLines = String(content || '').split('\n');
+    // Detect line-numbered prefix produced by the backend ("  42 | code")
+    // so we can extract the actual line numbers; otherwise fall back to a
+    // sequential counter starting at options.startLine (or 1).
+    var lnRegex = /^\s*(\d+)\s\|\s?(.*)$/;
+    var startLine = options.startLine || 1;
+    var detectedStart = null;
+    var detectedLines = [];
+    var allMatch = rawLines.length > 0;
+    rawLines.forEach(function (ln) {
+        var m = ln.match(lnRegex);
+        if (m) {
+            detectedLines.push({ n: parseInt(m[1], 10), text: m[2] });
+            if (detectedStart == null) detectedStart = parseInt(m[1], 10);
+        } else {
+            allMatch = false;
+        }
+    });
+    var rows;
+    if (allMatch && detectedLines.length > 0) {
+        rows = detectedLines;
+        startLine = detectedStart;
+    } else {
+        rows = rawLines.map(function (text, i) {
+            return { n: startLine + i, text: text };
+        });
+    }
+    var endLine = rows.length > 0 ? rows[rows.length - 1].n : startLine;
+    var highlight = options.highlightLine != null ? options.highlightLine : startLine;
+
+    var rowsHtml = rows.map(function (r) {
+        var isHi = (r.n === highlight);
+        return '<div class="code-preview-row flex' + (isHi ? ' is-highlight bg-yellow-500/20' : '') + '" data-line="' + r.n + '">' +
+            '<span class="code-preview-gutter select-none w-14 flex-shrink-0 text-right pr-3 text-gray-500 dark:text-gray-500">' +
+            r.n + '</span>' +
+            '<span class="code-preview-text flex-1 whitespace-pre">' + _esc(r.text) + '</span>' +
+            '</div>';
+    }).join('');
+
+    var title = options.title || filePath;
+    var subtitle = (rows.length ? ('lines ' + startLine + '–' + endLine) : '');
+
     var modal = document.createElement('div');
     modal.id = 'codePreviewModal';
     modal.className = 'fixed inset-0 bg-black bg-opacity-60 z-[80] flex items-center justify-center p-4';
     modal.innerHTML = '' +
-        '<div class="bg-white rounded-lg shadow-2xl max-w-5xl w-full max-h-[90vh] flex flex-col">' +
-        '  <div class="px-5 py-3 border-b border-gray-200 flex items-center justify-between">' +
-        '    <h3 class="text-base font-semibold text-gray-900 flex items-center">' +
-        '      <i class="fas fa-code text-indigo-500 mr-2"></i>' +
-        '      <code class="font-mono text-sm">' + _esc(filePath) + '</code>' +
-        '    </h3>' +
-        '    <div class="flex items-center space-x-2">' +
-        '      <button onclick="copyCodePreview()" class="text-gray-500 hover:text-gray-700 text-sm" title="Copy">' +
-        '        <i class="fas fa-copy"></i>' +
+        '<div class="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-6xl h-[85vh] flex flex-col">' +
+        '  <div class="px-5 py-3 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between flex-shrink-0">' +
+        '    <div class="min-w-0 mr-3">' +
+        '      <h3 class="text-base font-semibold text-gray-900 dark:text-gray-100 flex items-center truncate">' +
+        '        <i class="fas fa-code text-indigo-500 mr-2 flex-shrink-0"></i>' +
+        '        <code class="font-mono text-sm truncate">' + _esc(title) + '</code>' +
+        '      </h3>' +
+        (subtitle ? '<div class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">' + subtitle + '</div>' : '') +
+        '    </div>' +
+        '    <div class="flex items-center space-x-2 flex-shrink-0">' +
+        '      <button onclick="codePreviewJumpToHighlight()" class="text-xs px-2 py-1 rounded border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800" title="Jump to highlighted line">' +
+        '        <i class="fas fa-crosshairs mr-1"></i>Jump' +
         '      </button>' +
-        '      <button onclick="closeCodePreview()" class="text-gray-500 hover:text-gray-700">' +
+        '      <button onclick="copyCodePreview()" class="text-xs px-2 py-1 rounded border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800" title="Copy">' +
+        '        <i class="fas fa-copy mr-1"></i>Copy' +
+        '      </button>' +
+        '      <button onclick="closeCodePreview()" class="text-gray-500 hover:text-gray-700 dark:text-gray-300 dark:hover:text-white px-2" title="Close">' +
         '        <i class="fas fa-times"></i>' +
         '      </button>' +
         '    </div>' +
         '  </div>' +
-        '  <div class="flex-1 overflow-auto bg-gray-900">' +
-        '    <pre id="codePreviewBody" class="text-xs font-mono text-gray-100 p-4 whitespace-pre">' +
-        _esc(content || '(empty)') +
-        '    </pre>' +
+        '  <div id="codePreviewScroll" class="flex-1 overflow-auto bg-gray-900">' +
+        '    <div id="codePreviewBody" class="text-xs font-mono text-gray-100 py-3">' +
+        rowsHtml +
+        '    </div>' +
         '  </div>' +
         '</div>';
     document.body.appendChild(modal);
 
-    // ESC closes
+    // Click outside closes
     modal.addEventListener('click', function (ev) {
         if (ev.target === modal) closeCodePreview();
     });
     document.addEventListener('keydown', _codePreviewKey);
+
+    // Auto-scroll to the highlighted line.
+    requestAnimationFrame(function () {
+        codePreviewJumpToHighlight();
+    });
 }
+
+window.showCodePreviewModal = showCodePreviewModal;
+
+function codePreviewJumpToHighlight() {
+    var modal = document.getElementById('codePreviewModal');
+    if (!modal) return;
+    var hi = modal.querySelector('.code-preview-row.is-highlight');
+    var scroller = modal.querySelector('#codePreviewScroll');
+    if (hi && scroller) {
+        var top = hi.offsetTop - (scroller.clientHeight / 3);
+        scroller.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+    }
+}
+window.codePreviewJumpToHighlight = codePreviewJumpToHighlight;
 
 function closeCodePreview() {
     var m = document.getElementById('codePreviewModal');
@@ -490,7 +566,18 @@ function _codePreviewKey(ev) {
 function copyCodePreview() {
     var body = document.getElementById('codePreviewBody');
     if (!body) return;
-    var txt = body.textContent || '';
+    // Reconstruct the source as gutter+text, then strip gutter for a clean
+    // copy.
+    var rows = body.querySelectorAll('.code-preview-row');
+    var txt;
+    if (rows.length) {
+        txt = Array.prototype.map.call(rows, function (r) {
+            var t = r.querySelector('.code-preview-text');
+            return t ? t.textContent : '';
+        }).join('\n');
+    } else {
+        txt = body.textContent || '';
+    }
     if (navigator.clipboard) {
         navigator.clipboard.writeText(txt).then(function () {
             if (window.notifications) notifications.success('Copied to clipboard');

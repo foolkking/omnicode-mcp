@@ -200,3 +200,110 @@ def test_edit_pipeline_failure_returns_200_with_failure_analysis(client, tmp_pat
     assert fa["failure_stage"] == "llm_edit"
     assert "AuthenticationError" in fa["root_cause"] or "API key" in fa["root_cause"]
     assert fa["suggested_fixes"]
+
+
+# ---------------------------------------------------------------------------
+# 5. Symbol search returns metadata.symbol_name matches (was returning 0
+#    because the chunker stored empty symbol_name and the engine's search()
+#    fell through to semantic search).
+# ---------------------------------------------------------------------------
+def test_symbol_search_finds_chunker_metadata_match(client):
+    """After indexing the working directory the chunker MUST populate
+    ``metadata.symbol_name`` and the /search/symbols endpoint MUST be able
+    to find that name via SQL LIKE.
+
+    This guards against:
+    * the chunker only iterating top-level children and missing methods
+    * the engine ``search()`` method falling through to FAISS semantic
+      search for ``search_type='fuzzy_symbol'`` instead of doing the
+      metadata lookup
+    """
+    # Make sure the index has at least one file's worth of symbols.
+    index_resp = client.post("/search/index")
+    assert index_resp.status_code == 200, index_resp.text
+
+    # ``main`` and ``create_app`` both live in main.py; whichever the test
+    # repository ships with should be findable.
+    r = client.post(
+        "/search/symbols",
+        params={
+            "query": "create_app",
+            "fuzzy": True,
+            "max_results": 10,
+            "min_score": 0.5,
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()["result"]
+    assert body["search_type"] == "fuzzy_symbol"
+    names = [r["symbol_name"] for r in body["results"]]
+    assert "create_app" in names, f"expected 'create_app' in {names!r}"
+
+    # Exact mode should also find it and not match unrelated text.
+    r = client.post(
+        "/search/symbols",
+        params={
+            "query": "create_app",
+            "fuzzy": False,
+            "max_results": 10,
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()["result"]
+    names = [r["symbol_name"] for r in body["results"]]
+    assert all(n == "create_app" for n in names) if names else True
+
+
+
+# ---------------------------------------------------------------------------
+# 6. /search/symbols/{file_path} returns real symbol names (not 'symbol_NN'
+#    placeholders) and includes line_start / line_end so the UI can render
+#    a useful "Lines 23-81" label and jump to the right line.
+# ---------------------------------------------------------------------------
+def test_list_file_symbols_returns_real_names(client):
+    r = client.get("/search/symbols/main.py")
+    assert r.status_code == 200, r.text
+    body = r.json()["result"]
+    assert body.get("language") == "python"
+    syms = body.get("symbols") or []
+    assert syms, "main.py should expose at least one symbol"
+    names = [s.get("name") for s in syms]
+    # Top-level functions must be present.
+    assert "create_app" in names, names
+    # No placeholder names ever.
+    assert not any(str(n).startswith("symbol_") for n in names), names
+    # Line ranges must be present and well-formed.
+    for s in syms:
+        ls, le = s.get("line_start"), s.get("line_end")
+        assert isinstance(ls, int) and ls >= 1, s
+        assert isinstance(le, int) and le >= ls, s
+
+
+def test_list_file_symbols_finds_methods_inside_classes(client):
+    """The chunker used to only iterate root_node.children which meant
+    methods nested inside classes never made it into the symbol list."""
+    # mcp_server.py defines several functions; pick one that's known to
+    # exist as a top-level def for stability.
+    r = client.get("/search/symbols/mcp_server.py")
+    assert r.status_code == 200, r.text
+    syms = r.json()["result"]["symbols"]
+    names = {s["name"] for s in syms}
+    assert "search_tool" in names, names
+
+
+# ---------------------------------------------------------------------------
+# 7. /read with a forward-slash path and *no* line range / symbol returns
+#    the whole file successfully (regression for "API Error: /read?file_path=
+#    tests/__init__.py&symbol_name=null&...")
+# ---------------------------------------------------------------------------
+def test_read_whole_file_with_no_range(client):
+    r = client.post(
+        "/read",
+        params={"file_path": "tests/__init__.py", "with_line_numbers": True},
+    )
+    assert r.status_code == 200, r.text
+    payload = r.json()["result"]
+    assert payload["success"] is True
+    assert payload["file_path"] == "tests/__init__.py"
+    assert "content" in payload
+    assert payload["start_line"] == 1

@@ -515,11 +515,11 @@ async function listFileSymbols() {
         });
         
         let html = `
-            <div class="mb-4 p-3 bg-purple-50 border border-purple-200 rounded-md">
-                <div class="text-sm font-medium text-purple-800">
-                    ${data.file} - ${data.total_lines} lines
+            <div class="mb-4 p-3 bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-700 rounded-md">
+                <div class="text-sm font-medium text-purple-800 dark:text-purple-200">
+                    ${data.file_path || data.file || filePath}${data.language ? ` <span class="text-xs text-purple-500 ml-1">(${data.language})</span>` : ''}
                 </div>
-                <div class="text-xs text-purple-600 mt-1">
+                <div class="text-xs text-purple-600 dark:text-purple-300 mt-1">
                     Found ${symbols.length} symbols
                 </div>
             </div>
@@ -528,23 +528,29 @@ async function listFileSymbols() {
         Object.entries(byType).forEach(([type, syms]) => {
             html += `
                 <div class="mb-4">
-                    <div class="text-sm font-semibold text-gray-700 mb-2 uppercase">${type} (${syms.length})</div>
+                    <div class="text-sm font-semibold text-gray-700 dark:text-gray-200 mb-2 uppercase">${type} (${syms.length})</div>
                     <div class="space-y-2">
-                        ${syms.map(sym => `
-                            <div class="border border-gray-200 rounded-md p-3 hover:bg-gray-50">
+                        ${syms.map(sym => {
+                            const startLine = sym.line_start ?? sym.line ?? '?';
+                            const endLine = sym.line_end ?? startLine;
+                            const lineLabel = (startLine === endLine) ? `Line ${startLine}` : `Lines ${startLine}-${endLine}`;
+                            const safeName = String(sym.name).replace(/'/g, "\\'");
+                            return `
+                            <div class="border border-gray-200 dark:border-gray-700 rounded-md p-3 hover:bg-gray-50 dark:hover:bg-gray-800">
                                 <div class="flex items-center justify-between mb-1">
-                                    <code class="text-sm font-semibold text-gray-900">${sym.name}</code>
-                                    <span class="text-xs text-gray-500">Line ${sym.line}</span>
+                                    <code class="text-sm font-semibold text-gray-900 dark:text-gray-100">${sym.name}</code>
+                                    <span class="text-xs text-gray-500 dark:text-gray-400">${lineLabel}</span>
                                 </div>
+                                ${sym.parent ? `<div class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">in <code>${sym.parent}</code></div>` : ''}
                                 ${sym.signature ? `
-                                    <div class="font-mono text-xs text-gray-600 mt-1">${sym.signature}</div>
+                                    <div class="font-mono text-xs text-gray-600 dark:text-gray-300 mt-1">${sym.signature}</div>
                                 ` : ''}
-                                <button onclick="viewSymbolCode('${filePath}', '${sym.name}')" 
+                                <button onclick="viewSymbolCode('${filePath.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}', '${safeName}', ${startLine}, ${endLine})" 
                                         class="mt-2 text-xs bg-purple-500 hover:bg-purple-600 text-white px-2 py-1 rounded">
                                     <i class="fas fa-eye mr-1"></i> View
                                 </button>
                             </div>
-                        `).join('')}
+                        `;}).join('')}
                     </div>
                 </div>
             `;
@@ -555,24 +561,39 @@ async function listFileSymbols() {
     }
 }
 
-async function viewSymbolCode(filePath, symbolName) {
+async function viewSymbolCode(filePath, symbolName, startLine, endLine) {
     showLoading('Loading symbol code...');
     
-    const result = await apiRoutes.files.read(filePath, {
-        symbolName,
-        occurrence: 1,
-        withLineNumbers: true
-    });
+    // Prefer line range when caller supplied one — much more reliable than
+    // round-tripping through the AST symbol resolver.
+    const opts = { withLineNumbers: true };
+    if (Number.isFinite(startLine) && startLine > 0) {
+        opts.startLine = startLine;
+        opts.endLine = (Number.isFinite(endLine) && endLine >= startLine) ? endLine : startLine + 60;
+    } else if (symbolName) {
+        opts.symbolName = symbolName;
+        opts.occurrence = 1;
+    }
+    const result = await apiRoutes.files.read(filePath, opts);
     
     hideLoading();
     
     if (result.success && result.data.result) {
-        // Show in read tab
-        switchFileTab('read');
-        document.getElementById('readFilePath').value = filePath;
-        document.getElementById('readSymbolName').value = symbolName;
-        document.getElementById('readCodePreview').textContent = result.data.result.content;
-        notifications.success(`Loaded symbol: ${symbolName}`);
+        const payload = result.data.result;
+        const headerStart = payload.start_line ?? opts.startLine ?? 1;
+        // Reuse the search-tab modal so users get the same nice scroller.
+        if (typeof window.showCodePreviewModal === 'function') {
+            window.showCodePreviewModal(filePath, payload.content || '', {
+                title: symbolName ? `${symbolName} — ${filePath}` : filePath,
+                highlightLine: headerStart,
+            });
+        } else {
+            switchFileTab('read');
+            document.getElementById('readFilePath').value = filePath;
+            document.getElementById('readSymbolName').value = symbolName || '';
+            document.getElementById('readCodePreview').textContent = payload.content;
+        }
+        notifications.success(symbolName ? `Loaded symbol: ${symbolName}` : `Loaded ${filePath}`);
     }
 }
 

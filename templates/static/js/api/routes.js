@@ -81,29 +81,40 @@ const API_ROUTES = {
             { params: { file_path: filePath }, userAction: 'Update File Index' }
         ),
         
-        listFileSymbols: (filePath) => api.get(`/search/symbols/${filePath}`, 
-            { userAction: 'List File Symbols' }
-        ),
+        listFileSymbols: (filePath) => {
+            // Backend route is /search/symbols/{file_path:path} — Windows
+            // backslashes confuse the URL router (browsers refuse to encode
+            // them).  Normalise to forward slashes and encode each segment.
+            const normalized = String(filePath || '').replace(/\\/g, '/');
+            const encoded = normalized
+                .split('/')
+                .map(s => encodeURIComponent(s))
+                .join('/');
+            return api.get(`/search/symbols/${encoded}`,
+                { userAction: 'List File Symbols' }
+            );
+        },
     },
     
     // ============================================================================
     // FILE OPERATIONS
     // ============================================================================
     files: {
-        read: (filePath, options = {}) => api.post('/read',
-            null,
-            {
-                params: {
-                    file_path: filePath,
-                    symbol_name: options.symbolName || null,
-                    occurrence: options.occurrence || 1,
-                    start_line: options.startLine || null,
-                    end_line: options.endLine || null,
-                    with_line_numbers: options.withLineNumbers !== false
-                },
-                userAction: 'Read Code'
-            }
-        ),
+        read: (filePath, options = {}) => {
+            // Build params dict but skip empty/null values so we don't end
+            // up with `?symbol_name=null` etc.  The backend coerces those
+            // anyway but it's nicer for the UI logs.
+            const params = { file_path: filePath };
+            if (options.symbolName) params.symbol_name = options.symbolName;
+            if (options.occurrence) params.occurrence = options.occurrence;
+            if (options.startLine != null) params.start_line = options.startLine;
+            if (options.endLine != null) params.end_line = options.endLine;
+            params.with_line_numbers = options.withLineNumbers !== false;
+            return api.post('/read', null, {
+                params,
+                userAction: 'Read Code',
+            });
+        },
         
         write: (filePath, content, options = {}) => api.post('/write',
             {

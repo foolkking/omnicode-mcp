@@ -216,7 +216,12 @@ class SemanticSearchEngine:
         logger.info("Codebase indexing completed successfully.")
 
     async def list_symbols_in_file(self, file_path: str) -> dict:
-        """Extract all top level code structures using Tree-sitter"""
+        """Extract every named symbol (function / class / method) in a file.
+
+        Uses ``UnifiedASTParser.extract_symbols`` so we get real names plus
+        accurate line ranges, including methods nested inside classes.  Falls
+        back to an empty list if the language is unsupported.
+        """
         full_path = os.path.abspath(os.path.join(self.working_dir, file_path))
         if not os.path.exists(full_path):
             return {"error": f"File not found: {file_path}", "symbols": []}
@@ -227,25 +232,40 @@ class SemanticSearchEngine:
         except Exception as e:
             return {"error": f"Could not read file: {e}", "symbols": []}
 
-        language = os.path.splitext(file_path)[1].lstrip(".") or "python"
-        tree = self.ast_parser.parse(content, language)
+        language = self._guess_language(file_path)
+        try:
+            extracted = self.ast_parser.extract_symbols(content, language) or []
+        except Exception as exc:
+            return {
+                "error": f"AST parse failed for {file_path} ({language}): {exc}",
+                "symbols": [],
+                "file_path": file_path,
+                "count": 0,
+            }
 
         symbols = []
-        if tree:
-            root = tree.root_node
-            for i, child in enumerate(root.children):
-                if child.type in ['function_definition', 'class_definition', 'function_declaration', 'method_definition']:
-                    symbols.append({
-                        "name": f"symbol_{i}", # simplistic placeholder fallback
-                        "type": child.type,
-                        "line_start": child.start_point[0] + 1,
-                        "line_end": child.end_point[0] + 1
-                    })
+        for sym in extracted:
+            if not isinstance(sym, dict):
+                continue
+            name = sym.get("name") or "<anonymous>"
+            sline = sym.get("line_start") or sym.get("start_line") or 1
+            eline = sym.get("line_end") or sym.get("end_line") or sline
+            symbols.append(
+                {
+                    "name": name,
+                    "type": sym.get("type") or "symbol",
+                    "line_start": int(sline),
+                    "line_end": int(eline),
+                    "parent": sym.get("parent"),
+                    "language": sym.get("language", language),
+                }
+            )
 
         return {
             "file_path": file_path,
+            "language": language,
             "symbols": symbols,
-            "count": len(symbols)
+            "count": len(symbols),
         }
 
     async def read_symbol_content(
@@ -411,6 +431,82 @@ class SemanticSearchEngine:
                 ))
                 if len(results) >= request.max_results:
                     break
+        elif request.search_type in ("symbol", "symbol_exact", "fuzzy_symbol"):
+            # Symbol search — match the literal symbol name stored in
+            # ``metadata.symbol_name`` (extracted at indexing time by the
+            # AST chunker).  Falls back to scanning the content column when
+            # metadata is unavailable.
+            cursor = self.vector_store.conn.cursor()
+            q = request.query.strip()
+            if not q:
+                return results
+
+            fuzzy = request.search_type != "symbol_exact"
+            # The metadata column is JSON text in SQLite, so a LIKE on the
+            # serialized blob is a cheap way to find the symbol_name field.
+            if fuzzy:
+                pattern = f'%"symbol_name": "%{q}%"%'
+                pattern2 = f'%"symbol_name": "%{q.lower()}%"%'
+            else:
+                pattern = f'%"symbol_name": "{q}"%'
+                pattern2 = pattern  # exact mode — single pattern
+
+            # Optional symbol-type filter (function / class / method / ...).
+            sql_extra = ""
+            params = [pattern, pattern2]
+            if getattr(request, "symbol_type", None):
+                sql_extra = " AND chunk_type = ?"
+                params.append(request.symbol_type)
+
+            cursor.execute(
+                f"""
+                SELECT file_path, chunk_type, content, metadata
+                FROM chunks
+                WHERE (metadata LIKE ? OR LOWER(metadata) LIKE ?){sql_extra}
+                LIMIT ?
+                """,
+                params + [request.max_results * 4],  # over-fetch then rank
+            )
+            rows = cursor.fetchall()
+
+            # Score by simple distance: exact name = 1.0, prefix match = 0.9,
+            # contains = 0.6.  Caller can filter by request.min_score.
+            scored = []
+            ql = q.lower()
+            for row in rows:
+                try:
+                    meta = json.loads(row["metadata"]) if row["metadata"] else {}
+                except Exception:
+                    meta = {}
+                name = (meta.get("symbol_name") or "").strip()
+                if not name:
+                    continue
+                nl = name.lower()
+                if nl == ql:
+                    score = 1.0
+                elif nl.startswith(ql):
+                    score = 0.9
+                elif ql in nl:
+                    score = 0.7
+                else:
+                    score = 0.5
+                if score < (request.min_score or 0.0):
+                    continue
+                scored.append((score, row, meta, name))
+
+            # Highest scoring matches first
+            scored.sort(key=lambda x: x[0], reverse=True)
+            for score, row, meta, name in scored[: request.max_results]:
+                results.append(LegacySearchResult(
+                    file_path=row["file_path"],
+                    symbol_name=name,
+                    chunk_type=row["chunk_type"],
+                    line_start=meta.get("start_line", 1),
+                    line_end=meta.get("end_line", 1),
+                    signature=meta.get("signature", ""),
+                    docstring=meta.get("docstring", ""),
+                    relevance_score=score,
+                ))
         else:
             # Semantic / Hybrid search using RRF
             query_emb = self.embedding_model.encode(request.query)
