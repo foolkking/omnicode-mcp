@@ -1,7 +1,7 @@
-from .hybrid_search import HybridSearchEngine
 from .directory_lister import DirectoryLister
+from .engine import LegacySearchResult, SearchEngine, SemanticSearchEngine
+from .hybrid_search import HybridSearchEngine
 from .models import SearchRequest
-from .engine import SemanticSearchEngine, LegacySearchResult
 
 __all__ = [
     "HybridSearchEngine",
@@ -9,4 +9,6 @@ __all__ = [
     "SearchRequest",
     "SemanticSearchEngine",
     "LegacySearchResult",
+    "SearchEngine",
 ]
+

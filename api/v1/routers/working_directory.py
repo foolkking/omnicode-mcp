@@ -5,16 +5,17 @@ Handles working directory validation, changes, and reinitialization
 
 import os
 from pathlib import Path
+
 from fastapi import APIRouter
 
+from core import get_services_status
 from core.config import get_settings
 from core.lifespan import reinitialize_services
-from core import get_services_status
 from schemas.requests import WorkingDirectoryRequest
 from utils import (
-    create_success_response,
-    create_error_response,
     create_detailed_error_response,
+    create_error_response,
+    create_success_response,
 )
 
 router = APIRouter(prefix="/working-directory", tags=["working-directory"])

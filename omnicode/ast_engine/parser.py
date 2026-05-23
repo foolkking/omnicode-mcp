@@ -1,89 +1,396 @@
-import tree_sitter
-from typing import List, Dict, Optional, Any
-from pydantic import BaseModel
+"""
+Unified AST Parser (Tree-sitter)
+================================
+Single entry point for parsing 7+ languages and extracting symbols / imports /
+function-call relations.  Each language module under ``languages/`` provides
+its own extractor, and this parser dispatches to the right one based on the
+language string.
+"""
+
+from __future__ import annotations
+
 import logging
+from typing import Any, Dict, List, Optional, Tuple
+
+import tree_sitter
+from pydantic import BaseModel
+
+from .languages import (
+    extract_go_calls,
+    extract_go_imports,
+    extract_go_symbols,
+    extract_java_calls,
+    extract_java_imports,
+    extract_java_symbols,
+    extract_rust_calls,
+    extract_rust_imports,
+    extract_rust_symbols,
+    get_go_language,
+    get_java_language,
+    get_rust_language,
+)
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Pydantic models (light-weight DTOs)
+# ---------------------------------------------------------------------------
 class Symbol(BaseModel):
     name: str
     symbol_type: str
     start_line: int
     end_line: int
+    parent: Optional[str] = None
+    language: Optional[str] = None
     docstring: Optional[str] = None
     signature: Optional[str] = None
-    
+
+
 class Import(BaseModel):
     module: str
-    names: List[str]
-    start_line: int
+    line: int
+    raw: Optional[str] = None
+    language: Optional[str] = None
 
-class CallGraph(BaseModel):
+
+class CallEdge(BaseModel):
     caller: str
     callee: str
     line: int
+    language: Optional[str] = None
 
+
+
+
+
+# ---------------------------------------------------------------------------
+# Language → extractor map
+# ---------------------------------------------------------------------------
+_LANG_ALIASES = {
+    "py": "python",
+    "python": "python",
+    "js": "javascript",
+    "jsx": "javascript",
+    "javascript": "javascript",
+    "ts": "typescript",
+    "tsx": "typescript",
+    "typescript": "typescript",
+    "cpp": "cpp",
+    "cxx": "cpp",
+    "cc": "cpp",
+    "hpp": "cpp",
+    "h": "cpp",
+    "c++": "cpp",
+    "java": "java",
+    "go": "go",
+    "rs": "rust",
+    "rust": "rust",
+}
+
+
+def _normalize_lang(language: Optional[str]) -> str:
+    if not language:
+        return "python"
+    return _LANG_ALIASES.get(language.strip().lower().lstrip("."), language.strip().lower().lstrip("."))
+
+
+# ---------------------------------------------------------------------------
+# Parser
+# ---------------------------------------------------------------------------
 class UnifiedASTParser:
-    """
-    Unified AST Parser using Tree-sitter.
-    Supports multiple languages.
-    """
-    def __init__(self):
-        self.parsers = {}
+    """Tree-sitter based unified AST parser."""
+
+    def __init__(self) -> None:
+        self.parsers: Dict[str, tree_sitter.Parser] = {}
         self._initialize_parsers()
 
-    def _initialize_parsers(self):
+    # --------------------------------------------------------- bootstrap
+    def _initialize_parsers(self) -> None:
         try:
-            import tree_sitter_python
-            import tree_sitter_javascript
-            import tree_sitter_typescript
-            import tree_sitter_cpp
-            
-            py_parser = tree_sitter.Parser(tree_sitter.Language(tree_sitter_python.language()))
-            self.parsers["python"] = py_parser
-            
-            js_parser = tree_sitter.Parser(tree_sitter.Language(tree_sitter_javascript.language()))
-            self.parsers["javascript"] = js_parser
-            
-            ts_parser = tree_sitter.Parser(tree_sitter.Language(tree_sitter_typescript.language_typescript()))
-            self.parsers["typescript"] = ts_parser
-            
-            cpp_parser = tree_sitter.Parser(tree_sitter.Language(tree_sitter_cpp.language()))
-            self.parsers["cpp"] = cpp_parser
-            
-            
-        except ImportError as e:
-            logger.warning(f"Failed to load some tree-sitter languages: {e}. Make sure they are installed.")
+            import tree_sitter_python  # type: ignore
+
+            self.parsers["python"] = tree_sitter.Parser(
+                tree_sitter.Language(tree_sitter_python.language())
+            )
+            logger.info("Loaded tree-sitter parser: python")
+        except Exception as exc:
+            logger.warning("Failed to load python parser: %s", exc)
+
+        try:
+            import tree_sitter_javascript  # type: ignore
+
+            self.parsers["javascript"] = tree_sitter.Parser(
+                tree_sitter.Language(tree_sitter_javascript.language())
+            )
+            logger.info("Loaded tree-sitter parser: javascript")
+        except Exception as exc:
+            logger.warning("Failed to load javascript parser: %s", exc)
+
+        try:
+            import tree_sitter_typescript  # type: ignore
+
+            self.parsers["typescript"] = tree_sitter.Parser(
+                tree_sitter.Language(tree_sitter_typescript.language_typescript())
+            )
+            logger.info("Loaded tree-sitter parser: typescript")
+        except Exception as exc:
+            logger.warning("Failed to load typescript parser: %s", exc)
+
+        try:
+            import tree_sitter_cpp  # type: ignore
+
+            self.parsers["cpp"] = tree_sitter.Parser(
+                tree_sitter.Language(tree_sitter_cpp.language())
+            )
+            logger.info("Loaded tree-sitter parser: cpp")
+        except Exception as exc:
+            logger.warning("Failed to load cpp parser: %s", exc)
+
+        # Java / Go / Rust come from sub-modules (optional)
+        for name, getter in (
+            ("java", get_java_language),
+            ("go", get_go_language),
+            ("rust", get_rust_language),
+        ):
+            try:
+                lang_obj = getter()
+                if lang_obj is None:
+                    continue
+                self.parsers[name] = tree_sitter.Parser(tree_sitter.Language(lang_obj))
+                logger.info("Loaded tree-sitter parser: %s", name)
+            except Exception as exc:
+                logger.warning("Failed to load %s parser: %s", name, exc)
+
+    # --------------------------------------------------------- introspection
+    def supported_languages(self) -> List[str]:
+        return sorted(self.parsers.keys())
 
     def get_parser(self, language: str) -> Optional[tree_sitter.Parser]:
-        # Map common extensions to languages if needed, but assuming language string is direct here
-        lang_map = {
-            "py": "python",
-            "python": "python",
-            "js": "javascript",
-            "javascript": "javascript",
-            "ts": "typescript",
-            "typescript": "typescript",
-            "cpp": "cpp",
-            "c++": "cpp"
-        }
-        mapped_lang = lang_map.get(language.lower(), language.lower())
-        return self.parsers.get(mapped_lang)
+        return self.parsers.get(_normalize_lang(language))
 
+    # --------------------------------------------------------- parse
     def parse(self, code: str, language: str) -> Optional[tree_sitter.Tree]:
-        """Parse code into an AST tree."""
         parser = self.get_parser(language)
-        if not parser:
-            logger.error(f"No parser available for language: {language}")
+        if parser is None:
+            logger.debug("No parser for language: %s", language)
             return None
-            
-        if isinstance(code, str):
-            code_bytes = code.encode('utf-8')
-        else:
-            code_bytes = code
-            
-        return parser.parse(code_bytes)
+        code_bytes = code.encode("utf-8") if isinstance(code, str) else code
+        try:
+            return parser.parse(code_bytes)
+        except Exception as exc:
+            logger.warning("Tree-sitter parse failed for %s: %s", language, exc)
+            return None
 
-    # Note: Full implementations for extract_symbols, extract_imports, etc. 
-    # would use tree-sitter Queries specific to each language.
-    # This is the foundational structure.
+    # --------------------------------------------------------- symbols
+    def extract_symbols(self, code: str, language: str) -> List[Dict[str, Any]]:
+        lang = _normalize_lang(language)
+        tree = self.parse(code, lang)
+        if tree is None:
+            return []
+        if lang == "java":
+            return extract_java_symbols(tree, code)
+        if lang == "go":
+            return extract_go_symbols(tree, code)
+        if lang == "rust":
+            return extract_rust_symbols(tree, code)
+        return _generic_extract_symbols(tree, code, lang)
+
+    # --------------------------------------------------------- imports
+    def extract_imports(self, code: str, language: str) -> List[Dict[str, Any]]:
+        lang = _normalize_lang(language)
+        tree = self.parse(code, lang)
+        if tree is None:
+            return []
+        if lang == "java":
+            return extract_java_imports(tree, code)
+        if lang == "go":
+            return extract_go_imports(tree, code)
+        if lang == "rust":
+            return extract_rust_imports(tree, code)
+        return _generic_extract_imports(tree, code, lang)
+
+    # --------------------------------------------------------- calls
+    def extract_calls(self, code: str, language: str) -> List[Tuple[str, str, int]]:
+        lang = _normalize_lang(language)
+        tree = self.parse(code, lang)
+        if tree is None:
+            return []
+        if lang == "java":
+            return extract_java_calls(tree, code)
+        if lang == "go":
+            return extract_go_calls(tree, code)
+        if lang == "rust":
+            return extract_rust_calls(tree, code)
+        return _generic_extract_calls(tree, code, lang)
+
+
+# ---------------------------------------------------------------------------
+# Generic extractors for python / js / ts / cpp
+# ---------------------------------------------------------------------------
+_GENERIC_FUNC_TYPES = {
+    "function_definition",
+    "function_declaration",
+    "method_definition",
+    "method_declaration",
+    "arrow_function",
+    "function",
+    "function_expression",
+    "generator_function_declaration",
+}
+_GENERIC_CLASS_TYPES = {
+    "class_definition",
+    "class_declaration",
+    "interface_declaration",
+    "enum_declaration",
+    "class_specifier",      # C++
+    "struct_specifier",     # C++
+    "namespace_definition", # C++ namespace
+    "type_alias_declaration",  # TS / Java
+}
+
+
+def _node_text(source_bytes: bytes, node: Any) -> str:
+    try:
+        return source_bytes[node.start_byte : node.end_byte].decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+
+def _find_first_identifier(node: Any) -> Optional[Any]:
+    """Locate the symbol's name node.
+
+    For most languages the name sits as a direct child of the
+    function/class definition, but C++ wraps function names in
+    ``function_declarator`` (and sometimes inside ``pointer_declarator`` /
+    ``reference_declarator``).  We look one level deeper for those cases.
+    """
+    # Pass 1 — direct children
+    for child in node.children:
+        if child.type in (
+            "identifier",
+            "type_identifier",
+            "property_identifier",
+            "field_identifier",
+        ):
+            return child
+    # Pass 2 — descend into common C++ declarator wrappers
+    for child in node.children:
+        if child.type in (
+            "function_declarator",
+            "pointer_declarator",
+            "reference_declarator",
+            "init_declarator",
+        ):
+            inner = _find_first_identifier(child)
+            if inner is not None:
+                return inner
+    return None
+
+
+def _generic_extract_symbols(tree: Any, source: str, language: str) -> List[Dict[str, Any]]:
+    src_bytes = source.encode("utf-8") if isinstance(source, str) else source
+    symbols: List[Dict[str, Any]] = []
+
+    def walk(node: Any, parent: Optional[str] = None) -> None:
+        ntype = node.type
+        if ntype in _GENERIC_CLASS_TYPES:
+            name_node = _find_first_identifier(node)
+            name = _node_text(src_bytes, name_node) if name_node else "<anonymous>"
+            symbols.append(
+                {
+                    "name": name,
+                    "type": "class" if "class" in ntype else ntype.replace("_declaration", "").replace("_definition", ""),
+                    "line_start": node.start_point[0] + 1,
+                    "line_end": node.end_point[0] + 1,
+                    "parent": parent,
+                    "language": language,
+                }
+            )
+            for child in node.children:
+                walk(child, name)
+            return
+        if ntype in _GENERIC_FUNC_TYPES:
+            name_node = _find_first_identifier(node)
+            name = _node_text(src_bytes, name_node) if name_node else "<anonymous>"
+            symbols.append(
+                {
+                    "name": name,
+                    "type": "method" if parent else "function",
+                    "line_start": node.start_point[0] + 1,
+                    "line_end": node.end_point[0] + 1,
+                    "parent": parent,
+                    "language": language,
+                }
+            )
+            return
+        for child in node.children:
+            walk(child, parent)
+
+    walk(tree.root_node)
+    return symbols
+
+
+def _generic_extract_imports(tree: Any, source: str, language: str) -> List[Dict[str, Any]]:
+    src_bytes = source.encode("utf-8") if isinstance(source, str) else source
+    imports: List[Dict[str, Any]] = []
+    IMPORT_TYPES = {
+        "import_statement",
+        "import_from_statement",
+        "import_declaration",
+        "preproc_include",  # C/C++ #include
+    }
+
+    def walk(node: Any) -> None:
+        if node.type in IMPORT_TYPES:
+            text = _node_text(src_bytes, node).strip()
+            imports.append(
+                {
+                    "module": text,
+                    "raw": text,
+                    "line": node.start_point[0] + 1,
+                    "language": language,
+                }
+            )
+            return
+        for child in node.children:
+            walk(child)
+
+    walk(tree.root_node)
+    return imports
+
+
+def _generic_extract_calls(tree: Any, source: str, language: str) -> List[Tuple[str, str, int]]:
+    src_bytes = source.encode("utf-8") if isinstance(source, str) else source
+    edges: List[Tuple[str, str, int]] = []
+    CALL_TYPES = {"call", "call_expression"}
+
+    def func_name(node: Any) -> str:
+        name_node = _find_first_identifier(node)
+        return _node_text(src_bytes, name_node) if name_node else "anonymous"
+
+    def walk(node: Any, current: Optional[str]) -> None:
+        new_current = current
+        if node.type in _GENERIC_FUNC_TYPES:
+            new_current = func_name(node)
+        if node.type in CALL_TYPES and new_current is not None:
+            fn_node = node.children[0] if node.children else None
+            if fn_node is not None:
+                callee = _node_text(src_bytes, fn_node)
+                # Cleanup a.b.c() -> c
+                clean = callee.split(".")[-1].strip()
+                if clean:
+                    edges.append((new_current, clean, node.start_point[0] + 1))
+        for child in node.children:
+            walk(child, new_current)
+
+    walk(tree.root_node, None)
+    return edges
+
+
+__all__ = [
+    "UnifiedASTParser",
+    "Symbol",
+    "Import",
+    "CallEdge",
+]

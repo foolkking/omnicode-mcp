@@ -5,7 +5,7 @@ Git operations and session management endpoints
 Handles git commands, branch operations, and AI session management
 """
 
-from typing import Optional
+from typing import List, Optional
 from pathlib import Path
 from datetime import datetime
 from fastapi import APIRouter, Query, HTTPException
@@ -22,6 +22,32 @@ from utils import (
 
 router1 = APIRouter(prefix="/git", tags=["git"])
 router2=APIRouter(prefix="/session",tags=["session"])
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+async def _resolve_trunk_branch(git_manager) -> Optional[str]:
+    """Find the local 'trunk' branch.
+
+    Probe order: ``main`` → ``master`` → ``trunk`` → ``develop`` → first
+    other branch.  Returns ``None`` if the repo has no branches at all.
+    """
+    try:
+        branches_res = await git_manager.get_branches()
+    except Exception:
+        return None
+    if not branches_res.success:
+        return None
+    names: List[str] = []
+    for b in (branches_res.data or {}).get("branches", []) or []:
+        n = b.get("name", "") if isinstance(b, dict) else str(b)
+        if n:
+            names.append(n)
+    for preferred in ("main", "master", "trunk", "develop"):
+        if preferred in names:
+            return preferred
+    return names[0] if names else None
 
 @router1.post("")
 async def git_operations(request: GitOperationRequest):
@@ -141,7 +167,71 @@ async def git_operations(request: GitOperationRequest):
                         settings.WORKING_DIR,
                     )
 
-                result = await git_manager.get_file_blame(request.file_path)
+                import os
+                from omnicode.git_context.blame import GitBlameAnalyzer
+
+                # Determine line range
+                start_line = request.start_line or 1
+                end_line = request.end_line
+
+                if not end_line:
+                    full_file_path = os.path.abspath(os.path.join(settings.WORKING_DIR, request.file_path))
+                    try:
+                        with open(full_file_path, "r", encoding="utf-8", errors="ignore") as f:
+                            end_line = sum(1 for _ in f)
+                    except Exception:
+                        end_line = start_line + 100
+
+                # Instantiate GitBlameAnalyzer
+                analyzer = GitBlameAnalyzer(settings.WORKING_DIR)
+                blame_lines = analyzer.get_blame(request.file_path, start_line, end_line)
+                change_context = analyzer.get_change_context(request.file_path, (start_line, end_line))
+
+                # Build response data structure
+                data = {
+                    "blame_lines": [bl.dict() for bl in blame_lines],
+                    "change_context": change_context.dict() if change_context else None,
+                    "start_line": start_line,
+                    "end_line": end_line
+                }
+
+                class MockGitResult:
+                    success = True
+                    output = f"Git blame analyzed for {request.file_path} from lines {start_line} to {end_line}"
+                    data = data
+                    return_code = 0
+                    error = None
+
+                result = MockGitResult()
+            elif operation == "history":
+                # STAGE 5.4 — full history risk analysis
+                if not request.file_path:
+                    return create_detailed_error_response(
+                        "File path required for history operation",
+                        400,
+                        "MissingParameter",
+                        {"required_field": "file_path"},
+                        "GitManager",
+                        "history",
+                        settings.WORKING_DIR,
+                    )
+
+                from omnicode.git_context.history import GitHistoryAnalyzer
+
+                analyzer = GitHistoryAnalyzer(settings.WORKING_DIR)
+                report = analyzer.analyze_file(request.file_path)
+
+                class MockHistoryResult:
+                    success = True
+                    output = (
+                        f"History analyzed for {request.file_path}: "
+                        f"risk_score={report.risk_score:.2f} ({report.risk_level})"
+                    )
+                    data = {"history_report": report.dict()}
+                    return_code = 0
+                    error = None
+
+                result = MockHistoryResult()
             else:
                 return create_detailed_error_response(
                     f"Unsupported git operation: {operation}",
@@ -157,6 +247,7 @@ async def git_operations(request: GitOperationRequest):
                             "add",
                             "commit",
                             "blame",
+                            "history",
                         ],
                     },
                     "GitManager",
@@ -261,6 +352,29 @@ async def git_log(
             operation="log", max_results=max_commits, file_path=file_path
         )
     )
+
+
+@router1.get("/history")
+async def git_history(
+    file_path: str = Query(..., description="File path for history analysis"),
+    max_commits: int = Query(200, description="Maximum commits to scan"),
+):
+    """STAGE 5.4 — Risk-aware history analysis for a file.
+
+    Returns defensive-patch detection, co-changed files, and a 0–1 risk score
+    so the caller can decide how cautiously to refactor.
+    """
+    try:
+        from omnicode.git_context.history import GitHistoryAnalyzer
+
+        settings = get_settings()
+        analyzer = GitHistoryAnalyzer(
+            settings.WORKING_DIR, max_commits_scanned=max_commits
+        )
+        report = analyzer.analyze_file(file_path)
+        return create_success_response(report.dict())
+    except Exception as e:
+        return create_error_response(f"History analysis failed: {e}", 500)
 
 
 @router1.post("/tree")
@@ -386,19 +500,59 @@ async def session_operations(request: SessionRequest):
                 timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
                 request.session_name = f"ai-session-{timestamp}"
 
+            # Idempotent: if the branch already exists, just switch to it.
+            # If we're already on it, return success.  Avoids the "fatal: a
+            # branch named 'X' already exists" trap when the user clicks
+            # Start twice or comes back to a previous session.
+            current_branch_res = await git_manager.get_current_branch()
+            if current_branch_res.success:
+                current = (current_branch_res.data or {}).get("current_branch", "")
+                if current == request.session_name:
+                    return create_success_response({
+                        "operation": "start",
+                        "session_name": request.session_name,
+                        "message": f"Already on session '{request.session_name}'.",
+                        "output": "",
+                        "reused": True,
+                    })
+
+            branches_res = await git_manager.get_branches()
+            existing_names: List[str] = []
+            if branches_res.success:
+                for b in (branches_res.data or {}).get("branches", []):
+                    n = b.get("name", "") if isinstance(b, dict) else str(b)
+                    if n:
+                        existing_names.append(n)
+
+            if request.session_name in existing_names:
+                # Already exists -> just check it out instead of failing
+                checkout_res = await git_manager.checkout_branch(request.session_name)
+                if checkout_res.success:
+                    return create_success_response({
+                        "operation": "start",
+                        "session_name": request.session_name,
+                        "message": f"Resumed existing session: {request.session_name}",
+                        "output": checkout_res.output,
+                        "reused": True,
+                    })
+                return create_error_response(
+                    f"Branch '{request.session_name}' exists but checkout failed: "
+                    f"{checkout_res.error}",
+                    400,
+                )
+
             result = await git_manager.create_branch(
                 request.session_name, switch_to=True
             )
 
             if result.success:
-                return create_success_response(
-                    {
-                        "operation": "start",
-                        "session_name": request.session_name,
-                        "message": f"Started new session: {request.session_name}",
-                        "output": result.output,
-                    }
-                )
+                return create_success_response({
+                    "operation": "start",
+                    "session_name": request.session_name,
+                    "message": f"Started new session: {request.session_name}",
+                    "output": result.output,
+                    "reused": False,
+                })
             else:
                 return create_error_response(
                     f"Failed to start session: {result.error}", 400
@@ -411,17 +565,27 @@ async def session_operations(request: SessionRequest):
 
             current_branch = current_branch_result.data.get("current_branch")
 
-            # Switch back to master
-            checkout_result = await git_manager.checkout_branch("master")
+            # Pick the right trunk dynamically: prefer 'main', then 'master',
+            # then 'trunk'/'develop'.  Hard-coding 'master' was wrong on
+            # any repo following the modern default.
+            trunk = await _resolve_trunk_branch(git_manager) or "master"
+
+            if current_branch == trunk:
+                return create_error_response(
+                    f"Already on trunk branch '{trunk}'. Nothing to end.", 400
+                )
+
+            checkout_result = await git_manager.checkout_branch(trunk)
             if not checkout_result.success:
                 return create_error_response(
-                    f"Failed to switch to master: {checkout_result.error}", 400
+                    f"Failed to switch to {trunk}: {checkout_result.error}", 400
                 )
 
             response_data = {
                 "operation": "end",
                 "session_name": current_branch,
-                "message": f"Ended session: {current_branch}, switched to master",
+                "trunk_branch": trunk,
+                "message": f"Ended session: {current_branch}, switched to {trunk}",
             }
 
             # Auto-merge if requested
@@ -430,7 +594,7 @@ async def session_operations(request: SessionRequest):
                 merge_result = await git_manager.merge_branch(current_branch, merge_msg)
                 if merge_result.success:
                     response_data["merged"] = True
-                    response_data["message"] += ", merged to master"
+                    response_data["message"] += f", merged to {trunk}"
                 else:
                     response_data["merge_error"] = merge_result.error
 
@@ -507,9 +671,10 @@ async def session_operations(request: SessionRequest):
 
             result = await git_manager.get_current_branch()
             if result.data.get("current_branch") == request.session_name:
-                switch_result = await git_manager.checkout_branch("master")
+                trunk = await _resolve_trunk_branch(git_manager) or "master"
+                switch_result = await git_manager.checkout_branch(trunk)
                 print(
-                    f"Switched to master branch to delete the session. Result: {switch_result.output}"
+                    f"Switched to {trunk} to delete the session. Result: {switch_result.output}"
                 )
 
             result = await git_manager.delete_branch(request.session_name, force=True)
@@ -556,15 +721,24 @@ async def get_current_session():
         result = await git_manager.get_current_branch()
 
         if result.success:
-            current_branch = result.data.get("current_branch")
-            is_session = current_branch.startswith(
-                "ai-session-"
-            ) or current_branch.startswith("session-")
+            current_branch = result.data.get("current_branch") or ""
+            # A session is anything that isn't one of the conventional
+            # "trunk" branches.  Restricting to ai-session-* / session-*
+            # caused user-named branches like '你好' to silently show as
+            # "inactive" even though they were checked out.
+            trunk_branches = {"master", "main", "trunk", "develop"}
+            is_session = bool(current_branch) and current_branch not in trunk_branches
+            # We still flag conventional names so the UI can offer them in
+            # the session-list dropdown.
+            is_conventional = current_branch.startswith(
+                ("ai-session-", "session-")
+            )
 
             return create_success_response(
                 {
                     "current_branch": current_branch,
                     "is_session_branch": is_session,
+                    "is_conventional_session": is_conventional,
                     "session_name": current_branch if is_session else None,
                 }
             )
@@ -637,3 +811,48 @@ async def auto_commit_change(
 
     except Exception as e:
         return create_error_response(f"Auto-commit failed: {str(e)}", 500)
+
+
+
+# ----------------------------------------------------------------------------
+# STAGE 5.5 — Issue / PR linker
+# ----------------------------------------------------------------------------
+@router1.get("/issues")
+async def git_issues(
+    file_path: Optional[str] = Query(
+        None,
+        description="Optional file path. If supplied, only commits touching this file are scanned.",
+    ),
+    max_commits: int = Query(50, description="How many recent commits to scan"),
+    enrich: bool = Query(
+        True,
+        description="If a GITHUB_TOKEN is set and the remote is GitHub, fetch issue metadata.",
+    ),
+):
+    """Extract Issue / PR references from recent commit messages.
+
+    Returns a list of structured references (one per unique issue) with:
+    `kind`, `identifier`, `closing` (whether the commit verb implies the issue
+    will close), `source_commit` (the commit that mentioned it), and — when
+    available — `state`, `title`, `author`, `labels`, `url` from GitHub.
+    """
+    try:
+        from omnicode.git_context.issue_linker import IssueLinker
+
+        settings = get_settings()
+        linker = IssueLinker(
+            settings.WORKING_DIR,
+            enable_network=enrich,
+            max_commits=max_commits,
+        )
+        refs = linker.extract_from_repo(file_path=file_path, enrich=enrich)
+        return create_success_response(
+            {
+                "references": [r.to_dict() for r in refs],
+                "count": len(refs),
+                "scanned_commits": max_commits,
+                "github_enriched": bool(linker.github_token and linker.enable_network),
+            }
+        )
+    except Exception as e:
+        return create_error_response(f"Issue extraction failed: {e}", 500)

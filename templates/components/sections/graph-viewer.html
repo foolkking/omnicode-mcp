@@ -1,0 +1,331 @@
+<!--
+  Code Graph Viewer (STAGE 9.8)
+  ----------------------------------------------------------------------------
+  Interactive D3 force-directed visualisation of two graphs:
+
+    * Call graph      — symbol-to-symbol calls       (/search/symbols/graph)
+    * Inheritance     — subclass-to-base hierarchy   (/search/inheritance)
+
+  Loads D3 lazily from a CDN so the rest of the dashboard stays light.
+  Re-renders automatically on `themechange` events.
+-->
+<div class="space-y-6">
+
+    <!-- Page header -->
+    <div class="bg-gradient-to-r from-indigo-500 to-purple-600 rounded-lg shadow-lg p-6 text-white">
+        <div class="flex items-center justify-between flex-wrap gap-3">
+            <div>
+                <h2 class="text-2xl font-bold flex items-center">
+                    <i class="fas fa-project-diagram mr-3"></i>
+                    Code Graph Viewer
+                </h2>
+                <p class="text-indigo-100 mt-1">Interactive D3 visualisation of call &amp; inheritance graphs</p>
+            </div>
+            <div class="flex items-center space-x-2 flex-wrap gap-2">
+                <select id="graphMode" class="text-gray-900 bg-white px-3 py-1.5 rounded-md text-sm font-semibold">
+                    <option value="callgraph">Call graph</option>
+                    <option value="inheritance">Inheritance</option>
+                </select>
+                <button onclick="loadGraphView()"
+                        class="bg-white bg-opacity-20 hover:bg-opacity-30 px-4 py-1.5 rounded-md text-sm">
+                    <i class="fas fa-sync-alt mr-1"></i> Reload
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toolbar -->
+    <div class="bg-white shadow rounded-lg p-4 flex flex-wrap items-center gap-3 text-sm">
+        <label class="flex items-center space-x-2">
+            <span class="text-gray-700">Scope:</span>
+            <input id="graphScope" type="text" placeholder="(whole project)"
+                   class="border border-gray-300 rounded px-2 py-1 w-72 font-mono text-xs">
+        </label>
+        <label class="flex items-center space-x-2">
+            <span class="text-gray-700">Max files:</span>
+            <input id="graphMaxFiles" type="number" value="200" min="1" max="2000"
+                   class="border border-gray-300 rounded px-2 py-1 w-20 text-xs">
+        </label>
+        <label class="flex items-center space-x-2">
+            <span class="text-gray-700">Max nodes:</span>
+            <input id="graphMaxNodes" type="number" value="80" min="10" max="500"
+                   class="border border-gray-300 rounded px-2 py-1 w-20 text-xs"
+                   title="Hard cap on rendered nodes; the largest hubs are kept first.">
+        </label>
+        <label class="flex items-center space-x-2">
+            <span class="text-gray-700">Search:</span>
+            <input id="graphSearch" type="text" placeholder="symbol name..."
+                   class="border border-gray-300 rounded px-2 py-1 w-48 text-xs">
+        </label>
+        <div class="flex items-center space-x-2 ml-auto">
+            <span id="graphStats" class="text-xs text-gray-500"></span>
+            <button onclick="graphResetZoom()" class="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 rounded text-xs">
+                <i class="fas fa-search-minus mr-1"></i> Fit
+            </button>
+        </div>
+    </div>
+
+    <!-- Graph canvas -->
+    <div class="bg-white shadow rounded-lg p-2 relative" style="height: 640px;">
+        <div id="graphViewer" class="w-full h-full relative overflow-hidden">
+            <div id="graphPlaceholder"
+                 class="absolute inset-0 flex items-center justify-center text-gray-400 text-sm">
+                Click "Reload" to render the graph...
+            </div>
+        </div>
+    </div>
+
+    <!-- Legend -->
+    <div class="text-xs text-gray-500 flex items-center space-x-4 flex-wrap gap-y-1">
+        <span><span class="inline-block w-3 h-3 rounded-full bg-indigo-500 mr-1 align-middle"></span> node (callee)</span>
+        <span><span class="inline-block w-3 h-3 rounded-full bg-pink-500 mr-1 align-middle"></span> hub (≥5 edges)</span>
+        <span><span class="inline-block w-6 h-0.5 bg-slate-400 align-middle mr-1"></span> edge</span>
+        <span>Drag nodes · scroll to zoom · click for details</span>
+    </div>
+</div>
+
+<script>
+(function () {
+    'use strict';
+
+    var STATE = window.__graphState = window.__graphState || {
+        simulation: null, zoom: null, svg: null, nodes: null, links: null,
+    };
+
+    function _err(m) {
+        if (window.notifications) window.notifications.error(m);
+        else console.error(m);
+    }
+    function _showLoad(m) { if (window.showLoading) window.showLoading(m); }
+    function _hideLoad() { if (window.hideLoading) window.hideLoading(); }
+
+    function ensureD3(callback) {
+        if (window.d3 && window.d3.forceSimulation) { callback(); return; }
+        var s = document.createElement('script');
+        s.src = 'https://cdn.jsdelivr.net/npm/d3@7.8.5/dist/d3.min.js';
+        s.onload = function () { callback(); };
+        s.onerror = function () {
+            _err('Failed to load D3.js from CDN. Check your network.');
+        };
+        document.head.appendChild(s);
+    }
+
+    async function loadGraphView() {
+        var mode = document.getElementById('graphMode').value;
+        var scope = document.getElementById('graphScope').value.trim();
+        var maxFiles = parseInt(document.getElementById('graphMaxFiles').value, 10) || 200;
+        var maxNodes = parseInt(document.getElementById('graphMaxNodes').value, 10) || 80;
+
+        var url = (mode === 'inheritance') ? '/search/inheritance' : '/search/symbols/graph';
+        var params = { max_files: maxFiles };
+        if (scope) params.path = scope;
+
+        _showLoad('Loading ' + mode + ' graph...');
+        try {
+            var qs = Object.entries(params)
+                .map(function (kv) { return encodeURIComponent(kv[0]) + '=' + encodeURIComponent(kv[1]); })
+                .join('&');
+            var resp = await fetch(url + '?' + qs);
+            var body = await resp.json();
+            if (!resp.ok || (body && body.success === false)) {
+                _err('Graph fetch failed: ' + ((body && body.error) || resp.statusText));
+                return;
+            }
+            var data = (body && body.result) || body || {};
+            var rawEdges = data.edges || [];
+            var edges = rawEdges.map(function (e) {
+                return mode === 'inheritance'
+                    ? { source: e.subclass, target: e.base, kind: e.kind, file: e.file_path, line: e.line }
+                    : { source: e.caller,  target: e.callee, line: e.line, file: e.file_path };
+            });
+
+            // Cap nodes by retaining the highest-degree symbols first.  This
+            // prevents the random-and-overlapping mess seen on big repos.
+            var degree = {};
+            edges.forEach(function (e) {
+                degree[e.source] = (degree[e.source] || 0) + 1;
+                degree[e.target] = (degree[e.target] || 0) + 1;
+            });
+            var allNodes = Object.keys(degree);
+            allNodes.sort(function (a, b) { return degree[b] - degree[a]; });
+            var keep = new Set(allNodes.slice(0, maxNodes));
+            edges = edges.filter(function (e) { return keep.has(e.source) && keep.has(e.target); });
+
+            ensureD3(function () { renderGraph(edges, mode, data, maxNodes); });
+        } catch (e) {
+            _err('Graph load failed: ' + (e.message || e));
+        } finally {
+            _hideLoad();
+        }
+    }
+
+    function renderGraph(edges, mode, summary, maxNodes) {
+        var viewer = document.getElementById('graphViewer');
+        viewer.innerHTML = '';
+
+        if (!edges.length) {
+            viewer.innerHTML = '<div class="absolute inset-0 flex items-center justify-center text-gray-400 text-sm">No edges in selected scope.</div>';
+            document.getElementById('graphStats').textContent = '';
+            return;
+        }
+
+        var nodeMap = new Map();
+        function getNode(name) {
+            if (!nodeMap.has(name)) nodeMap.set(name, { id: name, deg: 0 });
+            return nodeMap.get(name);
+        }
+        var links = edges.map(function (e) {
+            var s = getNode(e.source); var t = getNode(e.target);
+            s.deg++; t.deg++;
+            return Object.assign({}, e, { source: s.id, target: t.id });
+        });
+        var nodes = Array.from(nodeMap.values());
+
+        var w = viewer.clientWidth || 1200;
+        var h = viewer.clientHeight || 640;
+
+        var dark = document.documentElement.getAttribute('data-theme') === 'dark';
+        var edgeColor = dark ? '#475569' : '#94a3b8';
+        var labelColor = dark ? '#e2e8f0' : '#1e293b';
+
+        var svg = d3.select(viewer).append('svg')
+            .attr('viewBox', '0 0 ' + w + ' ' + h)
+            .attr('preserveAspectRatio', 'xMidYMid meet')
+            .style('background', 'transparent');
+
+        var defs = svg.append('defs');
+        defs.append('marker')
+            .attr('id', 'arrow').attr('viewBox', '0 -5 10 10')
+            .attr('refX', 16).attr('refY', 0)
+            .attr('markerWidth', 6).attr('markerHeight', 6)
+            .attr('orient', 'auto')
+            .append('path').attr('d', 'M 0,-5 L 10,0 L 0,5').attr('fill', edgeColor);
+
+        var g = svg.append('g');
+
+        var link = g.append('g').attr('class', 'cg-links')
+            .selectAll('line').data(links).enter().append('line')
+            .attr('stroke', edgeColor).attr('stroke-width', 1.2)
+            .attr('marker-end', 'url(#arrow)')
+            .attr('opacity', 0.7);
+
+        var node = g.append('g').attr('class', 'cg-nodes')
+            .selectAll('g').data(nodes).enter().append('g')
+            .attr('class', 'cg-node')
+            .style('cursor', 'grab')
+            .call(d3.drag().on('start', dragStart).on('drag', dragged).on('end', dragEnd));
+
+        node.append('circle')
+            .attr('r', function (d) { return Math.max(5, Math.min(18, 5 + Math.sqrt(d.deg) * 1.4)); })
+            .attr('fill', function (d) { return d.deg >= 5 ? '#ec4899' : colourFor(d.id); })
+            .attr('stroke', dark ? '#0f172a' : '#fff').attr('stroke-width', 1.5);
+
+        node.append('text')
+            .attr('dx', function (d) { return Math.max(6, 4 + Math.sqrt(d.deg)); })
+            .attr('dy', '.35em')
+            .attr('font-size', '11px')
+            .attr('fill', labelColor)
+            .style('pointer-events', 'none')
+            .text(function (d) { return d.id.length > 28 ? d.id.slice(0, 26) + '…' : d.id; });
+
+        node.on('click', function (_event, d) {
+            var msg = d.id + ' (degree=' + d.deg + ')';
+            if (window.notifications) window.notifications.info(msg);
+        });
+        node.append('title').text(function (d) {
+            return d.id + '\nconnections: ' + d.deg;
+        });
+
+        var simulation = d3.forceSimulation(nodes)
+            .force('link', d3.forceLink(links).id(function (d) { return d.id; })
+                .distance(function (l) { return Math.max(50, 110 - Math.min(40, l.source.deg)); })
+                .strength(0.6))
+            .force('charge', d3.forceManyBody()
+                .strength(function (d) { return -180 - Math.min(280, d.deg * 28); })
+                .distanceMax(500))
+            .force('center', d3.forceCenter(w / 2, h / 2))
+            .force('collide', d3.forceCollide().radius(function (d) {
+                return 18 + Math.sqrt(d.deg) * 4;
+            }))
+            .force('x', d3.forceX(w / 2).strength(0.04))
+            .force('y', d3.forceY(h / 2).strength(0.04))
+            .alpha(1).alphaDecay(0.03)
+            .on('tick', ticked);
+
+        function ticked() {
+            link
+                .attr('x1', function (d) { return d.source.x; })
+                .attr('y1', function (d) { return d.source.y; })
+                .attr('x2', function (d) { return d.target.x; })
+                .attr('y2', function (d) { return d.target.y; });
+            node.attr('transform', function (d) { return 'translate(' + d.x + ',' + d.y + ')'; });
+        }
+        function dragStart(event, d) {
+            if (!event.active) simulation.alphaTarget(0.3).restart();
+            d.fx = d.x; d.fy = d.y;
+        }
+        function dragged(event, d) { d.fx = event.x; d.fy = event.y; }
+        function dragEnd(event, d) {
+            if (!event.active) simulation.alphaTarget(0);
+            d.fx = null; d.fy = null;
+        }
+
+        var zoom = d3.zoom().scaleExtent([0.2, 4])
+            .on('zoom', function (event) { g.attr('transform', event.transform); });
+        svg.call(zoom);
+
+        STATE.simulation = simulation; STATE.zoom = zoom; STATE.svg = svg;
+        STATE.nodes = node; STATE.links = link;
+
+        var stats = (summary && summary.summary) || summary || {};
+        var totalEdges = stats.total_edges != null ? stats.total_edges : edges.length;
+        var rendered = nodes.length + ' / ' + (Object.keys(stats.out_index || {}).length || nodes.length);
+        document.getElementById('graphStats').textContent =
+            mode + ' · nodes: ' + nodes.length + ' · edges shown: ' + links.length +
+            ' · total edges: ' + totalEdges +
+            (rendered !== nodes.length ? ' · capped at ' + maxNodes : '');
+        wireSearchHighlight();
+    }
+
+    function colourFor(id) {
+        var h = 0;
+        for (var i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) % 360;
+        return 'hsl(' + h + ',55%,50%)';
+    }
+
+    function wireSearchHighlight() {
+        var input = document.getElementById('graphSearch');
+        if (!input || !STATE.nodes || !STATE.links) return;
+        input.oninput = function () {
+            var q = (input.value || '').toLowerCase().trim();
+            STATE.nodes.style('opacity', function (d) {
+                if (!q) return 1;
+                return d.id.toLowerCase().indexOf(q) >= 0 ? 1 : 0.15;
+            });
+            STATE.links.style('opacity', function (d) {
+                if (!q) return 0.7;
+                var s = (d.source && d.source.id) || d.source;
+                var t = (d.target && d.target.id) || d.target;
+                var hit = (s + '').toLowerCase().indexOf(q) >= 0 ||
+                          (t + '').toLowerCase().indexOf(q) >= 0;
+                return hit ? 0.9 : 0.05;
+            });
+        };
+    }
+
+    function graphResetZoom() {
+        if (!STATE.svg || !STATE.zoom) return;
+        STATE.svg.transition().duration(400).call(STATE.zoom.transform, d3.zoomIdentity);
+    }
+
+    document.addEventListener('themechange', function () {
+        if (STATE.svg) loadGraphView();
+    });
+
+    window.loadGraphView = loadGraphView;
+    window.graphResetZoom = graphResetZoom;
+
+    // Auto-render on first open
+    setTimeout(loadGraphView, 80);
+})();
+</script>

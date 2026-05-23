@@ -4,6 +4,24 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Codebase Manager - AI-Powered Development Dashboard</title>
+
+    <!-- Theme hydration: apply saved theme BEFORE any styles render to
+         prevent the FOUC (flash of unstyled content) when the user has
+         opted into dark mode. -->
+    <script>
+    (function () {
+        try {
+            var saved = localStorage.getItem('omnicode.theme') || 'system';
+            var dark = saved === 'dark' || (saved === 'system'
+                && window.matchMedia
+                && window.matchMedia('(prefers-color-scheme: dark)').matches);
+            if (dark) {
+                document.documentElement.setAttribute('data-theme', 'dark');
+                document.documentElement.classList.add('dark');
+            }
+        } catch (e) { /* ignore */ }
+    })();
+    </script>
     
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -121,6 +139,7 @@
     <!-- 3. Utilities -->
     <script src="/static/js/utils/format.js"></script>
     <script src="/static/js/utils/storage.js"></script>
+    <script src="/static/js/utils/theme.js"></script>
     
     <!-- 4. Components -->
     <script src="/static/js/components/loader.js"></script>

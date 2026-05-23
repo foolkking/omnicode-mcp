@@ -4,17 +4,17 @@ Handles intelligent write, AI-assisted edit, and read operations
 """
 
 from typing import Optional
-from fastapi import APIRouter, Query, HTTPException
 
-from core import get_write_pipeline, get_edit_pipeline, get_search_engine
+from fastapi import APIRouter, HTTPException, Query
+
+from core import get_edit_pipeline, get_search_engine, get_write_pipeline
 from core.config import get_settings
-from schemas.requests import WriteRequest, EditRequestAPI, FileRequest
 from omnicode.pipelines.edit import EditRequest
+from schemas.requests import EditRequestAPI, FileRequest, WriteRequest
 from utils import (
-
-    create_success_response,
-    create_error_response,
     create_detailed_error_response,
+    create_error_response,
+    create_success_response,
     validate_file_path,
 )
 
@@ -212,16 +212,10 @@ async def intelligent_write(request: WriteRequest):
                 "suggested_fixes": suggested_fixes,
                 "quality_threshold": 0.6,
             }
-
-            return create_detailed_error_response(
-                "Write operation failed quality checks",
-                422,
-                "WriteQualityFailure",
-                response_data,
-                "WritePipeline",
-                "quality_validation",
-                settings.WORKING_DIR,
-            )
+            response_data["success"] = False
+            # Pipeline ran successfully but quality bar wasn't met — return
+            # 200 with structured failure data so the UI renders diagnostics.
+            return create_success_response(response_data)
 
     except Exception as e:
         settings = get_settings()
@@ -367,7 +361,11 @@ async def intelligent_edit(request: EditRequestAPI):
         if result.success:
             return create_success_response(response_data)
         else:
-            # Edit failed - provide detailed analysis
+            # Edit pipeline ran but produced an unsatisfactory result.  This
+            # is NOT a request-validation failure (the request was fine) — it
+            # is a runtime outcome.  Return 200 + success_response carrying
+            # the full failure analysis so the UI can render diagnostics
+            # instead of a generic "API Error".
             failure_analysis = {
                 "failure_stage": "unknown",
                 "root_cause": "unknown",
@@ -375,45 +373,51 @@ async def intelligent_edit(request: EditRequestAPI):
             }
 
             if not result.gemini_edit_success:
-                failure_analysis["failure_stage"] = "gemini_edit"
-                failure_analysis["root_cause"] = "Gemini API call failed"
-                failure_analysis["suggested_fixes"].append(
-                    "Check Gemini API key and rate limits"
-                )
+                failure_analysis["failure_stage"] = "llm_edit"
+                # Most common cause: provider not configured / wrong key /
+                # wrong model name.  Surface the actual exception message
+                # collected by the pipeline.
+                if result.gemini_errors:
+                    raw = "; ".join(str(e).split("\n", 1)[0] for e in result.gemini_errors)[:300]
+                    failure_analysis["root_cause"] = f"LLM call failed: {raw}"
+                else:
+                    failure_analysis["root_cause"] = (
+                        "LLM call failed (no response). Check that the active "
+                        "provider for the 'edit' role is configured and reachable."
+                    )
+                failure_analysis["suggested_fixes"] = [
+                    "Verify the API key for the assigned provider on the Providers page",
+                    "Click the Test button next to a provider to ping it directly",
+                    "If you use a self-hosted gateway (e.g. http://127.0.0.1:2048/v1), "
+                    "make sure the api_base field is set on that provider — otherwise "
+                    "LiteLLM tries the public domain and gets 401 from your placeholder key",
+                ]
 
             elif not result.format_success:
-                failure_analysis["failure_stage"] = "formatting_validation"
-                failure_analysis["root_cause"] = "Code formatting or validation failed"
-                failure_analysis["suggested_fixes"].append(
-                    "Check for syntax errors in the edit"
+                failure_analysis["failure_stage"] = "guard_check"
+                failure_analysis["root_cause"] = (
+                    "Static analysis (Guard) reported ERROR-level issues even "
+                    "after the review-role escalation pass."
                 )
-                failure_analysis["suggested_fixes"].append(
-                    "Verify the edit follows proper code structure"
-                )
+                failure_analysis["suggested_fixes"] = [
+                    "Review the 'errors.format_errors' field for the specific tool reports",
+                    "Check for syntax errors in the edit",
+                    "Verify the edit follows proper code structure",
+                ]
 
             elif result.quality_score < 0.6:
                 failure_analysis["failure_stage"] = "quality_check"
                 failure_analysis["root_cause"] = (
                     f"Quality score too low: {result.quality_score:.2f}"
                 )
-                failure_analysis["suggested_fixes"].append(
-                    "Review edit instructions for clarity"
-                )
-                failure_analysis["suggested_fixes"].append(
-                    "Check if the target file has complex dependencies"
-                )
+                failure_analysis["suggested_fixes"] = [
+                    "Review edit instructions for clarity",
+                    "Check if the target file has complex dependencies",
+                ]
 
             response_data["failure_analysis"] = failure_analysis
-
-            return create_detailed_error_response(
-                "Edit operation failed quality checks",
-                422,
-                "EditQualityFailure",
-                response_data,
-                "EditPipeline",
-                "quality_validation",
-                settings.WORKING_DIR,
-            )
+            response_data["success"] = False
+            return create_success_response(response_data)
 
     except Exception as e:
         settings = get_settings()
@@ -456,13 +460,38 @@ async def read_code_content(
     occurrence: int = Query(
         1, description="Which occurrence of the symbol (default: 1)"
     ),
-    start_line: Optional[int] = Query(
+    start_line: Optional[str] = Query(
         None, description="Start line number (1-indexed)"
     ),
-    end_line: Optional[int] = Query(None, description="End line number (inclusive)"),
+    end_line: Optional[str] = Query(None, description="End line number (inclusive)"),
     with_line_numbers: bool = Query(True, description="Include line numbers in output"),
 ):
     """Read code content with enhanced error handling for line ranges"""
+    # Defensive coercion: some clients (URLSearchParams in older JS code,
+    # MCP wrappers) serialize Python None as the literal string "null" or
+    # "undefined".  Treat those as if the param were omitted and parse the
+    # remaining strings into ints.
+    if isinstance(symbol_name, str) and symbol_name.lower() in {"null", "undefined", ""}:
+        symbol_name = None
+
+    def _coerce_int(v: Optional[str], field: str):
+        if v is None:
+            return None, None
+        if isinstance(v, str) and v.lower() in {"null", "undefined", ""}:
+            return None, None
+        try:
+            return int(v), None
+        except (TypeError, ValueError):
+            return None, f"Invalid {field}: {v!r} (must be an integer)"
+
+    start_line_int, err1 = _coerce_int(start_line, "start_line")
+    if err1:
+        return create_error_response(err1, 400)
+    end_line_int, err2 = _coerce_int(end_line, "end_line")
+    if err2:
+        return create_error_response(err2, 400)
+    start_line = start_line_int  # type: ignore[assignment]
+    end_line = end_line_int      # type: ignore[assignment]
     try:
         search_engine = get_search_engine()
         settings = get_settings()

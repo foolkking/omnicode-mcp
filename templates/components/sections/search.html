@@ -435,9 +435,69 @@ async function viewCodeByIndex(idx) {
 }
 
 function showCodePreviewModal(filePath, content) {
-    // TODO: Create code preview modal
-    notifications.info(`Code preview: ${filePath}`);
-    console.log('Code content:', content);
+    var existing = document.getElementById('codePreviewModal');
+    if (existing) existing.remove();
+
+    var _esc = function (s) {
+        return String(s == null ? '' : s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    };
+
+    var modal = document.createElement('div');
+    modal.id = 'codePreviewModal';
+    modal.className = 'fixed inset-0 bg-black bg-opacity-60 z-[80] flex items-center justify-center p-4';
+    modal.innerHTML = '' +
+        '<div class="bg-white rounded-lg shadow-2xl max-w-5xl w-full max-h-[90vh] flex flex-col">' +
+        '  <div class="px-5 py-3 border-b border-gray-200 flex items-center justify-between">' +
+        '    <h3 class="text-base font-semibold text-gray-900 flex items-center">' +
+        '      <i class="fas fa-code text-indigo-500 mr-2"></i>' +
+        '      <code class="font-mono text-sm">' + _esc(filePath) + '</code>' +
+        '    </h3>' +
+        '    <div class="flex items-center space-x-2">' +
+        '      <button onclick="copyCodePreview()" class="text-gray-500 hover:text-gray-700 text-sm" title="Copy">' +
+        '        <i class="fas fa-copy"></i>' +
+        '      </button>' +
+        '      <button onclick="closeCodePreview()" class="text-gray-500 hover:text-gray-700">' +
+        '        <i class="fas fa-times"></i>' +
+        '      </button>' +
+        '    </div>' +
+        '  </div>' +
+        '  <div class="flex-1 overflow-auto bg-gray-900">' +
+        '    <pre id="codePreviewBody" class="text-xs font-mono text-gray-100 p-4 whitespace-pre">' +
+        _esc(content || '(empty)') +
+        '    </pre>' +
+        '  </div>' +
+        '</div>';
+    document.body.appendChild(modal);
+
+    // ESC closes
+    modal.addEventListener('click', function (ev) {
+        if (ev.target === modal) closeCodePreview();
+    });
+    document.addEventListener('keydown', _codePreviewKey);
+}
+
+function closeCodePreview() {
+    var m = document.getElementById('codePreviewModal');
+    if (m) m.remove();
+    document.removeEventListener('keydown', _codePreviewKey);
+}
+
+function _codePreviewKey(ev) {
+    if (ev.key === 'Escape') closeCodePreview();
+}
+
+function copyCodePreview() {
+    var body = document.getElementById('codePreviewBody');
+    if (!body) return;
+    var txt = body.textContent || '';
+    if (navigator.clipboard) {
+        navigator.clipboard.writeText(txt).then(function () {
+            if (window.notifications) notifications.success('Copied to clipboard');
+        }, function () {
+            if (window.notifications) notifications.error('Copy failed');
+        });
+    }
 }
 
 // Enter key to search

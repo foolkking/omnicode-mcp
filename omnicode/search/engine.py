@@ -1,16 +1,14 @@
-import os
 import json
 import logging
+import os
 import time
-from typing import List, Dict, Any, Optional
-import numpy as np
+from typing import Any, Dict, List, Optional
 
-from omnicode.ast_engine.parser import UnifiedASTParser
 from omnicode.ast_engine.chunker import ASTChunker
-from omnicode.search.vector_store import VectorStore
+from omnicode.ast_engine.parser import UnifiedASTParser
 from omnicode.search.hybrid_search import HybridSearchEngine
-from omnicode.search.directory_lister import DirectoryLister
 from omnicode.search.models import SearchRequest
+from omnicode.search.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +47,7 @@ class SqliteKeywordSearcher:
         cursor = self.vector_store.conn.cursor()
         cursor.execute("SELECT chunk_id, file_path, content, chunk_type, metadata FROM chunks WHERE content LIKE ?", (f"%{query}%",))
         rows = cursor.fetchall()
-        
+
         results = []
         for row in rows:
             meta = json.loads(row['metadata'])
@@ -85,21 +83,22 @@ class SemanticSearchEngine:
         self.working_dir = os.path.abspath(working_dir)
         self.db_dir = os.path.join(self.working_dir, ".data")
         os.makedirs(self.db_dir, exist_ok=True)
-        
+
         # Instantiate Omnicode modules
         self.ast_parser = UnifiedASTParser()
         self.chunker = ASTChunker(self.ast_parser)
         self.vector_store = VectorStore(os.path.join(self.db_dir, "vector_store.db"), dimension=384)
-        
+
         # Hybrid Search setup
         self.keyword_searcher = SqliteKeywordSearcher(self.vector_store)
         self.hybrid_engine = HybridSearchEngine(self.vector_store, self.keyword_searcher)
-        
+
         # Local embeddings generator model
         self.embedding_model = None
         self.stats = {
             "total_files": 0,
             "total_chunks": 0,
+            "total_symbols": 0,
             "last_indexed": "never",
             "index_size": 0
         }
@@ -126,7 +125,19 @@ class SemanticSearchEngine:
                 self.stats["total_chunks"] = row[1]
                 if row[1] > 0:
                     self.stats["last_indexed"] = time.strftime("%Y-%m-%d %H:%M:%S")
-            
+
+            # Symbols = chunks whose chunk_type is a code symbol
+            # (function / class / method / etc).  Excludes 'whole-file' or
+            # 'comment' chunks if any.
+            cursor.execute(
+                "SELECT COUNT(*) FROM chunks WHERE chunk_type IN "
+                "('function', 'class', 'method', 'function_definition', "
+                "'class_definition', 'method_definition', 'function_declaration')"
+            )
+            row = cursor.fetchone()
+            if row:
+                self.stats["total_symbols"] = row[0]
+
             db_file = os.path.join(self.db_dir, "vector_store.db")
             if os.path.exists(db_file):
                 self.stats["index_size"] = os.path.getsize(db_file)
@@ -161,7 +172,7 @@ class SemanticSearchEngine:
         for chunk in chunks:
             # Generate embedding
             emb = self.embedding_model.encode(chunk.content)
-            
+
             # Map chunk metadata
             metadata = {
                 "start_line": chunk.start_line,
@@ -187,11 +198,11 @@ class SemanticSearchEngine:
         """Scan working directory, parse all source files, and index them"""
         logger.info(f"Indexing codebase in {self.working_dir}...")
         valid_extensions = {".py", ".js", ".ts", ".jsx", ".tsx", ".cpp", ".h", ".cc", ".c"}
-        
+
         for root, dirs, files in os.walk(self.working_dir):
             # Skip hidden folders and caches
             dirs[:] = [d for d in dirs if not d.startswith(".") and d not in {"node_modules", "__pycache__", ".venv", "build", "dist"}]
-            
+
             for file in files:
                 ext = os.path.splitext(file)[1].lower()
                 if ext in valid_extensions:
@@ -218,7 +229,7 @@ class SemanticSearchEngine:
 
         language = os.path.splitext(file_path)[1].lstrip(".") or "python"
         tree = self.ast_parser.parse(content, language)
-        
+
         symbols = []
         if tree:
             root = tree.root_node
@@ -237,14 +248,148 @@ class SemanticSearchEngine:
             "count": len(symbols)
         }
 
+    async def read_symbol_content(
+        self,
+        file_path: str,
+        symbol_name: Optional[str] = None,
+        occurrence: int = 1,
+        start_line: Optional[int] = None,
+        end_line: Optional[int] = None,
+        with_line_numbers: bool = True,
+    ) -> dict:
+        """Read part of a file by line range or by symbol name.
+
+        Resolution order:
+          1. ``start_line`` + ``end_line``  -> exact line slice
+          2. ``symbol_name``                -> AST-based symbol lookup
+          3. nothing                        -> entire file
+
+        Returns a dict with ``success``/``error`` and (on success):
+            file_path, content, total_lines, [start_line, end_line, symbol_name]
+        """
+        full_path = os.path.abspath(os.path.join(self.working_dir, file_path))
+        if not os.path.exists(full_path):
+            return {"success": False, "error": f"File not found: {file_path}"}
+        if not os.path.isfile(full_path):
+            return {"success": False, "error": f"Not a regular file: {file_path}"}
+
+        try:
+            with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+        except Exception as exc:
+            return {"success": False, "error": f"Could not read file: {exc}"}
+
+        lines = content.splitlines()
+        total_lines = len(lines)
+
+        # Branch 1 — explicit line range
+        if start_line is not None and end_line is not None:
+            if start_line < 1:
+                return {"success": False, "error": f"start_line {start_line} < 1"}
+            if end_line > total_lines:
+                end_line = total_lines
+            if end_line < start_line:
+                return {
+                    "success": False,
+                    "error": f"end_line ({end_line}) < start_line ({start_line})",
+                }
+            slice_ = lines[start_line - 1 : end_line]
+            rendered = self._render_lines(slice_, start_line, with_line_numbers)
+            return {
+                "success": True,
+                "file_path": file_path,
+                "content": rendered,
+                "start_line": start_line,
+                "end_line": end_line,
+                "total_lines": total_lines,
+            }
+
+        # Branch 2 — symbol lookup via AST
+        if symbol_name:
+            language = self._guess_language(file_path)
+            try:
+                hits = self.ast_parser.extract_symbols(content, language)
+            except Exception as exc:
+                return {
+                    "success": False,
+                    "error": f"AST parse failed for {file_path} ({language}): {exc}",
+                }
+            matches = []
+            for s in (hits or []):
+                name = s.get("name") if isinstance(s, dict) else getattr(s, "name", None)
+                if name == symbol_name:
+                    matches.append(s)
+            if not matches:
+                return {
+                    "success": False,
+                    "error": f"Symbol '{symbol_name}' not found in {file_path}",
+                }
+            idx = max(0, min(occurrence - 1, len(matches) - 1))
+            sym = matches[idx]
+            if isinstance(sym, dict):
+                s_line = sym.get("line_start") or sym.get("start_line")
+                e_line = sym.get("line_end") or sym.get("end_line")
+            else:
+                s_line = getattr(sym, "line_start", None) or getattr(sym, "start_line", None)
+                e_line = getattr(sym, "line_end", None) or getattr(sym, "end_line", None)
+            if s_line is None or e_line is None:
+                return {
+                    "success": False,
+                    "error": f"Symbol '{symbol_name}' has no line range",
+                }
+            slice_ = lines[s_line - 1 : e_line]
+            rendered = self._render_lines(slice_, s_line, with_line_numbers)
+            return {
+                "success": True,
+                "file_path": file_path,
+                "content": rendered,
+                "symbol_name": symbol_name,
+                "occurrence": occurrence,
+                "start_line": s_line,
+                "end_line": e_line,
+                "total_lines": total_lines,
+                "matches_found": len(matches),
+            }
+
+        # Branch 3 — entire file
+        rendered = self._render_lines(lines, 1, with_line_numbers)
+        return {
+            "success": True,
+            "file_path": file_path,
+            "content": rendered,
+            "start_line": 1,
+            "end_line": total_lines,
+            "total_lines": total_lines,
+        }
+
+    @staticmethod
+    def _render_lines(chunk, first_line: int, with_line_numbers: bool) -> str:
+        if not with_line_numbers:
+            return "\n".join(chunk)
+        width = len(str(first_line + len(chunk) - 1))
+        return "\n".join(
+            f"{(first_line + i):>{width}} | {ln}" for i, ln in enumerate(chunk)
+        )
+
+    @staticmethod
+    def _guess_language(file_path: str) -> str:
+        ext = os.path.splitext(file_path)[1].lower()
+        return {
+            ".py": "python", ".js": "javascript", ".jsx": "javascript",
+            ".ts": "typescript", ".tsx": "typescript",
+            ".cpp": "cpp", ".cc": "cpp", ".c": "cpp",
+            ".h": "cpp", ".hpp": "cpp",
+            ".java": "java", ".go": "go", ".rs": "rust",
+        }.get(ext, "python")
+
     async def search(self, request: SearchRequest) -> List[LegacySearchResult]:
         """Execute hybrid RRF search or text search and map to legacy SearchResult model"""
         logger.info(f"Executing search: query='{request.query}', type='{request.search_type}'")
-        
+
         metadata_filter = None
         if request.file_pattern:
             metadata_filter = {"file_path": request.file_pattern} # simplistic glob filtering mapping
-            
+
         results = []
 
         if request.search_type == "text":
@@ -252,7 +397,7 @@ class SemanticSearchEngine:
             cursor = self.vector_store.conn.cursor()
             cursor.execute("SELECT file_path, content FROM chunks WHERE content LIKE ?", (f"%{request.query}%",))
             rows = cursor.fetchall()
-            
+
             for row in rows:
                 results.append(LegacySearchResult(
                     file_path=row["file_path"],
@@ -270,8 +415,8 @@ class SemanticSearchEngine:
             # Semantic / Hybrid search using RRF
             query_emb = self.embedding_model.encode(request.query)
             hybrid_results = await self.vector_store.search(
-                query_emb, 
-                top_k=request.max_results, 
+                query_emb,
+                top_k=request.max_results,
                 metadata_filter=metadata_filter
             )
 
@@ -289,3 +434,11 @@ class SemanticSearchEngine:
                 ))
 
         return results
+
+
+
+# ---------------------------------------------------------------------------
+# Backwards-compat alias.  Older callers import ``SearchEngine``; the public
+# class is now ``SemanticSearchEngine``.
+# ---------------------------------------------------------------------------
+SearchEngine = SemanticSearchEngine

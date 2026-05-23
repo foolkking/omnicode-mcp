@@ -3,21 +3,26 @@ Logging and monitoring endpoints
 Handles system logs, performance metrics, and monitoring
 """
 
-from typing import Optional, List
+import asyncio
+import logging
 from datetime import datetime
-from fastapi import APIRouter, Query
+from typing import List, Optional
+
+from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from core import (
-    get_search_engine,
-    get_memory_manager,
-    get_git_manager,
-    get_write_pipeline,
     get_edit_pipeline,
+    get_git_manager,
+    get_memory_manager,
+    get_search_engine,
+    get_write_pipeline,
 )
 from schemas.common import LogLevel, SystemLog
-from utils import create_success_response, create_error_response
+from utils import create_error_response, create_success_response
 
 router = APIRouter(prefix="/logs", tags=["logs"])
+
+logger = logging.getLogger(__name__)
 
 
 # Global log storage
@@ -118,8 +123,9 @@ async def clear_system_logs():
 async def get_performance_metrics():
     """Get system performance metrics"""
     try:
-        import psutil
         import time
+
+        import psutil
 
         # Basic system metrics
         cpu_percent = psutil.cpu_percent(interval=1)
@@ -161,6 +167,88 @@ async def get_performance_metrics():
         return create_error_response(
             f"Failed to get performance metrics: {str(e)}", 500
         )
+
+
+# ----------------------------------------------------------------------------
+# STAGE 9.9 — Real-time log stream over WebSocket
+# ----------------------------------------------------------------------------
+@router.websocket("/stream")
+async def websocket_log_stream(websocket: WebSocket):
+    """Push every log record to the client in real time as it's emitted.
+
+    Protocol:
+        * Server immediately sends a backlog frame:
+              {"type": "backfill", "records": [...]}
+        * Then, for every new record:
+              {"type": "log", "record": {...}}
+        * Server respects ``ping`` text frames; sends ``{"type":"pong"}``.
+        * On disconnect the subscriber is cleaned up automatically.
+    """
+    await websocket.accept()
+    from core.log_stream import get_broker, get_handler
+
+    handler = get_handler()
+    broker = get_broker()
+    if handler is None or broker is None:
+        await websocket.send_json({
+            "type": "error",
+            "message": "Log streaming not initialised on this server.",
+        })
+        await websocket.close()
+        return
+
+    sub = await broker.subscribe()
+    # 1) Backfill recent buffer so the UI feels alive immediately.
+    try:
+        recent = handler.recent(limit=80)
+        await websocket.send_json({"type": "backfill", "records": recent})
+    except Exception as exc:  # pragma: no cover
+        logger.debug("backfill send failed: %s", exc)
+
+    async def _receiver() -> None:
+        # Listen for the optional ping/close frames so we exit cleanly.
+        while True:
+            try:
+                msg = await websocket.receive_text()
+            except WebSocketDisconnect:
+                raise
+            except Exception:
+                raise
+            if msg == "ping":
+                try:
+                    await websocket.send_json({"type": "pong"})
+                except Exception:
+                    return
+
+    async def _sender() -> None:
+        while True:
+            payload = await sub.get()
+            try:
+                await websocket.send_json({"type": "log", "record": payload})
+            except WebSocketDisconnect:
+                return
+            except Exception:
+                return
+
+    sender_task = asyncio.create_task(_sender())
+    receiver_task = asyncio.create_task(_receiver())
+    try:
+        done, pending = await asyncio.wait(
+            {sender_task, receiver_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for t in pending:
+            t.cancel()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        sender_task.cancel()
+        receiver_task.cancel()
+        await broker.unsubscribe(sub)
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 # Export add_system_log for use by other routers

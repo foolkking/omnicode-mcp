@@ -21,6 +21,14 @@
                     <span class="hidden md:inline">History</span>
                     <span id="headerToolCallCount" class="bg-blue-500 text-white text-xs px-2 py-0.5 rounded-full">0</span>
                 </button>
+
+                <!-- Theme Toggle -->
+                <button onclick="window.theme && window.theme.toggle()" data-theme-toggle
+                        class="flex items-center bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-2 rounded-md text-sm font-medium transition-colors theme-toggle-btn"
+                        title="Click to switch theme (light → dark → system)">
+                    <i class="fas fa-sun mr-1.5"></i>
+                    <span data-theme-label>Light</span>
+                </button>
                 
                 <!-- Refresh Button -->
                 <button onclick="refreshAll()" class="flex items-center space-x-2 bg-blue-500 hover:bg-blue-600 text-white px-3 py-2 rounded-md text-sm font-medium transition-colors shadow-sm">

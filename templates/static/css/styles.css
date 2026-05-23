@@ -269,3 +269,157 @@
         box-shadow: none !important;
     }
 }
+
+
+/* ============================================================================
+ * Dark Mode (STAGE 9.7)
+ * ----------------------------------------------------------------------------
+ * Activated by `data-theme="dark"` on the <html> element (set by theme.js).
+ * Because Tailwind utility classes hard-code colours, we use specific
+ * selectors that override individual utility classes when dark is active.
+ * Variables let us share the palette across rules.
+ * ========================================================================= */
+
+:root {
+    --c-bg-page:    #f9fafb;   /* page background (Tailwind gray-50) */
+    --c-bg-card:    #ffffff;   /* card / panel surface */
+    --c-bg-soft:    #f3f4f6;   /* hover / muted surface (gray-100) */
+    --c-bg-softer:  #e5e7eb;   /* gray-200 */
+    --c-text:       #111827;   /* primary text (gray-900) */
+    --c-text-mid:   #374151;   /* gray-700 */
+    --c-text-dim:   #6b7280;   /* gray-500 */
+    --c-border:     #e5e7eb;   /* gray-200 */
+    --c-input-bg:   #ffffff;
+    --c-input-bd:   #d1d5db;   /* gray-300 */
+    --c-code-bg:    #f3f4f6;
+    --c-code-text:  #111827;
+}
+
+[data-theme="dark"] {
+    --c-bg-page:    #0f172a;   /* slate-900 */
+    --c-bg-card:    #1e293b;   /* slate-800 */
+    --c-bg-soft:    #334155;   /* slate-700 */
+    --c-bg-softer:  #475569;   /* slate-600 */
+    --c-text:       #f1f5f9;   /* slate-100 */
+    --c-text-mid:   #cbd5e1;   /* slate-300 */
+    --c-text-dim:   #94a3b8;   /* slate-400 */
+    --c-border:     #334155;
+    --c-input-bg:   #0f172a;
+    --c-input-bd:   #475569;
+    --c-code-bg:    #0b1220;
+    --c-code-text:  #e2e8f0;
+}
+
+/* Body + page surfaces */
+[data-theme="dark"] body,
+[data-theme="dark"] .bg-gray-50,
+[data-theme="dark"] .bg-gray-100 {
+    background-color: var(--c-bg-page) !important;
+    color: var(--c-text);
+}
+
+/* Cards / panels */
+[data-theme="dark"] .bg-white {
+    background-color: var(--c-bg-card) !important;
+    color: var(--c-text);
+}
+[data-theme="dark"] .bg-gray-200 { background-color: var(--c-bg-softer) !important; }
+
+/* Header / sidebar surfaces with utility shadows */
+[data-theme="dark"] header.bg-white { background-color: var(--c-bg-card) !important; }
+[data-theme="dark"] .shadow,
+[data-theme="dark"] .shadow-sm,
+[data-theme="dark"] .shadow-md,
+[data-theme="dark"] .shadow-lg,
+[data-theme="dark"] .shadow-xl {
+    box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.4), 0 1px 2px -1px rgb(0 0 0 / 0.3);
+}
+
+/* Borders */
+[data-theme="dark"] .border,
+[data-theme="dark"] .border-gray-100,
+[data-theme="dark"] .border-gray-200,
+[data-theme="dark"] .border-gray-300 {
+    border-color: var(--c-border) !important;
+}
+
+/* Text colours */
+[data-theme="dark"] .text-gray-900 { color: var(--c-text)     !important; }
+[data-theme="dark"] .text-gray-800 { color: var(--c-text)     !important; }
+[data-theme="dark"] .text-gray-700 { color: var(--c-text-mid) !important; }
+[data-theme="dark"] .text-gray-600 { color: var(--c-text-mid) !important; }
+[data-theme="dark"] .text-gray-500 { color: var(--c-text-dim) !important; }
+[data-theme="dark"] .text-gray-400 { color: var(--c-text-dim) !important; }
+
+/* Inputs */
+[data-theme="dark"] input[type="text"],
+[data-theme="dark"] input[type="search"],
+[data-theme="dark"] input[type="number"],
+[data-theme="dark"] input[type="email"],
+[data-theme="dark"] input[type="password"],
+[data-theme="dark"] textarea,
+[data-theme="dark"] select {
+    background-color: var(--c-input-bg) !important;
+    color: var(--c-text) !important;
+    border-color: var(--c-input-bd) !important;
+}
+[data-theme="dark"] input::placeholder,
+[data-theme="dark"] textarea::placeholder { color: var(--c-text-dim) !important; }
+
+/* Hover states on muted surfaces */
+[data-theme="dark"] .hover\:bg-gray-50:hover,
+[data-theme="dark"] .hover\:bg-gray-100:hover { background-color: var(--c-bg-soft) !important; }
+[data-theme="dark"] .hover\:bg-gray-200:hover { background-color: var(--c-bg-softer) !important; }
+
+/* Code blocks */
+[data-theme="dark"] code,
+[data-theme="dark"] pre,
+[data-theme="dark"] .font-mono.bg-gray-50,
+[data-theme="dark"] .font-mono.bg-gray-100 {
+    background-color: var(--c-code-bg) !important;
+    color: var(--c-code-text) !important;
+}
+
+/* Scrollbar */
+[data-theme="dark"] ::-webkit-scrollbar-track { background: #1e293b; }
+[data-theme="dark"] ::-webkit-scrollbar-thumb {
+    background: #475569;
+    border-radius: 4px;
+}
+[data-theme="dark"] ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+
+/* Tinted alert variants — preserve "soft tint + saturated text" feel */
+[data-theme="dark"] .bg-blue-50    { background-color: rgba(59, 130, 246, 0.18) !important; }
+[data-theme="dark"] .bg-blue-100   { background-color: rgba(59, 130, 246, 0.25) !important; }
+[data-theme="dark"] .bg-green-50   { background-color: rgba(34, 197, 94, 0.18) !important; }
+[data-theme="dark"] .bg-green-100  { background-color: rgba(34, 197, 94, 0.25) !important; }
+[data-theme="dark"] .bg-yellow-50  { background-color: rgba(234, 179, 8, 0.18) !important; }
+[data-theme="dark"] .bg-yellow-100 { background-color: rgba(234, 179, 8, 0.25) !important; }
+[data-theme="dark"] .bg-red-50     { background-color: rgba(239, 68, 68, 0.18) !important; }
+[data-theme="dark"] .bg-red-100    { background-color: rgba(239, 68, 68, 0.25) !important; }
+[data-theme="dark"] .bg-purple-50  { background-color: rgba(168, 85, 247, 0.18) !important; }
+[data-theme="dark"] .bg-purple-100 { background-color: rgba(168, 85, 247, 0.25) !important; }
+[data-theme="dark"] .bg-pink-50    { background-color: rgba(236, 72, 153, 0.18) !important; }
+[data-theme="dark"] .bg-pink-100   { background-color: rgba(236, 72, 153, 0.25) !important; }
+[data-theme="dark"] .bg-indigo-50  { background-color: rgba(99, 102, 241, 0.18) !important; }
+[data-theme="dark"] .bg-indigo-100 { background-color: rgba(99, 102, 241, 0.25) !important; }
+[data-theme="dark"] .bg-cyan-50    { background-color: rgba(6, 182, 212, 0.18) !important; }
+[data-theme="dark"] .bg-cyan-100   { background-color: rgba(6, 182, 212, 0.25) !important; }
+[data-theme="dark"] .bg-amber-50   { background-color: rgba(245, 158, 11, 0.18) !important; }
+[data-theme="dark"] .bg-amber-100  { background-color: rgba(245, 158, 11, 0.25) !important; }
+[data-theme="dark"] .bg-orange-50  { background-color: rgba(249, 115, 22, 0.18) !important; }
+[data-theme="dark"] .bg-orange-100 { background-color: rgba(249, 115, 22, 0.25) !important; }
+[data-theme="dark"] .bg-emerald-50 { background-color: rgba(16, 185, 129, 0.18) !important; }
+[data-theme="dark"] .bg-slate-50   { background-color: rgba(100, 116, 139, 0.18) !important; }
+
+/* Stat cards keep their accent colour but improve contrast on dark */
+[data-theme="dark"] .text-pink-600,
+[data-theme="dark"] .text-blue-600,
+[data-theme="dark"] .text-green-600,
+[data-theme="dark"] .text-purple-600,
+[data-theme="dark"] .text-orange-600,
+[data-theme="dark"] .text-yellow-600 {
+    filter: brightness(1.15);
+}
+
+/* Modal backdrop is already black/50 — fine. Modal panels are .bg-white above. */

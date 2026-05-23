@@ -1,5 +1,7 @@
-from typing import Optional, List, Dict, Any
-from pydantic import BaseModel, Field
+from typing import Any, Dict, Optional
+
+from pydantic import BaseModel
+
 
 class SearchRequest(BaseModel):
     """

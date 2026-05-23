@@ -1,13 +1,12 @@
-import os
 import logging
-from pathlib import Path
-from typing import Dict, Any, List, Optional
+import os
+from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
 class DirectoryLister:
     """
-    Traverses directories and generates rich metadata summaries 
+    Traverses directories and generates rich metadata summaries
     and ASCII-formatted tree views of the workspace files.
     """
     def __init__(self, working_dir: str):
@@ -31,7 +30,7 @@ class DirectoryLister:
         files_only: bool = False,
         dirs_only: bool = False,
     ) -> Dict[str, Any]:
-        
+
         # Determine actual absolute path
         if directory_path == "." or not directory_path:
             abs_dir = self.working_dir
@@ -58,7 +57,7 @@ class DirectoryLister:
 
             # Exclude hidden directories/files and build/cache folders by default
             skip_patterns = {".git", "__pycache__", "node_modules", ".venv", ".data"}
-            
+
             filtered_entries = []
             for entry in entries:
                 if not include_hidden and entry.name.startswith("."):
@@ -97,7 +96,7 @@ class DirectoryLister:
                             "tree_prefix": item_prefix,
                             "file_count": file_count
                         })
-                    
+
                     traverse(entry.path, current_depth + 1, next_prefix)
                 else:
                     if dirs_only:

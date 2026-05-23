@@ -1,7 +1,9 @@
 from abc import ABC, abstractmethod
-from typing import AsyncIterator, List, Dict, Any, Optional
-from pydantic import BaseModel
 from enum import Enum
+from typing import AsyncIterator, List, Optional
+
+from pydantic import BaseModel
+
 
 class Role(str, Enum):
     USER = "user"
@@ -22,15 +24,15 @@ class LLMResponse(BaseModel):
 
 class BaseLLMProvider(ABC):
     """Abstract base class for all LLM providers."""
-    
+
     def __init__(self, model_name: str, api_key: Optional[str] = None):
         self.model_name = model_name
         self.api_key = api_key
 
     @abstractmethod
     async def complete(
-        self, 
-        messages: List[LLMMessage], 
+        self,
+        messages: List[LLMMessage],
         temperature: float = 0.1,
         max_tokens: Optional[int] = None,
         **kwargs
@@ -40,8 +42,8 @@ class BaseLLMProvider(ABC):
 
     @abstractmethod
     async def stream(
-        self, 
-        messages: List[LLMMessage], 
+        self,
+        messages: List[LLMMessage],
         temperature: float = 0.1,
         max_tokens: Optional[int] = None,
         **kwargs

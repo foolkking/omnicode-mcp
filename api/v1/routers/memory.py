@@ -3,23 +3,24 @@ Memory system endpoints
 Handles memory storage, search, context, and statistics
 """
 
-from typing import Optional, Dict, Any
-from fastapi import APIRouter, Query, HTTPException
+from typing import Any, Dict, Optional
+
+from fastapi import APIRouter, HTTPException, Query
 
 from core import get_memory_manager
 from core.config import get_settings
-from memory_system.models import MemoryRequest, MemorySearchRequest
 from memory_system.api_endpoints import (
-    store_memory_endpoint,
-    search_memories_endpoint,
     get_context_summary_endpoint,
     get_memory_stats_endpoint,
+    search_memories_endpoint,
+    store_memory_endpoint,
     update_memory_endpoint,
 )
+from memory_system.models import MemoryRequest, MemorySearchRequest
 from utils import (
-    create_success_response,
-    create_error_response,
     create_detailed_error_response,
+    create_error_response,
+    create_success_response,
 )
 
 router = APIRouter(prefix="/memory", tags=["memory"])
@@ -247,3 +248,29 @@ async def list_all_memories(
 
     except Exception as e:
         return create_error_response(f"Failed to list memories: {str(e)}", 500)
+
+
+
+@router.post("/dedupe")
+async def dedupe_memories():
+    """Collapse duplicate active memories.
+
+    Groups by content fingerprint; for each duplicate group keeps the
+    oldest row (sums access_count, merges tags + related_files, takes
+    higher importance) and archives the rest.
+    """
+    try:
+        memory_manager = get_memory_manager()
+        if not memory_manager:
+            return create_error_response("Memory system not initialized", 500)
+
+        report = memory_manager.dedupe_existing()
+        return create_success_response({
+            "message": (
+                f"Deduplicated {report['groups']} group(s), "
+                f"archived {report['archived']} duplicate row(s)."
+            ),
+            **report,
+        })
+    except Exception as e:
+        return create_error_response(f"Memory dedupe failed: {str(e)}", 500)

@@ -142,6 +142,9 @@
                         <option value="mistake">Mistake</option>
                         <option value="solution">Solution</option>
                     </select>
+                    <button onclick="dedupeMemories()" class="text-sm text-amber-600 hover:text-amber-800" title="Collapse duplicate memories">
+                        <i class="fas fa-compress-arrows-alt mr-1"></i> Dedupe
+                    </button>
                     <button onclick="loadAllMemories()" class="text-sm text-blue-600 hover:text-blue-800">
                         <i class="fas fa-sync-alt mr-1"></i> Refresh
                     </button>
@@ -277,7 +280,10 @@ async function loadAllMemories() {
 
 function displayMemories(memories) {
     const container = document.getElementById('memoriesList');
-    
+
+    // Cache full memory objects so the edit modal can pre-populate fields.
+    window.__memoryCache = window.__memoryCache || {};
+
     if (memories.length === 0) {
         container.innerHTML = `
             <div class="text-center py-8 text-gray-500">
@@ -287,30 +293,50 @@ function displayMemories(memories) {
         `;
         return;
     }
-    
+
+    const _esc = (s) => String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
     container.innerHTML = `
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             ${memories.map(item => {
                 const memory = item.memory;
+                window.__memoryCache[memory.id] = memory;
                 const icon = formatUtils.getCategoryIcon(memory.category);
                 const stars = formatUtils.getImportanceStars(memory.importance);
-                
+                const accessCount = memory.access_count || 1;
+                const score = (item.relevance_score != null)
+                    ? `<span class="ml-2 px-2 py-0.5 rounded-full bg-purple-100 text-purple-700 text-xs font-semibold" title="Search relevance">${(item.relevance_score * 100).toFixed(0)}%</span>` : '';
+                const accessBadge = accessCount > 1
+                    ? `<span class="ml-2 px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-xs font-semibold" title="Number of times this memory was matched/repeated">×${accessCount}</span>` : '';
+                const tagsHtml = (memory.tags && memory.tags.length)
+                    ? `<div class="mt-2 flex flex-wrap gap-1">${memory.tags.slice(0, 8).map(t => `<span class="px-2 py-0.5 rounded bg-gray-100 text-gray-700 text-xs">#${_esc(t)}</span>`).join('')}</div>`
+                    : '';
+                const filesHtml = (memory.related_files && memory.related_files.length)
+                    ? `<div class="mt-2 text-xs text-gray-500 flex items-center"><i class="fas fa-file-code mr-1"></i><span class="truncate" title="${_esc(memory.related_files.join('\n'))}">${memory.related_files.slice(0, 3).map(f => _esc(f.split(/[\\/]/).pop())).join(', ')}${memory.related_files.length > 3 ? ` +${memory.related_files.length - 3}` : ''}</span></div>`
+                    : '';
+                const matchLabel = (item.match_field || item.match_reason)
+                    ? `<div class="mt-1 text-xs text-purple-700"><i class="fas fa-bullseye mr-1"></i>matched in <code class="font-mono">${_esc(item.match_field || item.match_reason)}</code></div>` : '';
                 return `
-                    <div class="border border-gray-200 rounded-lg p-4 hover:shadow-md transition-shadow">
+                    <div class="border border-gray-200 rounded-lg p-4 hover:shadow-md transition-shadow bg-white">
                         <div class="flex items-start justify-between mb-2">
-                            <span class="text-sm font-medium">${icon} ${memory.category}</span>
+                            <span class="text-sm font-medium">${icon} ${_esc(memory.category)}${accessBadge}${score}</span>
                             <span class="text-xs">${stars}</span>
                         </div>
                         <div class="text-sm text-gray-700 mb-2 line-clamp-3">
-                            ${memory.content}
+                            ${_esc(memory.content)}
                         </div>
-                        <div class="flex items-center justify-between text-xs text-gray-500">
-                            <span>${formatUtils.formatDate(memory.timestamp)}</span>
+                        ${matchLabel}
+                        ${tagsHtml}
+                        ${filesHtml}
+                        <div class="flex items-center justify-between text-xs text-gray-500 mt-3 pt-2 border-t border-gray-100">
+                            <span title="Created: ${_esc(memory.timestamp || '')}">${formatUtils.formatDate(memory.timestamp)}</span>
                             <div class="space-x-2">
-                                <button onclick="editMemory(${memory.id})" class="text-blue-600 hover:text-blue-800">
+                                <button onclick="openMemoryEditor(${memory.id})" class="text-blue-600 hover:text-blue-800" title="Edit memory">
                                     <i class="fas fa-edit"></i>
                                 </button>
-                                <button onclick="archiveMemory(${memory.id})" class="text-red-600 hover:text-red-800">
+                                <button onclick="archiveMemory(${memory.id})" class="text-red-600 hover:text-red-800" title="Archive memory">
                                     <i class="fas fa-trash"></i>
                                 </button>
                             </div>
@@ -335,15 +361,139 @@ async function filterMemories() {
     }
 }
 
-async function editMemory(memoryId) {
-    const newContent = prompt('Edit memory content:');
-    if (!newContent) return;
-    
-    const result = await apiRoutes.memory.update(memoryId, { content: newContent });
-    
+async function openMemoryEditor(memoryId) {
+    const memory = (window.__memoryCache && window.__memoryCache[memoryId]) || null;
+    if (!memory) {
+        notifications.error('Memory not found in current view. Refresh the list first.');
+        return;
+    }
+
+    const _esc = (s) => String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+    // Render modal
+    let modal = document.getElementById('memoryEditorModal');
+    if (modal) modal.remove();
+    modal = document.createElement('div');
+    modal.id = 'memoryEditorModal';
+    modal.className = 'fixed inset-0 bg-black bg-opacity-50 z-[70] flex items-center justify-center p-4';
+    modal.innerHTML = `
+        <div class="bg-white rounded-lg shadow-2xl max-w-2xl w-full max-h-[90vh] flex flex-col">
+            <div class="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+                <h3 class="text-lg font-semibold text-gray-900 flex items-center">
+                    <i class="fas fa-edit text-blue-500 mr-2"></i>
+                    Edit Memory <span class="ml-2 text-xs text-gray-500">#${memory.id}</span>
+                </h3>
+                <button onclick="closeMemoryEditor()" class="text-gray-500 hover:text-gray-700">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="p-6 overflow-y-auto space-y-4 flex-1">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Content</label>
+                    <textarea id="memEditContent" rows="8"
+                        class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm font-mono">${_esc(memory.content)}</textarea>
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Category</label>
+                        <select id="memEditCategory" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
+                            ${['preference','solution','context','project','user_info','session','error','feature','technical_detail']
+                                .map(c => `<option value="${c}" ${c === memory.category ? 'selected' : ''}>${c}</option>`).join('')}
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Importance (1–5)</label>
+                        <input type="number" id="memEditImportance" min="1" max="5"
+                            value="${memory.importance || 3}"
+                            class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Tags (comma-separated)</label>
+                    <input type="text" id="memEditTags"
+                        value="${_esc((memory.tags || []).join(', '))}"
+                        placeholder="e.g. python, refactoring, claude"
+                        class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Related Files (one per line)</label>
+                    <textarea id="memEditFiles" rows="3"
+                        placeholder="e.g.&#10;src/main.py&#10;tests/test_main.py"
+                        class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm font-mono">${_esc((memory.related_files || []).join('\n'))}</textarea>
+                </div>
+                <div class="bg-gray-50 rounded-md p-3 text-xs text-gray-600">
+                    <div><strong>Created:</strong> ${_esc(memory.timestamp || '')}</div>
+                    <div><strong>Access count:</strong> ${memory.access_count || 1}</div>
+                    ${memory.session_id ? `<div><strong>Session:</strong> <code class="font-mono">${_esc(memory.session_id)}</code></div>` : ''}
+                </div>
+            </div>
+            <div class="px-6 py-4 border-t border-gray-200 flex justify-end space-x-3">
+                <button onclick="closeMemoryEditor()" class="px-4 py-2 rounded-md bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm">Cancel</button>
+                <button onclick="saveMemoryEditor(${memory.id})" class="px-4 py-2 rounded-md bg-blue-500 hover:bg-blue-600 text-white text-sm font-medium">
+                    <i class="fas fa-save mr-1"></i> Save
+                </button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    // Esc closes
+    modal.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMemoryEditor(); });
+    setTimeout(() => document.getElementById('memEditContent')?.focus(), 50);
+}
+
+function closeMemoryEditor() {
+    const modal = document.getElementById('memoryEditorModal');
+    if (modal) modal.remove();
+}
+
+async function saveMemoryEditor(memoryId) {
+    const content = document.getElementById('memEditContent').value.trim();
+    const category = document.getElementById('memEditCategory').value;
+    const importance = parseInt(document.getElementById('memEditImportance').value, 10) || 3;
+    const tagsRaw = document.getElementById('memEditTags').value;
+    const filesRaw = document.getElementById('memEditFiles').value;
+
+    if (!content) {
+        notifications.error('Content cannot be empty');
+        return;
+    }
+
+    const tags = tagsRaw.split(',').map(t => t.trim()).filter(Boolean);
+    const related_files = filesRaw.split(/\r?\n/).map(f => f.trim()).filter(Boolean);
+
+    const result = await apiRoutes.memory.update(memoryId, {
+        content, category, importance,
+        tags, related_files,
+    });
+
     if (result.success) {
         notifications.success('Memory updated');
+        closeMemoryEditor();
         await loadAllMemories();
+    } else {
+        notifications.error('Update failed: ' + (result.error || 'unknown'));
+    }
+}
+
+// Backwards-compat alias kept so older inline handlers don't break.
+async function editMemory(memoryId) {
+    return openMemoryEditor(memoryId);
+}
+
+async function dedupeMemories() {
+    if (!confirm('Collapse duplicate memories?\nThis keeps the oldest of each fingerprint group, sums access counts, and archives the rest. The action is reversible by restoring archived rows.')) return;
+    showLoading('Deduplicating memories...');
+    const result = await window.api.post('/memory/dedupe', null, { userAction: 'Memory Dedupe' });
+    hideLoading();
+    if (result.success && result.data && result.data.result) {
+        const r = result.data.result;
+        notifications.success(`Dedupe complete: archived ${r.archived || 0} duplicate(s) across ${r.groups || 0} group(s).`);
+        await refreshMemoryStats();
+        await loadAllMemories();
+    } else {
+        notifications.error('Dedupe failed: ' + (result.error || 'unknown'));
     }
 }
 

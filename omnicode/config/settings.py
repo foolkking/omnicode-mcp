@@ -1,10 +1,11 @@
-from functools import lru_cache
-from typing import List, Optional
-from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
-import os
-from pathlib import Path
 import logging
+import os
+from functools import lru_cache
+from pathlib import Path
+from typing import List, Optional
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
 
@@ -30,16 +31,32 @@ class Settings(BaseSettings):
     CORS_CREDENTIALS: bool = Field(default=True)
     CORS_METHODS: List[str] = Field(default=["*"])
     CORS_HEADERS: List[str] = Field(default=["*"])
-    
+
     # LLM Provider Configuration
     DEFAULT_LLM_PROVIDER: str = Field(default="gemini")
     DEFAULT_LLM_MODEL: str = Field(default="gemini-2.5-flash")
-    
+
     # API Keys (Loaded from .env)
     GEMINI_API_KEY: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None
     ANTHROPIC_API_KEY: Optional[str] = None
     DEEPSEEK_API_KEY: Optional[str] = None
+
+    # Provider registry (custom external LLM API integrations)
+    PROVIDER_DB_PATH: str = Field(default=".data/providers.db")
+
+    # File-system browser (native OS file picker backend)
+    FS_BROWSER_ENABLED: bool = Field(default=True)
+    FS_BROWSER_MAX_FILE_BYTES: int = Field(default=2 * 1024 * 1024)  # 2 MiB
+    FS_BROWSER_DENY_PATTERNS: List[str] = Field(default=[
+        # Linux/macOS sensitive paths
+        "/etc/shadow", "/etc/sudoers", "/etc/ssh", "/root/.ssh",
+        "/proc", "/sys", "/dev",
+        # Windows protected directories
+        "C:\\Windows\\System32\\config",
+        "C:\\Windows\\System32\\drivers",
+        "C:\\Windows\\System32\\LogFiles",
+    ])
 
     # Search Configuration
     EMBEDDING_MODEL: str = Field(default="sentence-transformers/all-MiniLM-L6-v2")
@@ -76,7 +93,7 @@ class Settings(BaseSettings):
         if not path.is_dir():
             logger.error(f"Path {new_dir} is not a directory.")
             raise NotADirectoryError(f"Path {new_dir} is not a directory.")
-            
+
         self.WORKING_DIR = str(path.absolute())
         logger.info(f"Working directory updated to: {self.WORKING_DIR}")
 

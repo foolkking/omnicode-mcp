@@ -1,6 +1,6 @@
-from mcp.server.fastmcp import FastMCP
-from typing import Optional
 import logging
+
+from mcp.server.fastmcp import FastMCP
 
 from ..git_context.blame import GitBlameAnalyzer
 from ..guard.analyzer import ProactiveGuard
@@ -11,16 +11,16 @@ logger = logging.getLogger(__name__)
 # but we are just defining the new tools here for the OmniCode integration.
 
 def register_omnicode_tools(mcp: FastMCP, workspace_dir: str):
-    
+
     blame_analyzer = GitBlameAnalyzer(workspace_dir)
     guard = ProactiveGuard()
 
     @mcp.tool()
     async def blame_tool(file_path: str, start_line: int, end_line: int) -> str:
         """
-        Get git blame information for a range of lines to understand the history 
+        Get git blame information for a range of lines to understand the history
         and context of why code was written a certain way.
-        
+
         Args:
             file_path: Path to the file
             start_line: Starting line number (1-indexed)
@@ -30,7 +30,7 @@ def register_omnicode_tools(mcp: FastMCP, workspace_dir: str):
             blame_data = blame_analyzer.get_blame(file_path, start_line, end_line)
             if not blame_data:
                 return f"No blame data found for {file_path}:{start_line}-{end_line}"
-                
+
             result = []
             for line in blame_data:
                 result.append(
@@ -44,9 +44,9 @@ def register_omnicode_tools(mcp: FastMCP, workspace_dir: str):
     @mcp.tool()
     async def guard_tool(file_path: str) -> str:
         """
-        Run static analysis checks (mypy, ruff, eslint, etc.) on a file 
+        Run static analysis checks (mypy, ruff, eslint, etc.) on a file
         to ensure code quality and prevent errors.
-        
+
         Args:
             file_path: Path to the file to check
         """
@@ -66,9 +66,9 @@ def register_omnicode_tools(mcp: FastMCP, workspace_dir: str):
     @mcp.tool()
     async def change_context_tool(file_path: str, start_line: int, end_line: int) -> str:
         """
-        Get a summarized context of changes for a specific line range, 
+        Get a summarized context of changes for a specific line range,
         including related issues and primary commit messages.
-        
+
         Args:
             file_path: Path to the file
             start_line: Starting line number (1-indexed)
@@ -78,7 +78,7 @@ def register_omnicode_tools(mcp: FastMCP, workspace_dir: str):
             context = blame_analyzer.get_change_context(file_path, (start_line, end_line))
             if not context:
                 return f"No context found for {file_path}:{start_line}-{end_line}"
-                
+
             return (
                 f"Change Context for {file_path}:{start_line}-{end_line}\n"
                 f"Primary Commit: {context.commit_hash}\n"

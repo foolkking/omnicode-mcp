@@ -4,28 +4,43 @@ Handles initialization and shutdown of services
 """
 
 import logging
+import os
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
 from core.config import get_settings
 from core.dependencies import (
+    set_ast_parser,
+    set_directory_lister,
+    set_edit_pipeline,
+    set_git_manager,
+    set_llm_router,
+    set_memory_manager,
+    set_project_manager,
     set_search_engine,
     set_write_pipeline,
-    set_edit_pipeline,
-    set_memory_manager,
-    set_git_manager,
-    set_project_manager,
-    set_directory_lister,
 )
-from omnicode.search import SemanticSearchEngine, DirectoryLister
-from omnicode.pipelines.write import WritePipeline
-from omnicode.pipelines.edit import EditPipeline
-from omnicode.git_context import GitManager
 from memory_system import MemoryManager
+from omnicode.ast_engine.parser import UnifiedASTParser
+from omnicode.git_context import GitManager
+from omnicode.llm.router import LLMRouter
+from omnicode.pipelines.edit import EditPipeline
+from omnicode.pipelines.write import WritePipeline
+from omnicode.search import DirectoryLister, SemanticSearchEngine
 from project_structure.project_manager import ProjectStructureManager
 
-
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Force HuggingFace / sentence-transformers into offline mode so the model
+# is loaded from the local cache without any network round-trips.
+# This prevents the ~2-minute startup delay when huggingface.co is unreachable.
+# The env vars are set here (in addition to .env) so they take effect even
+# when the process is launched without the .env file being loaded first.
+# ---------------------------------------------------------------------------
+for _hf_var in ("TRANSFORMERS_OFFLINE", "HF_DATASETS_OFFLINE", "HF_HUB_OFFLINE"):
+    os.environ.setdefault(_hf_var, "1")
 
 
 async def initialize_services() -> None:
@@ -35,12 +50,38 @@ async def initialize_services() -> None:
 
     logger.info(f"FastAPI Server starting - Working directory: {working_dir}")
 
+    # ------------------------------------------------------------------
+    # STAGE 9.9 — install the streaming log handler on the root logger so
+    # every subsequent ``logger.info(...)`` call gets fanned out to any
+    # WebSocket subscriber on `/logs/stream`.
+    # ------------------------------------------------------------------
     try:
-        # Initialize semantic search engine
+        from core import log_stream
+
+        log_stream.install()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Could not install log stream handler: %s", exc)
+
+    try:
+        # Initialize LLM Router (Model Gateway)
+        from omnicode.llm.provider_registry import get_provider_registry
+        # Initialise registry with the configured DB path before constructing
+        # the router so customs persist across restarts.
+        get_provider_registry(settings.PROVIDER_DB_PATH)
+        llm_router = LLMRouter()
+        set_llm_router(llm_router)
+        logger.info("✅ LLM Router (Model Gateway) initialized")
+
+        # Initialize AST Parser (Tree-sitter)
+        ast_parser = UnifiedASTParser()
+        set_ast_parser(ast_parser)
+        logger.info("✅ Tree-sitter Unified AST Parser initialized")
+
+        # Initialize semantic/hybrid search engine
         search_engine = SemanticSearchEngine(working_dir)
         await search_engine.initialize()
         set_search_engine(search_engine)
-        logger.info("✅ Semantic search engine initialized")
+        logger.info("✅ Semantic/hybrid search engine initialized")
 
         # Initialize write pipeline with search engine
         write_pipeline = WritePipeline(search_engine)
@@ -119,8 +160,8 @@ async def reinitialize_services(new_working_dir: str) -> None:
         Exception: If reinitialization fails
     """
     from core.dependencies import (
-        get_search_engine,
         get_memory_manager,
+        get_search_engine,
     )
 
     logger.info(f"🔄 Reinitializing services with working directory: {new_working_dir}")

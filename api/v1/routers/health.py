@@ -4,18 +4,18 @@ Health and status endpoints for system monitoring
 
 import os
 from datetime import datetime
-from fastapi import APIRouter
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
-from core import get_settings, get_services_status
+from fastapi import APIRouter
+from fastapi.responses import FileResponse
+
+from core import get_services_status, get_settings
 from core.dependencies import (
+    get_edit_pipeline,
+    get_git_manager,
+    get_memory_manager,
     get_search_engine,
     get_write_pipeline,
-    get_edit_pipeline,
-    get_memory_manager,
-    get_git_manager,
 )
 from utils import create_success_response
 

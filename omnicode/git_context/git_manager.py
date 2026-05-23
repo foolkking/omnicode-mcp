@@ -1,7 +1,7 @@
-import subprocess
-import os
-from pathlib import Path
 import logging
+import os
+import subprocess
+from pathlib import Path
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
@@ -62,7 +62,7 @@ class GitManager:
         res = await self._run_git(["status", "--porcelain"])
         if not res.success:
             return res
-        
+
         # Get current branch name
         branch_res = await self._run_git(["rev-parse", "--abbrev-ref", "HEAD"])
         current_branch = branch_res.output.strip() if branch_res.success else "master"
@@ -121,7 +121,7 @@ class GitManager:
         res = await self._run_git(args)
         if not res.success:
             return res
-        
+
         commits = []
         lines = res.output.splitlines()
         for line in lines:
@@ -134,7 +134,7 @@ class GitManager:
                 "hash": commit_hash,
                 "message": msg
             })
-        
+
         res.data = {"commits": commits}
         return res
 
@@ -192,14 +192,20 @@ class GitManager:
         res = await self.get_branches()
         if not res.success:
             return res
-        
+
+        # Sessions = any branch other than the conventional "trunk" names.
+        # Previously this filtered to only ``ai-session-*`` / ``session-*`` —
+        # user-named branches (like "你好" or feature branches) were silently
+        # excluded from the session list UI.
+        TRUNK = {"master", "main", "trunk", "develop"}
         session_branches = []
         branches = res.data.get("branches", [])
         for branch in branches:
             name = branch.get("name", "")
-            if name.startswith(("ai-session-", "session-")):
-                session_branches.append(branch)
-        
+            if not name or name in TRUNK:
+                continue
+            session_branches.append(branch)
+
         res.data = {"sessions": session_branches}
         return res
 
