@@ -288,7 +288,7 @@ async def query_symbol_relations(req: SymbolQueryRequest):
 
         if req.direction in ("callers", "both"):
             callers = graph.callers_of(req.symbol)
-            edges = [e.dict() for e in graph.edges_for(req.symbol, "in")]
+            edges = [e.model_dump() for e in graph.edges_for(req.symbol, "in")]
             result["callers"] = {
                 "count": len(callers),
                 "names": callers,
@@ -296,7 +296,7 @@ async def query_symbol_relations(req: SymbolQueryRequest):
             }
         if req.direction in ("callees", "both"):
             callees = graph.callees_of(req.symbol)
-            edges = [e.dict() for e in graph.edges_for(req.symbol, "out")]
+            edges = [e.model_dump() for e in graph.edges_for(req.symbol, "out")]
             result["callees"] = {
                 "count": len(callees),
                 "names": callees,
@@ -332,6 +332,11 @@ async def get_symbols_graph(
         builder = CallGraphBuilder(ast_parser)
         graph = builder.build_for_paths([scope_path], max_files=max_files)
 
+        # Edge cap scales with max_nodes so the frontend has enough connectivity
+        # to actually render the requested node count.  The hard ceiling stops
+        # us from blowing up the response payload on very large repos.
+        edge_cap = max(500, min(8000, max_nodes * 30))
+
         return create_success_response(
             {
                 "scope_path": scope_path,
@@ -341,7 +346,7 @@ async def get_symbols_graph(
                     "total_callees": len(graph.in_index),
                 },
                 "ascii": graph.render_ascii(max_nodes=max_nodes),
-                "edges": [e.dict() for e in graph.edges[:500]],
+                "edges": [e.model_dump() for e in graph.edges[:edge_cap]],
             }
         )
     except Exception as e:  # pragma: no cover
@@ -383,12 +388,14 @@ async def get_inheritance_graph(
         builder = InheritanceGraphBuilder(ast_parser)
         graph = builder.build_for_paths([scope_path], max_files=max_files)
 
+        edge_cap = max(500, min(8000, max_nodes * 30))
+
         return create_success_response(
             {
                 "scope_path": scope_path,
                 "summary": graph.stats(),
                 "ascii": graph.render_ascii(max_nodes=max_nodes),
-                "edges": [e.dict() for e in graph.edges[:500]],
+                "edges": [e.model_dump() for e in graph.edges[:edge_cap]],
             }
         )
     except Exception as e:  # pragma: no cover

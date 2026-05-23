@@ -66,6 +66,12 @@ async def search_memories_endpoint(
                     "memory": memory_data,
                     "relevance_score": result.relevance_score,
                     "match_reason": result.match_reason,
+                    "match_fields": [
+                        {"field": f.field, "snippet": f.snippet, "weight": f.weight}
+                        for f in (result.match_fields or [])
+                    ],
+                    "semantic_score": result.semantic_score,
+                    "keyword_score": result.keyword_score,
                 }
             )
 

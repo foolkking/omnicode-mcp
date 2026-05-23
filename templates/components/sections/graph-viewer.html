@@ -1,13 +1,21 @@
 <!--
-  Code Graph Viewer (STAGE 9.8)
+  Code Graph Viewer (STAGE 9.8 + redesign)
   ----------------------------------------------------------------------------
   Interactive D3 force-directed visualisation of two graphs:
 
     * Call graph      — symbol-to-symbol calls       (/search/symbols/graph)
     * Inheritance     — subclass-to-base hierarchy   (/search/inheritance)
 
-  Loads D3 lazily from a CDN so the rest of the dashboard stays light.
-  Re-renders automatically on `themechange` events.
+  New in this redesign:
+    * Cluster colouring — nodes share a hue per top-level directory (omnicode/,
+      api/, tests/, …) so users can spot module boundaries at a glance.
+    * Hop filter — "show only nodes within N hops of the selected symbol".
+    * Cascading directory picker — start at "(whole project)", drill down via
+      drop-downs that auto-populate from /directory/list.
+    * Side panel — clicking a node reveals callers / callees lists with
+      jump-to-source links + "focus on this symbol" action.
+    * Persistent filters — selections persist in sessionStorage so the view
+      survives a page refresh.
 -->
 <div class="space-y-6">
 
@@ -19,7 +27,7 @@
                     <i class="fas fa-project-diagram mr-3"></i>
                     Code Graph Viewer
                 </h2>
-                <p class="text-indigo-100 mt-1">Interactive D3 visualisation of call &amp; inheritance graphs</p>
+                <p class="text-indigo-100 mt-1">Interactive D3 visualisation of call &amp; inheritance graphs — click a node for callers / callees</p>
             </div>
             <div class="flex items-center space-x-2 flex-wrap gap-2">
                 <select id="graphMode" class="text-gray-900 bg-white px-3 py-1.5 rounded-md text-sm font-semibold">
@@ -35,297 +43,937 @@
     </div>
 
     <!-- Toolbar -->
-    <div class="bg-white shadow rounded-lg p-4 flex flex-wrap items-center gap-3 text-sm">
-        <label class="flex items-center space-x-2">
-            <span class="text-gray-700">Scope:</span>
-            <input id="graphScope" type="text" placeholder="(whole project)"
-                   class="border border-gray-300 rounded px-2 py-1 w-72 font-mono text-xs">
-        </label>
-        <label class="flex items-center space-x-2">
-            <span class="text-gray-700">Max files:</span>
-            <input id="graphMaxFiles" type="number" value="200" min="1" max="2000"
-                   class="border border-gray-300 rounded px-2 py-1 w-20 text-xs">
-        </label>
-        <label class="flex items-center space-x-2">
-            <span class="text-gray-700">Max nodes:</span>
-            <input id="graphMaxNodes" type="number" value="80" min="10" max="500"
-                   class="border border-gray-300 rounded px-2 py-1 w-20 text-xs"
-                   title="Hard cap on rendered nodes; the largest hubs are kept first.">
-        </label>
-        <label class="flex items-center space-x-2">
-            <span class="text-gray-700">Search:</span>
-            <input id="graphSearch" type="text" placeholder="symbol name..."
-                   class="border border-gray-300 rounded px-2 py-1 w-48 text-xs">
-        </label>
-        <div class="flex items-center space-x-2 ml-auto">
-            <span id="graphStats" class="text-xs text-gray-500"></span>
-            <button onclick="graphResetZoom()" class="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 rounded text-xs">
-                <i class="fas fa-search-minus mr-1"></i> Fit
+    <div class="bg-white dark:bg-gray-800 shadow rounded-lg p-4 space-y-3 text-sm">
+        <!-- Row 1: cascading directory picker -->
+        <div class="flex flex-wrap items-center gap-2">
+            <span class="text-gray-700 dark:text-gray-200 font-medium flex items-center">
+                <i class="fas fa-folder-tree text-indigo-500 mr-1.5"></i>
+                Scope:
+            </span>
+            <div id="graphScopeSegments" class="flex items-center flex-wrap gap-1.5"></div>
+            <input id="graphScope" type="hidden" value="">
+            <button onclick="resetGraphScope()" class="text-xs text-gray-500 hover:text-gray-800 dark:hover:text-gray-100" title="Clear scope">
+                <i class="fas fa-times"></i> reset
             </button>
+            <span id="graphScopeDisplay" class="text-xs font-mono text-gray-500 dark:text-gray-400 ml-2"></span>
         </div>
-    </div>
-
-    <!-- Graph canvas -->
-    <div class="bg-white shadow rounded-lg p-2 relative" style="height: 640px;">
-        <div id="graphViewer" class="w-full h-full relative overflow-hidden">
-            <div id="graphPlaceholder"
-                 class="absolute inset-0 flex items-center justify-center text-gray-400 text-sm">
-                Click "Reload" to render the graph...
+        <!-- Row 2: hop & clustering & search -->
+        <div class="flex flex-wrap items-center gap-3">
+            <label class="flex items-center space-x-2">
+                <span class="text-gray-700 dark:text-gray-200">Focus:</span>
+                <input id="graphFocus" type="text" placeholder="symbol name (optional)"
+                       class="border border-gray-300 dark:border-gray-600 rounded px-2 py-1 w-48 text-xs bg-white dark:bg-gray-900 dark:text-gray-100">
+            </label>
+            <label class="flex items-center space-x-2" title="Show only nodes within N hops of the focused symbol. 0 = the symbol only, 3 = three steps away">
+                <span class="text-gray-700 dark:text-gray-200">Hops:</span>
+                <input id="graphHops" type="number" value="2" min="0" max="6"
+                       class="border border-gray-300 dark:border-gray-600 rounded px-2 py-1 w-16 text-xs bg-white dark:bg-gray-900 dark:text-gray-100">
+            </label>
+            <label class="flex items-center space-x-2">
+                <span class="text-gray-700 dark:text-gray-200">Max nodes:</span>
+                <input id="graphMaxNodes" type="number" value="80" min="10" max="500"
+                       class="border border-gray-300 dark:border-gray-600 rounded px-2 py-1 w-20 text-xs bg-white dark:bg-gray-900 dark:text-gray-100"
+                       title="Cap on rendered nodes; the largest hubs are kept first.">
+            </label>
+            <label class="flex items-center space-x-2">
+                <span class="text-gray-700 dark:text-gray-200">Max files:</span>
+                <input id="graphMaxFiles" type="number" value="200" min="1" max="2000"
+                       class="border border-gray-300 dark:border-gray-600 rounded px-2 py-1 w-20 text-xs bg-white dark:bg-gray-900 dark:text-gray-100">
+            </label>
+            <label class="flex items-center space-x-2">
+                <span class="text-gray-700 dark:text-gray-200">Cluster by:</span>
+                <select id="graphCluster" class="border border-gray-300 dark:border-gray-600 rounded px-2 py-1 text-xs bg-white dark:bg-gray-900 dark:text-gray-100">
+                    <option value="top">Top-level dir</option>
+                    <option value="dir">Containing dir</option>
+                    <option value="degree">Hub size</option>
+                    <option value="off">Off (uniform)</option>
+                </select>
+            </label>
+            <label class="flex items-center space-x-2">
+                <span class="text-gray-700 dark:text-gray-200">Search:</span>
+                <input id="graphSearch" type="text" placeholder="highlight..."
+                       class="border border-gray-300 dark:border-gray-600 rounded px-2 py-1 w-40 text-xs bg-white dark:bg-gray-900 dark:text-gray-100">
+            </label>
+            <div class="flex items-center space-x-2 ml-auto">
+                <span id="graphStats" class="text-xs text-gray-500 dark:text-gray-400"></span>
+                <button onclick="graphResetZoom()" class="px-3 py-1.5 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 rounded text-xs">
+                    <i class="fas fa-search-minus mr-1"></i> Fit
+                </button>
             </div>
         </div>
     </div>
 
+    <!-- Graph + Side panel -->
+    <div class="flex flex-col xl:flex-row gap-4">
+        <div class="flex-1 bg-white dark:bg-gray-800 shadow rounded-lg p-2 relative" style="height: 640px;">
+            <div id="graphViewer" class="w-full h-full relative overflow-hidden">
+                <div id="graphPlaceholder"
+                     class="absolute inset-0 flex items-center justify-center text-gray-400 text-sm">
+                    Loading graph...
+                </div>
+            </div>
+        </div>
+
+        <!-- Side panel: callers / callees of selected symbol -->
+        <aside id="graphSidePanel" class="xl:w-96 bg-white dark:bg-gray-800 shadow rounded-lg p-4 hidden flex-col" style="max-height: 640px;">
+            <div class="flex items-center justify-between mb-2">
+                <h3 class="text-sm font-semibold text-gray-900 dark:text-gray-100 flex items-center">
+                    <i class="fas fa-crosshairs text-indigo-500 mr-2"></i>
+                    <span id="graphSelectedTitle" class="font-mono truncate">—</span>
+                </h3>
+                <button onclick="graphCloseSidePanel()" class="text-gray-500 hover:text-gray-700 dark:hover:text-gray-200" title="Close">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div id="graphSelectedMeta" class="text-xs text-gray-500 dark:text-gray-400 mb-3"></div>
+            <div class="flex space-x-2 mb-3">
+                <button onclick="graphFocusSelected()" class="flex-1 text-xs px-2 py-1.5 rounded bg-indigo-500 hover:bg-indigo-600 text-white">
+                    <i class="fas fa-bullseye mr-1"></i> Focus
+                </button>
+                <button onclick="graphViewSelectedSource()" class="flex-1 text-xs px-2 py-1.5 rounded border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700">
+                    <i class="fas fa-code mr-1"></i> View source
+                </button>
+            </div>
+            <div class="flex-1 overflow-auto space-y-3 text-xs">
+                <div>
+                    <div class="font-semibold text-gray-700 dark:text-gray-200 mb-1">
+                        <i class="fas fa-arrow-down text-orange-500 mr-1"></i>
+                        Callers (<span id="graphCallersCount">0</span>)
+                    </div>
+                    <ul id="graphCallersList" class="space-y-1"></ul>
+                </div>
+                <div>
+                    <div class="font-semibold text-gray-700 dark:text-gray-200 mb-1">
+                        <i class="fas fa-arrow-right text-emerald-500 mr-1"></i>
+                        Callees (<span id="graphCalleesCount">0</span>)
+                    </div>
+                    <ul id="graphCalleesList" class="space-y-1"></ul>
+                </div>
+            </div>
+        </aside>
+    </div>
+
     <!-- Legend -->
-    <div class="text-xs text-gray-500 flex items-center space-x-4 flex-wrap gap-y-1">
-        <span><span class="inline-block w-3 h-3 rounded-full bg-indigo-500 mr-1 align-middle"></span> node (callee)</span>
-        <span><span class="inline-block w-3 h-3 rounded-full bg-pink-500 mr-1 align-middle"></span> hub (≥5 edges)</span>
-        <span><span class="inline-block w-6 h-0.5 bg-slate-400 align-middle mr-1"></span> edge</span>
-        <span>Drag nodes · scroll to zoom · click for details</span>
+    <div id="graphLegend" class="bg-white dark:bg-gray-800 shadow rounded-lg p-3 text-xs text-gray-600 dark:text-gray-300 flex items-center flex-wrap gap-x-4 gap-y-2">
+        <span class="font-medium text-gray-700 dark:text-gray-100">Clusters:</span>
+        <span id="graphClusterLegend" class="flex items-center flex-wrap gap-x-3 gap-y-1"></span>
+        <span class="ml-auto text-gray-400">drag · scroll to zoom · click for details</span>
     </div>
 </div>
 
+
 <script>
-(function () {
-    'use strict';
+// =============================================================================
+// Code Graph Viewer — full implementation
+// =============================================================================
 
-    var STATE = window.__graphState = window.__graphState || {
-        simulation: null, zoom: null, svg: null, nodes: null, links: null,
-    };
+// State preserved across reloads of the section.
+window.__graphState = window.__graphState || {
+    mode: 'callgraph',
+    scope: '',           // relative path within working dir; '' === entire project
+    scopeChain: [],      // ['omnicode', 'search'] → joined → 'omnicode/search'
+    focus: '',           // symbol focus
+    hops: 2,
+    maxNodes: 80,
+    maxFiles: 200,
+    cluster: 'top',
+    search: '',
+    raw: null,           // full graph payload
+    selected: null,      // selected node id
+    sim: null,           // d3 simulation handle
+    svg: null,
+    g: null,
+    zoom: null,
+};
 
-    function _err(m) {
-        if (window.notifications) window.notifications.error(m);
-        else console.error(m);
+const GRAPH_SS_KEY = 'graph_viewer_state_v1';
+
+function _graphSaveState() {
+    try {
+        sessionStorage.setItem(GRAPH_SS_KEY, JSON.stringify({
+            mode: __graphState.mode,
+            scope: __graphState.scope,
+            scopeChain: __graphState.scopeChain,
+            focus: __graphState.focus,
+            hops: __graphState.hops,
+            maxNodes: __graphState.maxNodes,
+            maxFiles: __graphState.maxFiles,
+            cluster: __graphState.cluster,
+            search: __graphState.search,
+        }));
+    } catch (e) { /* sessionStorage may be disabled */ }
+}
+
+function _graphLoadState() {
+    try {
+        const raw = sessionStorage.getItem(GRAPH_SS_KEY);
+        if (!raw) return;
+        const saved = JSON.parse(raw);
+        Object.assign(__graphState, saved);
+    } catch (e) { /* ignore */ }
+}
+
+// -----------------------------------------------------------------------------
+// Cascading directory picker
+// -----------------------------------------------------------------------------
+async function _graphRenderScopePicker() {
+    const container = document.getElementById('graphScopeSegments');
+    const display = document.getElementById('graphScopeDisplay');
+    if (!container) return;
+
+    container.innerHTML = '';
+    display.textContent = __graphState.scope ? `(${__graphState.scope})` : '(whole project)';
+
+    // Always start with the (root) selector.
+    await _graphAppendScopeSelect(container, []);
+
+    // For every accumulated chain segment, append another selector showing
+    // its subdirs and pre-selecting the current value.
+    const chain = __graphState.scopeChain || [];
+    for (let i = 0; i < chain.length; i++) {
+        await _graphAppendScopeSelect(container, chain.slice(0, i + 1));
     }
-    function _showLoad(m) { if (window.showLoading) window.showLoading(m); }
-    function _hideLoad() { if (window.hideLoading) window.hideLoading(); }
+}
 
-    function ensureD3(callback) {
-        if (window.d3 && window.d3.forceSimulation) { callback(); return; }
-        var s = document.createElement('script');
-        s.src = 'https://cdn.jsdelivr.net/npm/d3@7.8.5/dist/d3.min.js';
-        s.onload = function () { callback(); };
-        s.onerror = function () {
-            _err('Failed to load D3.js from CDN. Check your network.');
-        };
-        document.head.appendChild(s);
-    }
-
-    async function loadGraphView() {
-        var mode = document.getElementById('graphMode').value;
-        var scope = document.getElementById('graphScope').value.trim();
-        var maxFiles = parseInt(document.getElementById('graphMaxFiles').value, 10) || 200;
-        var maxNodes = parseInt(document.getElementById('graphMaxNodes').value, 10) || 80;
-
-        var url = (mode === 'inheritance') ? '/search/inheritance' : '/search/symbols/graph';
-        var params = { max_files: maxFiles };
-        if (scope) params.path = scope;
-
-        _showLoad('Loading ' + mode + ' graph...');
-        try {
-            var qs = Object.entries(params)
-                .map(function (kv) { return encodeURIComponent(kv[0]) + '=' + encodeURIComponent(kv[1]); })
-                .join('&');
-            var resp = await fetch(url + '?' + qs);
-            var body = await resp.json();
-            if (!resp.ok || (body && body.success === false)) {
-                _err('Graph fetch failed: ' + ((body && body.error) || resp.statusText));
-                return;
-            }
-            var data = (body && body.result) || body || {};
-            var rawEdges = data.edges || [];
-            var edges = rawEdges.map(function (e) {
-                return mode === 'inheritance'
-                    ? { source: e.subclass, target: e.base, kind: e.kind, file: e.file_path, line: e.line }
-                    : { source: e.caller,  target: e.callee, line: e.line, file: e.file_path };
-            });
-
-            // Cap nodes by retaining the highest-degree symbols first.  This
-            // prevents the random-and-overlapping mess seen on big repos.
-            var degree = {};
-            edges.forEach(function (e) {
-                degree[e.source] = (degree[e.source] || 0) + 1;
-                degree[e.target] = (degree[e.target] || 0) + 1;
-            });
-            var allNodes = Object.keys(degree);
-            allNodes.sort(function (a, b) { return degree[b] - degree[a]; });
-            var keep = new Set(allNodes.slice(0, maxNodes));
-            edges = edges.filter(function (e) { return keep.has(e.source) && keep.has(e.target); });
-
-            ensureD3(function () { renderGraph(edges, mode, data, maxNodes); });
-        } catch (e) {
-            _err('Graph load failed: ' + (e.message || e));
-        } finally {
-            _hideLoad();
-        }
-    }
-
-    function renderGraph(edges, mode, summary, maxNodes) {
-        var viewer = document.getElementById('graphViewer');
-        viewer.innerHTML = '';
-
-        if (!edges.length) {
-            viewer.innerHTML = '<div class="absolute inset-0 flex items-center justify-center text-gray-400 text-sm">No edges in selected scope.</div>';
-            document.getElementById('graphStats').textContent = '';
-            return;
-        }
-
-        var nodeMap = new Map();
-        function getNode(name) {
-            if (!nodeMap.has(name)) nodeMap.set(name, { id: name, deg: 0 });
-            return nodeMap.get(name);
-        }
-        var links = edges.map(function (e) {
-            var s = getNode(e.source); var t = getNode(e.target);
-            s.deg++; t.deg++;
-            return Object.assign({}, e, { source: s.id, target: t.id });
+async function _graphAppendScopeSelect(container, parentChain) {
+    const parentRel = parentChain.join('/');
+    let dirs = [];
+    try {
+        const r = await apiRoutes.directory.list(parentRel || '.', {
+            dirsOnly: true,
+            includeHidden: false,
+            respectGitignore: true,
+            maxDepth: 1,
         });
-        var nodes = Array.from(nodeMap.values());
-
-        var w = viewer.clientWidth || 1200;
-        var h = viewer.clientHeight || 640;
-
-        var dark = document.documentElement.getAttribute('data-theme') === 'dark';
-        var edgeColor = dark ? '#475569' : '#94a3b8';
-        var labelColor = dark ? '#e2e8f0' : '#1e293b';
-
-        var svg = d3.select(viewer).append('svg')
-            .attr('viewBox', '0 0 ' + w + ' ' + h)
-            .attr('preserveAspectRatio', 'xMidYMid meet')
-            .style('background', 'transparent');
-
-        var defs = svg.append('defs');
-        defs.append('marker')
-            .attr('id', 'arrow').attr('viewBox', '0 -5 10 10')
-            .attr('refX', 16).attr('refY', 0)
-            .attr('markerWidth', 6).attr('markerHeight', 6)
-            .attr('orient', 'auto')
-            .append('path').attr('d', 'M 0,-5 L 10,0 L 0,5').attr('fill', edgeColor);
-
-        var g = svg.append('g');
-
-        var link = g.append('g').attr('class', 'cg-links')
-            .selectAll('line').data(links).enter().append('line')
-            .attr('stroke', edgeColor).attr('stroke-width', 1.2)
-            .attr('marker-end', 'url(#arrow)')
-            .attr('opacity', 0.7);
-
-        var node = g.append('g').attr('class', 'cg-nodes')
-            .selectAll('g').data(nodes).enter().append('g')
-            .attr('class', 'cg-node')
-            .style('cursor', 'grab')
-            .call(d3.drag().on('start', dragStart).on('drag', dragged).on('end', dragEnd));
-
-        node.append('circle')
-            .attr('r', function (d) { return Math.max(5, Math.min(18, 5 + Math.sqrt(d.deg) * 1.4)); })
-            .attr('fill', function (d) { return d.deg >= 5 ? '#ec4899' : colourFor(d.id); })
-            .attr('stroke', dark ? '#0f172a' : '#fff').attr('stroke-width', 1.5);
-
-        node.append('text')
-            .attr('dx', function (d) { return Math.max(6, 4 + Math.sqrt(d.deg)); })
-            .attr('dy', '.35em')
-            .attr('font-size', '11px')
-            .attr('fill', labelColor)
-            .style('pointer-events', 'none')
-            .text(function (d) { return d.id.length > 28 ? d.id.slice(0, 26) + '…' : d.id; });
-
-        node.on('click', function (_event, d) {
-            var msg = d.id + ' (degree=' + d.deg + ')';
-            if (window.notifications) window.notifications.info(msg);
-        });
-        node.append('title').text(function (d) {
-            return d.id + '\nconnections: ' + d.deg;
-        });
-
-        var simulation = d3.forceSimulation(nodes)
-            .force('link', d3.forceLink(links).id(function (d) { return d.id; })
-                .distance(function (l) { return Math.max(50, 110 - Math.min(40, l.source.deg)); })
-                .strength(0.6))
-            .force('charge', d3.forceManyBody()
-                .strength(function (d) { return -180 - Math.min(280, d.deg * 28); })
-                .distanceMax(500))
-            .force('center', d3.forceCenter(w / 2, h / 2))
-            .force('collide', d3.forceCollide().radius(function (d) {
-                return 18 + Math.sqrt(d.deg) * 4;
-            }))
-            .force('x', d3.forceX(w / 2).strength(0.04))
-            .force('y', d3.forceY(h / 2).strength(0.04))
-            .alpha(1).alphaDecay(0.03)
-            .on('tick', ticked);
-
-        function ticked() {
-            link
-                .attr('x1', function (d) { return d.source.x; })
-                .attr('y1', function (d) { return d.source.y; })
-                .attr('x2', function (d) { return d.target.x; })
-                .attr('y2', function (d) { return d.target.y; });
-            node.attr('transform', function (d) { return 'translate(' + d.x + ',' + d.y + ')'; });
-        }
-        function dragStart(event, d) {
-            if (!event.active) simulation.alphaTarget(0.3).restart();
-            d.fx = d.x; d.fy = d.y;
-        }
-        function dragged(event, d) { d.fx = event.x; d.fy = event.y; }
-        function dragEnd(event, d) {
-            if (!event.active) simulation.alphaTarget(0);
-            d.fx = null; d.fy = null;
-        }
-
-        var zoom = d3.zoom().scaleExtent([0.2, 4])
-            .on('zoom', function (event) { g.attr('transform', event.transform); });
-        svg.call(zoom);
-
-        STATE.simulation = simulation; STATE.zoom = zoom; STATE.svg = svg;
-        STATE.nodes = node; STATE.links = link;
-
-        var stats = (summary && summary.summary) || summary || {};
-        var totalEdges = stats.total_edges != null ? stats.total_edges : edges.length;
-        var rendered = nodes.length + ' / ' + (Object.keys(stats.out_index || {}).length || nodes.length);
-        document.getElementById('graphStats').textContent =
-            mode + ' · nodes: ' + nodes.length + ' · edges shown: ' + links.length +
-            ' · total edges: ' + totalEdges +
-            (rendered !== nodes.length ? ' · capped at ' + maxNodes : '');
-        wireSearchHighlight();
+        const data = r.data?.result || {};
+        dirs = (data.entries || data.items || data.children || [])
+            .filter(e => e && (e.is_directory || e.type === 'directory' || e.type === 'dir'))
+            .map(e => e.name)
+            .filter(n => n && !n.startsWith('.'));
+    } catch (e) {
+        // /directory/list isn't available — silently skip this segment.
+        return;
     }
 
-    function colourFor(id) {
-        var h = 0;
-        for (var i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) % 360;
-        return 'hsl(' + h + ',55%,50%)';
-    }
+    if (!dirs.length && parentChain.length > 0) return;
 
-    function wireSearchHighlight() {
-        var input = document.getElementById('graphSearch');
-        if (!input || !STATE.nodes || !STATE.links) return;
-        input.oninput = function () {
-            var q = (input.value || '').toLowerCase().trim();
-            STATE.nodes.style('opacity', function (d) {
-                if (!q) return 1;
-                return d.id.toLowerCase().indexOf(q) >= 0 ? 1 : 0.15;
-            });
-            STATE.links.style('opacity', function (d) {
-                if (!q) return 0.7;
-                var s = (d.source && d.source.id) || d.source;
-                var t = (d.target && d.target.id) || d.target;
-                var hit = (s + '').toLowerCase().indexOf(q) >= 0 ||
-                          (t + '').toLowerCase().indexOf(q) >= 0;
-                return hit ? 0.9 : 0.05;
-            });
-        };
-    }
+    const sel = document.createElement('select');
+    sel.className = 'border border-gray-300 dark:border-gray-600 rounded px-2 py-1 text-xs bg-white dark:bg-gray-900 dark:text-gray-100';
+    const placeholder = parentChain.length === 0 ? '(whole project)' : '— pick subfolder —';
+    const opts = [`<option value="">${placeholder}</option>`].concat(
+        dirs.map(d => `<option value="${d}">${d}/</option>`)
+    );
+    sel.innerHTML = opts.join('');
 
-    function graphResetZoom() {
-        if (!STATE.svg || !STATE.zoom) return;
-        STATE.svg.transition().duration(400).call(STATE.zoom.transform, d3.zoomIdentity);
-    }
+    // Pre-select if this position is already in the chain.
+    const idx = parentChain.length;
+    const existing = (__graphState.scopeChain || [])[idx];
+    if (existing) sel.value = existing;
 
-    document.addEventListener('themechange', function () {
-        if (STATE.svg) loadGraphView();
+    sel.addEventListener('change', async () => {
+        const value = sel.value;
+        const newChain = parentChain.slice();
+        if (value) newChain.push(value);
+        __graphState.scopeChain = newChain;
+        __graphState.scope = newChain.join('/');
+        document.getElementById('graphScope').value = __graphState.scope;
+        _graphSaveState();
+        await _graphRenderScopePicker();
     });
 
-    window.loadGraphView = loadGraphView;
-    window.graphResetZoom = graphResetZoom;
+    container.appendChild(sel);
 
-    // Auto-render on first open
-    setTimeout(loadGraphView, 80);
+    // Add a small "/" separator after non-final selects for readability.
+    if (parentChain.length > 0) {
+        const sep = document.createElement('span');
+        sep.className = 'text-gray-400 text-xs';
+        sep.textContent = '/';
+        container.insertBefore(sep, sel);
+    }
+}
+
+function resetGraphScope() {
+    __graphState.scope = '';
+    __graphState.scopeChain = [];
+    document.getElementById('graphScope').value = '';
+    _graphSaveState();
+    _graphRenderScopePicker();
+}
+
+// -----------------------------------------------------------------------------
+// Data loading
+// -----------------------------------------------------------------------------
+async function loadGraphView() {
+    // Sync UI -> state
+    __graphState.mode = document.getElementById('graphMode').value;
+    __graphState.focus = document.getElementById('graphFocus').value.trim();
+    __graphState.hops = Math.max(0, parseInt(document.getElementById('graphHops').value, 10) || 0);
+    __graphState.maxNodes = Math.max(10, parseInt(document.getElementById('graphMaxNodes').value, 10) || 80);
+    __graphState.maxFiles = Math.max(1, parseInt(document.getElementById('graphMaxFiles').value, 10) || 200);
+    __graphState.cluster = document.getElementById('graphCluster').value;
+    __graphState.search = document.getElementById('graphSearch').value.trim();
+    _graphSaveState();
+
+    const placeholder = document.getElementById('graphPlaceholder');
+    if (placeholder) {
+        placeholder.style.display = '';
+        placeholder.textContent = 'Loading graph…';
+    }
+
+    let payload;
+    try {
+        if (__graphState.mode === 'inheritance') {
+            const params = new URLSearchParams();
+            if (__graphState.scope) params.set('path', __graphState.scope);
+            params.set('max_files', __graphState.maxFiles);
+            params.set('max_nodes', __graphState.maxNodes);
+            const r = await api.get(`/search/inheritance?${params.toString()}`,
+                { userAction: 'Inheritance Graph' });
+            payload = r?.data?.result;
+        } else {
+            const params = new URLSearchParams();
+            if (__graphState.scope) params.set('path', __graphState.scope);
+            params.set('max_files', __graphState.maxFiles);
+            params.set('max_nodes', __graphState.maxNodes);
+            const r = await api.get(`/search/symbols/graph?${params.toString()}`,
+                { userAction: 'Call Graph' });
+            payload = r?.data?.result;
+        }
+    } catch (e) {
+        if (placeholder) placeholder.textContent = `Error: ${e.message || e}`;
+        return;
+    }
+
+    if (!payload) {
+        if (placeholder) placeholder.textContent = 'No graph data returned';
+        return;
+    }
+    __graphState.raw = payload;
+    _graphRender();
+}
+
+// -----------------------------------------------------------------------------
+// Filtering — focus + hops + max-nodes
+// -----------------------------------------------------------------------------
+function _graphPrepareData() {
+    const raw = __graphState.raw;
+    if (!raw || !raw.edges) return { nodes: [], links: [], dropped: 0 };
+
+    // Build adjacency.
+    const inEdges = new Map();   // node → [edge]
+    const outEdges = new Map();
+    const allNodes = new Set();
+    raw.edges.forEach(e => {
+        const a = e.caller || e.subclass || e.from;
+        const b = e.callee || e.base    || e.to;
+        if (!a || !b) return;
+        allNodes.add(a); allNodes.add(b);
+        if (!outEdges.has(a)) outEdges.set(a, []);
+        if (!inEdges.has(b)) inEdges.set(b, []);
+        outEdges.get(a).push({ a, b, raw: e });
+        inEdges.get(b).push({ a, b, raw: e });
+    });
+
+    // BFS from focus if provided.
+    let kept;
+    if (__graphState.focus) {
+        const seed = __graphState.focus;
+        if (!allNodes.has(seed)) {
+            // Attempt suffix match — users often type bare symbol name.
+            const guess = [...allNodes].find(n => n === seed || n.endsWith(`.${seed}`) || n.endsWith(`:${seed}`));
+            if (guess) {
+                kept = _graphBfs(guess, __graphState.hops, inEdges, outEdges);
+            } else {
+                kept = new Set();
+            }
+        } else {
+            kept = _graphBfs(seed, __graphState.hops, inEdges, outEdges);
+        }
+    } else {
+        kept = allNodes;
+    }
+
+    // Build node list with metadata.
+    const nodes = [...kept].map(id => {
+        const filePath = _graphGuessFilePath(id, raw);
+        return {
+            id,
+            file_path: filePath,
+            cluster: _graphCluster(id, filePath),
+            in_degree: (inEdges.get(id) || []).length,
+            out_degree: (outEdges.get(id) || []).length,
+        };
+    });
+
+    // Cap to maxNodes by total degree.
+    nodes.sort((a, b) => (b.in_degree + b.out_degree) - (a.in_degree + a.out_degree));
+    const dropped = Math.max(0, nodes.length - __graphState.maxNodes);
+    const visibleNodes = nodes.slice(0, __graphState.maxNodes);
+    const visibleSet = new Set(visibleNodes.map(n => n.id));
+
+    const links = [];
+    raw.edges.forEach(e => {
+        const a = e.caller || e.subclass || e.from;
+        const b = e.callee || e.base    || e.to;
+        if (visibleSet.has(a) && visibleSet.has(b)) {
+            links.push({ source: a, target: b, line: e.line || null });
+        }
+    });
+
+    return { nodes: visibleNodes, links, dropped };
+}
+
+function _graphBfs(seed, hops, inEdges, outEdges) {
+    const result = new Set([seed]);
+    let frontier = [seed];
+    for (let h = 0; h < hops; h++) {
+        const next = [];
+        frontier.forEach(node => {
+            (outEdges.get(node) || []).forEach(e => { if (!result.has(e.b)) { result.add(e.b); next.push(e.b); } });
+            (inEdges.get(node) || []).forEach(e => { if (!result.has(e.a)) { result.add(e.a); next.push(e.a); } });
+        });
+        frontier = next;
+        if (!frontier.length) break;
+    }
+    return result;
+}
+
+function _graphGuessFilePath(id, raw) {
+    // Many graph payloads include "edges" but not per-node files.  Fall back
+    // to the substring before the last "::" or ":".
+    const e = (raw.edges || []).find(x =>
+        (x.caller === id || x.callee === id || x.subclass === id || x.base === id)
+        && (x.file || x.file_path)
+    );
+    if (e) return _graphRelPath(e.file || e.file_path || '');
+    const m = id.match(/^([^:]+\.(py|js|ts|jsx|tsx|cpp|cc|c|h|hpp|java|go|rs))::/);
+    return m ? _graphRelPath(m[1]) : '';
+}
+
+function _graphCluster(id, filePath) {
+    const mode = __graphState.cluster;
+    if (mode === 'off') return '*';
+    if (mode === 'degree') return ''; // computed during colour assignment below
+    if (mode === 'dir') {
+        if (!filePath) return '(unknown)';
+        const idx = filePath.replace(/\\/g, '/').lastIndexOf('/');
+        return idx > 0 ? filePath.replace(/\\/g, '/').slice(0, idx) : '(root)';
+    }
+    // top-level dir (default)
+    if (!filePath) return '(unknown)';
+    const norm = filePath.replace(/\\/g, '/');
+    const top = norm.split('/')[0] || '(root)';
+    return top;
+}
+
+// -----------------------------------------------------------------------------
+// Render
+// -----------------------------------------------------------------------------
+function _graphRender() {
+    const { nodes, links, dropped } = _graphPrepareData();
+    const stats = document.getElementById('graphStats');
+    if (stats) {
+        const summary = __graphState.raw?.summary || {};
+        const total = summary.total_edges || (__graphState.raw?.edges || []).length;
+        // Node count > 1500 → switch to canvas to avoid SVG layout thrash.
+        // The threshold is empirical: SVG handles ~1500 elements smoothly,
+        // beyond that the DOM becomes the bottleneck.
+        const useCanvas = nodes.length > 1500;
+        stats.textContent = `nodes: ${nodes.length}  •  edges: ${links.length}  •  total edges: ${total}` +
+            (dropped ? `  •  dropped: ${dropped}` : '') +
+            (useCanvas ? '  •  canvas' : '');
+    }
+
+    const placeholder = document.getElementById('graphPlaceholder');
+    if (!nodes.length) {
+        if (placeholder) {
+            placeholder.style.display = '';
+            placeholder.textContent = __graphState.focus
+                ? `No nodes within ${__graphState.hops} hop(s) of "${__graphState.focus}"`
+                : 'No nodes — try lowering filters or running /search/index first';
+        }
+        return;
+    }
+    if (placeholder) placeholder.style.display = 'none';
+
+    // Cluster colour scale (shared by both renderers).
+    const clusters = [...new Set(nodes.map(n => n.cluster))].sort();
+    const colour = d3.scaleOrdinal()
+        .domain(clusters)
+        .range(d3.schemeTableau10.concat(d3.schemeSet3 || []));
+    _graphRenderLegend(clusters, colour);
+
+    // Tear down any previous renderer state.
+    const viewer = document.getElementById('graphViewer');
+    viewer.querySelectorAll('svg.graph-svg, canvas.graph-canvas').forEach(el => el.remove());
+    if (__graphState.sim) { try { __graphState.sim.stop(); } catch (e) { /* ignore */ } }
+    __graphState.svg = null;
+    __graphState.g = null;
+
+    if (nodes.length > 1500) {
+        _graphRenderCanvas(nodes, links, colour);
+    } else {
+        _graphRenderSvg(nodes, links, colour);
+    }
+
+    if (__graphState.selected) _graphHighlightSelected();
+}
+
+function _graphRenderSvg(nodes, links, colour) {
+    const viewer = document.getElementById('graphViewer');
+    const w = viewer.clientWidth || 800;
+    const h = viewer.clientHeight || 600;
+    const svg = d3.select(viewer).append('svg')
+        .attr('class', 'graph-svg w-full h-full')
+        .attr('viewBox', `0 0 ${w} ${h}`);
+    const g = svg.append('g');
+    const zoom = d3.zoom()
+        .scaleExtent([0.2, 4])
+        .on('zoom', (ev) => g.attr('transform', ev.transform));
+    svg.call(zoom);
+    __graphState.svg = svg;
+    __graphState.g = g;
+    __graphState.zoom = zoom;
+
+    const link = g.append('g')
+        .attr('stroke', '#9CA3AF')
+        .attr('stroke-opacity', 0.4)
+        .selectAll('line')
+        .data(links)
+        .join('line')
+        .attr('stroke-width', 1);
+
+    const sim = d3.forceSimulation(nodes)
+        .force('link', d3.forceLink(links).id(d => d.id).distance(80).strength(0.6))
+        .force('charge', d3.forceManyBody().strength(-180))
+        .force('center', d3.forceCenter(w / 2, h / 2))
+        .force('collide', d3.forceCollide().radius(d => 14 + Math.sqrt(d.in_degree + d.out_degree) * 2.5));
+    __graphState.sim = sim;
+
+    const nodeGroup = g.append('g')
+        .selectAll('g.node')
+        .data(nodes, d => d.id)
+        .join('g')
+        .attr('class', 'node cursor-pointer')
+        .call(d3.drag()
+            .on('start', (ev, d) => { if (!ev.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+            .on('drag', (ev, d) => { d.fx = ev.x; d.fy = ev.y; })
+            .on('end', (ev, d) => { if (!ev.active) sim.alphaTarget(0); d.fx = null; d.fy = null; }))
+        .on('click', (ev, d) => { ev.stopPropagation(); _graphSelectNode(d); });
+
+    nodeGroup.append('circle')
+        .attr('r', d => 5 + Math.sqrt(d.in_degree + d.out_degree) * 2.5)
+        .attr('fill', d => __graphState.cluster === 'degree'
+            ? d3.interpolateViridis(Math.min(1, (d.in_degree + d.out_degree) / 12))
+            : colour(d.cluster))
+        .attr('stroke', '#fff')
+        .attr('stroke-width', 1.4);
+
+    nodeGroup.append('text')
+        .attr('dx', 9)
+        .attr('dy', '.35em')
+        .attr('font-size', 11)
+        .attr('font-family', 'ui-sans-serif, system-ui')
+        .attr('paint-order', 'stroke')
+        .attr('stroke', 'rgba(255,255,255,0.7)')
+        .attr('stroke-width', 3)
+        .attr('fill', '#1F2937')
+        .text(d => _graphShortLabel(d.id));
+
+    nodeGroup.append('title').text(d => `${d.id}\nin: ${d.in_degree}  out: ${d.out_degree}\n${d.file_path || ''}`);
+
+    if (__graphState.search) {
+        const term = __graphState.search.toLowerCase();
+        nodeGroup.classed('graph-node-match', d => d.id.toLowerCase().includes(term));
+    }
+
+    sim.on('tick', () => {
+        link.attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+            .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+        nodeGroup.attr('transform', d => `translate(${d.x},${d.y})`);
+    });
+}
+
+// =============================================================================
+// Canvas renderer for very large graphs (>1500 nodes)
+//
+// We still use D3's force simulation for layout, but draw to a HTML canvas
+// in the tick callback.  This avoids the per-element DOM mutations that
+// make SVG slow.  Hit-testing for clicks is a linear scan — fine up to
+// ~10k nodes for our use case.
+// =============================================================================
+function _graphRenderCanvas(nodes, links, colour) {
+    const viewer = document.getElementById('graphViewer');
+    const w = viewer.clientWidth || 800;
+    const h = viewer.clientHeight || 600;
+    const dpr = window.devicePixelRatio || 1;
+
+    const canvas = document.createElement('canvas');
+    canvas.className = 'graph-canvas w-full h-full block cursor-grab';
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+    viewer.appendChild(canvas);
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+
+    // Pan + zoom state — manual since we can't reuse d3-zoom on canvas
+    // without an overlay element.  We store the transform on __graphState
+    // so it survives re-renders.
+    const transform = { x: 0, y: 0, k: 1 };
+    __graphState.zoom = { transform };
+
+    const sim = d3.forceSimulation(nodes)
+        .force('link', d3.forceLink(links).id(d => d.id).distance(70).strength(0.5))
+        .force('charge', d3.forceManyBody().strength(-120))
+        .force('center', d3.forceCenter(w / 2, h / 2))
+        .force('collide', d3.forceCollide().radius(d => 6 + Math.sqrt(d.in_degree + d.out_degree) * 1.4))
+        .alphaDecay(0.04);
+    __graphState.sim = sim;
+
+    const searchTerm = (__graphState.search || '').toLowerCase();
+
+    function _draw() {
+        ctx.save();
+        ctx.clearRect(0, 0, w, h);
+        ctx.translate(transform.x, transform.y);
+        ctx.scale(transform.k, transform.k);
+
+        // Edges
+        ctx.strokeStyle = 'rgba(156, 163, 175, 0.4)';
+        ctx.lineWidth = 1 / transform.k;
+        ctx.beginPath();
+        for (const e of links) {
+            const a = e.source, b = e.target;
+            if (typeof a !== 'object' || typeof b !== 'object') continue;
+            ctx.moveTo(a.x, a.y);
+            ctx.lineTo(b.x, b.y);
+        }
+        ctx.stroke();
+
+        // Nodes
+        const showLabels = transform.k > 0.7 && nodes.length < 4000;
+        for (const n of nodes) {
+            const r = 3 + Math.sqrt(n.in_degree + n.out_degree) * 1.4;
+            const fill = __graphState.cluster === 'degree'
+                ? d3.interpolateViridis(Math.min(1, (n.in_degree + n.out_degree) / 12))
+                : colour(n.cluster);
+            ctx.fillStyle = fill;
+            const isMatch = searchTerm && n.id.toLowerCase().includes(searchTerm);
+            const isSelected = __graphState.selected === n.id;
+            ctx.beginPath();
+            ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+            ctx.fill();
+            if (isSelected || isMatch) {
+                ctx.lineWidth = (isSelected ? 3 : 2) / transform.k;
+                ctx.strokeStyle = isSelected ? '#EF4444' : '#F59E0B';
+                ctx.stroke();
+            } else {
+                ctx.lineWidth = 1.2 / transform.k;
+                ctx.strokeStyle = '#fff';
+                ctx.stroke();
+            }
+            if (showLabels && (isSelected || isMatch || (n.in_degree + n.out_degree) > 8)) {
+                ctx.fillStyle = '#1F2937';
+                ctx.font = `${11 / transform.k}px ui-sans-serif`;
+                ctx.fillText(_graphShortLabel(n.id), n.x + r + 3, n.y + 4 / transform.k);
+            }
+        }
+        ctx.restore();
+    }
+    sim.on('tick', _draw);
+
+    // ----- interaction: pan, zoom, click -----
+    let dragging = null;
+    let panStart = null;
+
+    function _hit(event) {
+        const rect = canvas.getBoundingClientRect();
+        const sx = (event.clientX - rect.left - transform.x) / transform.k;
+        const sy = (event.clientY - rect.top - transform.y) / transform.k;
+        let best = null, bestDist = Infinity;
+        for (const n of nodes) {
+            const r = 3 + Math.sqrt(n.in_degree + n.out_degree) * 1.4;
+            const dx = sx - n.x, dy = sy - n.y;
+            const d2 = dx * dx + dy * dy;
+            if (d2 < (r + 4) * (r + 4) && d2 < bestDist) {
+                best = n; bestDist = d2;
+            }
+        }
+        return best;
+    }
+
+    canvas.addEventListener('mousedown', (e) => {
+        const node = _hit(e);
+        if (node) {
+            dragging = node;
+            sim.alphaTarget(0.3).restart();
+            node.fx = node.x; node.fy = node.y;
+        } else {
+            panStart = { x: e.clientX, y: e.clientY, tx: transform.x, ty: transform.y };
+            canvas.style.cursor = 'grabbing';
+        }
+    });
+    window.addEventListener('mousemove', (e) => {
+        if (dragging) {
+            const rect = canvas.getBoundingClientRect();
+            dragging.fx = (e.clientX - rect.left - transform.x) / transform.k;
+            dragging.fy = (e.clientY - rect.top - transform.y) / transform.k;
+        } else if (panStart) {
+            transform.x = panStart.tx + (e.clientX - panStart.x);
+            transform.y = panStart.ty + (e.clientY - panStart.y);
+            _draw();
+        }
+    });
+    window.addEventListener('mouseup', () => {
+        if (dragging) {
+            sim.alphaTarget(0);
+            dragging.fx = null; dragging.fy = null;
+            dragging = null;
+        }
+        panStart = null;
+        canvas.style.cursor = 'grab';
+    });
+    canvas.addEventListener('click', (e) => {
+        if (panStart) return;
+        const node = _hit(e);
+        if (node) _graphSelectNode(node);
+    });
+    canvas.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const rect = canvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+        const factor = Math.exp(-e.deltaY * 0.001);
+        const newK = Math.max(0.2, Math.min(4, transform.k * factor));
+        // zoom around cursor
+        transform.x = mx - (mx - transform.x) * (newK / transform.k);
+        transform.y = my - (my - transform.y) * (newK / transform.k);
+        transform.k = newK;
+        _draw();
+    }, { passive: false });
+
+    // Initial draw before the simulation produces any ticks (otherwise
+    // we get a blank canvas for the first ~50ms).
+    _draw();
+}
+
+function _graphRenderLegend(clusters, colour) {
+    const legend = document.getElementById('graphClusterLegend');
+    if (!legend) return;
+    if (__graphState.cluster === 'off' || __graphState.cluster === 'degree') {
+        legend.innerHTML = `<span class="text-gray-500 text-xs">${__graphState.cluster === 'off' ? 'Uniform colouring' : 'Coloured by hub size'}</span>`;
+        return;
+    }
+    legend.innerHTML = clusters.map(c =>
+        `<span class="inline-flex items-center"><span class="inline-block w-3 h-3 rounded-full mr-1" style="background:${colour(c)}"></span>${c || '(unknown)'}</span>`
+    ).join('');
+}
+
+function _graphShortLabel(id) {
+    // Shorten "module.path::ClassName::method" → "method"
+    if (typeof id !== 'string') return String(id);
+    const parts = id.split('::');
+    return parts[parts.length - 1] || id;
+}
+
+// -----------------------------------------------------------------------------
+// Side panel
+// -----------------------------------------------------------------------------
+async function _graphSelectNode(node) {
+    __graphState.selected = node.id;
+    document.getElementById('graphSidePanel').classList.remove('hidden');
+    document.getElementById('graphSidePanel').classList.add('flex');
+    document.getElementById('graphSelectedTitle').textContent = node.id;
+    document.getElementById('graphSelectedMeta').innerHTML =
+        `<i class="fas fa-folder mr-1"></i> ${node.file_path || '(unknown file)'} ` +
+        `<span class="ml-2"><i class="fas fa-arrow-down text-orange-400 mr-0.5"></i>${node.in_degree} ` +
+        `<i class="fas fa-arrow-right text-emerald-500 ml-1 mr-0.5"></i>${node.out_degree}</span>`;
+    _graphHighlightSelected();
+
+    // Fetch authoritative callers/callees via the dedicated endpoint so we
+    // always get the full list (the rendered graph may have dropped some).
+    try {
+        const params = { symbol: node.id, direction: 'both', max_files: __graphState.maxFiles };
+        if (__graphState.scope) params.path = __graphState.scope;
+        const r = await api.post('/search/symbols/relations', params, { userAction: 'Symbol Relations' });
+        const data = r?.data?.result || {};
+        _graphFillList('graphCallersList', 'graphCallersCount', (data.callers && data.callers.edges) || [], 'caller');
+        _graphFillList('graphCalleesList', 'graphCalleesCount', (data.callees && data.callees.edges) || [], 'callee');
+    } catch (e) {
+        document.getElementById('graphCallersList').innerHTML =
+            `<li class="text-red-500">Failed: ${e.message || e}</li>`;
+    }
+}
+
+function _graphFillList(listId, countId, edges, mode) {
+    const ul = document.getElementById(listId);
+    document.getElementById(countId).textContent = edges.length;
+    if (!edges.length) {
+        ul.innerHTML = '<li class="text-gray-400">none</li>';
+        return;
+    }
+    ul.innerHTML = edges.slice(0, 200).map(e => {
+        const other = mode === 'caller' ? (e.caller || e.from) : (e.callee || e.to);
+        const file = _graphRelPath(e.file || e.file_path || '');
+        const line = e.line || '';
+        return `<li class="flex items-center justify-between border-b border-gray-100 dark:border-gray-700 pb-1">
+            <button class="font-mono text-left truncate text-indigo-600 dark:text-indigo-300 hover:underline"
+                    onclick="_graphFocusByName('${(other || '').replace(/'/g, "\\'")}')">${other || '?'}</button>
+            ${file ? `<span class="text-[11px] text-gray-500 dark:text-gray-400 ml-2 truncate">${file}${line ? ':' + line : ''}</span>` : ''}
+        </li>`;
+    }).join('');
+}
+
+function _graphHighlightSelected() {
+    const sel = __graphState.selected;
+    // SVG path
+    if (__graphState.g) {
+        __graphState.g.selectAll('g.node circle')
+            .attr('stroke', d => d.id === sel ? '#EF4444' : '#fff')
+            .attr('stroke-width', d => d.id === sel ? 3 : 1.4);
+    }
+    // Canvas path — kick the simulation so the next tick redraws with
+    // the highlight.  When the sim is at rest we trigger one frame.
+    if (__graphState.sim && !__graphState.g) {
+        __graphState.sim.alpha(Math.max(__graphState.sim.alpha(), 0.05)).restart();
+    }
+}
+
+function graphCloseSidePanel() {
+    document.getElementById('graphSidePanel').classList.add('hidden');
+    document.getElementById('graphSidePanel').classList.remove('flex');
+    __graphState.selected = null;
+    _graphHighlightSelected();
+}
+
+function graphFocusSelected() {
+    if (!__graphState.selected) return;
+    document.getElementById('graphFocus').value = __graphState.selected;
+    loadGraphView();
+}
+
+function _graphFocusByName(name) {
+    document.getElementById('graphFocus').value = name;
+    loadGraphView();
+}
+
+async function graphViewSelectedSource() {
+    if (!__graphState.selected) return;
+    // Find best file path from the rendered nodes.
+    const node = __graphState.raw && __graphState.raw.edges && __graphState.raw.edges.find(e =>
+        (e.caller === __graphState.selected || e.callee === __graphState.selected)
+        && (e.file || e.file_path));
+    let file = node && (node.file || node.file_path);
+    if (!file) {
+        notifications && notifications.warning('No source location available for this symbol');
+        return;
+    }
+    // Backend may return absolute Windows paths — convert to relative.
+    file = _graphRelPath(file);
+    const symbol = _graphShortLabel(__graphState.selected);
+    try {
+        const r = await apiRoutes.files.read(file, { symbolName: symbol, occurrence: 1, withLineNumbers: true });
+        if (r.success && r.data?.result?.success !== false) {
+            if (typeof window.showCodePreviewModal === 'function') {
+                window.showCodePreviewModal(file, r.data.result.content, {
+                    title: `${symbol} — ${file}`,
+                    highlightLine: r.data.result.start_line || 1,
+                });
+            }
+        } else {
+            notifications && notifications.error('Could not load source for this symbol');
+        }
+    } catch (e) {
+        notifications && notifications.error(`Error: ${e.message || e}`);
+    }
+}
+
+function _graphRelPath(p) {
+    if (!p) return '';
+    let s = String(p).replace(/\\/g, '/');
+    // If a working_directory comes back from /health/working-directory, we
+    // can use it.  Cheap fallback: strip up to and including the project
+    // root keyword "codebase-mcp/" or the configured wd.
+    const wd = (window.__appWorkingDir || '').replace(/\\/g, '/');
+    if (wd && s.toLowerCase().startsWith(wd.toLowerCase())) {
+        s = s.slice(wd.length);
+        if (s.startsWith('/')) s = s.slice(1);
+    }
+    return s;
+}
+
+function graphResetZoom() {
+    if (__graphState.svg && __graphState.zoom && typeof __graphState.zoom.transform === 'function') {
+        __graphState.svg.transition().duration(300)
+            .call(__graphState.zoom.transform, d3.zoomIdentity);
+    } else if (__graphState.zoom && __graphState.zoom.transform) {
+        // Canvas mode: reset our manual transform and redraw.
+        const t = __graphState.zoom.transform;
+        t.x = 0; t.y = 0; t.k = 1;
+        if (__graphState.sim) __graphState.sim.alpha(0.05).restart();
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Bootstrap
+// -----------------------------------------------------------------------------
+(function _graphBoot() {
+    _graphLoadState();
+
+    // The section HTML is re-injected by the component loader every time the
+    // user navigates to "Code Graph Viewer".  Drop SVG / simulation handles
+    // from the previous render so we don't try to mutate detached nodes.
+    if (__graphState.sim) { try { __graphState.sim.stop(); } catch (e) { /* ignore */ } }
+    __graphState.svg = null;
+    __graphState.g = null;
+    __graphState.zoom = null;
+    __graphState.sim = null;
+    __graphState.selected = null;
+
+    // Restore UI from saved state.
+    const sel = (id, val) => { const e = document.getElementById(id); if (e && val != null) e.value = val; };
+    sel('graphMode', __graphState.mode);
+    sel('graphFocus', __graphState.focus);
+    sel('graphHops', __graphState.hops);
+    sel('graphMaxNodes', __graphState.maxNodes);
+    sel('graphMaxFiles', __graphState.maxFiles);
+    sel('graphCluster', __graphState.cluster);
+    sel('graphSearch', __graphState.search);
+    sel('graphScope', __graphState.scope);
+
+    _graphRenderScopePicker();
+
+    // Live re-render on filter change without re-fetching the graph.
+    ['graphHops', 'graphMaxNodes', 'graphCluster', 'graphSearch', 'graphFocus'].forEach(id => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.addEventListener('change', () => {
+            __graphState.focus = document.getElementById('graphFocus').value.trim();
+            __graphState.hops = parseInt(document.getElementById('graphHops').value, 10) || 0;
+            __graphState.maxNodes = parseInt(document.getElementById('graphMaxNodes').value, 10) || 80;
+            __graphState.cluster = document.getElementById('graphCluster').value;
+            __graphState.search = document.getElementById('graphSearch').value.trim();
+            _graphSaveState();
+            if (__graphState.raw) _graphRender();
+        });
+        if (id === 'graphSearch') {
+            el.addEventListener('input', () => {
+                __graphState.search = el.value.trim();
+                _graphSaveState();
+                if (__graphState.raw) _graphRender();
+            });
+        }
+    });
+
+    // Auto-load on first render of the section.
+    if (typeof loadGraphView === 'function') {
+        setTimeout(loadGraphView, 100);
+    }
 })();
 </script>
+
+<style>
+.graph-svg { background: transparent; }
+.graph-node-match circle { stroke: #F59E0B !important; stroke-width: 3 !important; }
+</style>

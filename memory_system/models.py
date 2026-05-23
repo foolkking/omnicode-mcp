@@ -77,6 +77,19 @@ class MemorySearchRequest(BaseModel):
     include_archived: bool = False
     tags: List[str] = Field(default_factory=list)
     recent_days: Optional[int] = None  # Only recent memories
+    # Cosine-similarity threshold below which a memory is considered
+    # *not* a match. Default 0.35 — embeddings of unrelated short
+    # strings hover around 0.1-0.3, so this rejects clearly irrelevant
+    # memories instead of returning every row in the DB.
+    min_score: float = Field(default=0.35, ge=0.0, le=1.0)
+
+
+class MemoryMatchField(BaseModel):
+    """Where, inside a memory, the query actually matched."""
+
+    field: str            # 'content' / 'tags' / 'category' / 'related_files' / 'subcategory' / 'embedding'
+    snippet: str = ""     # ~120 chars around the match, or the whole hit for short fields
+    weight: float = 1.0   # how much this field contributed to the score
 
 
 class MemoryResult(BaseModel):
@@ -84,7 +97,10 @@ class MemoryResult(BaseModel):
 
     memory: Memory
     relevance_score: Optional[float] = None
-    match_reason: Optional[str] = None  # Why this was matched
+    match_reason: Optional[str] = None  # Why this was matched (kept for back-compat)
+    match_fields: List[MemoryMatchField] = Field(default_factory=list)
+    semantic_score: Optional[float] = None  # raw cosine similarity
+    keyword_score: Optional[float] = None   # 0..1, fraction of query terms matched in any field
 
 
 class MemoryStats(BaseModel):

@@ -280,8 +280,24 @@ def get_provider_registry(db_path: Optional[str | Path] = None) -> ProviderRegis
     with _singleton_lock:
         if _default_registry is None:
             if db_path is None:
-                # Default to .data/providers.db relative to CWD
-                db_path = Path(".data") / "providers.db"
+                # Default — only used as a last resort.  Lifespan resolves the
+                # real path via :func:`omnicode.config.settings.resolve_provider_db_path`
+                # so the user-level shared DB at ``~/.kiro/codebase-mcp/providers.db``
+                # is preferred.
+                from omnicode.config.settings import _user_data_dir
+                db_path = _user_data_dir() / "providers.db"
             _default_registry = ProviderRegistry(db_path)
             logger.info("Provider registry initialised at %s", db_path)
         return _default_registry
+
+
+def reset_provider_registry() -> None:
+    """Clear the cached singleton.
+
+    Called when switching working directories so the next
+    ``get_provider_registry()`` call rebuilds the registry against the
+    newly resolved DB path.
+    """
+    global _default_registry
+    with _singleton_lock:
+        _default_registry = None

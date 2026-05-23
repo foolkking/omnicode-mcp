@@ -532,8 +532,15 @@ class LLMRouter:
         name: str,
         prompt: str = "Reply with the single word: pong.",
         max_tokens: int = 16,
+        timeout_seconds: float = 20.0,
     ) -> Dict[str, Any]:
-        """Send a tiny prompt through a specific provider for verification."""
+        """Send a tiny prompt through a specific provider for verification.
+
+        Wrapped in :func:`asyncio.wait_for` so a stuck network call doesn't
+        block the UI's spinner forever.  Default 20s — enough for cold
+        starts on slow self-hosted gateways but short enough that broken
+        configs surface quickly.
+        """
         provider = self.providers.get(name)
         if provider is None:
             cfg = self.registry.get(name)
@@ -545,10 +552,13 @@ class LLMRouter:
 
         start = time.perf_counter()
         try:
-            response = await provider.complete(
-                [LLMMessage(role=Role.USER, content=prompt)],
-                temperature=0.0,
-                max_tokens=max_tokens,
+            response = await asyncio.wait_for(
+                provider.complete(
+                    [LLMMessage(role=Role.USER, content=prompt)],
+                    temperature=0.0,
+                    max_tokens=max_tokens,
+                ),
+                timeout=timeout_seconds,
             )
             duration_ms = (time.perf_counter() - start) * 1000
             return {
@@ -559,6 +569,24 @@ class LLMRouter:
                 "content": (response.content or "")[:200],
                 "tokens": response.total_tokens,
                 "cost_usd": round(response.cost, 6),
+            }
+        except asyncio.TimeoutError:
+            duration_ms = (time.perf_counter() - start) * 1000
+            cfg = self.registry.get(name)
+            target = cfg.api_base if cfg and cfg.api_base else "the provider"
+            return {
+                "success": False,
+                "provider": name,
+                "duration_ms": round(duration_ms, 2),
+                "error": f"Timed out after {int(timeout_seconds)}s waiting for {target}",
+                "error_type": "TimeoutError",
+                "hint": (
+                    f"The provider didn't respond within {int(timeout_seconds)}s. "
+                    "If it's a self-hosted gateway, make sure it's actually running "
+                    "and reachable from this process; if it's a public API, the "
+                    "network may be down."
+                ),
+                "hint_field": "api_base",
             }
         except Exception as exc:
             duration_ms = (time.perf_counter() - start) * 1000
@@ -571,6 +599,7 @@ class LLMRouter:
 
             # Friendly hint for common misconfigurations.
             hint: Optional[str] = None
+            hint_field: Optional[str] = None  # which form field is most likely wrong
             cfg = self.registry.get(name)
             if cfg is not None:
                 model = (cfg.model or "").strip()
@@ -589,6 +618,7 @@ class LLMRouter:
                         "Make sure that server is running and the URL "
                         "(usually ending in /v1) is correct."
                     )
+                    hint_field = "api_base"
                 # Vertex ADC failure — only meaningful when api_base is NOT set
                 elif (
                     not cfg.api_base
@@ -600,6 +630,7 @@ class LLMRouter:
                             "GCP ADC. If you meant the Google AI Studio API key, "
                             f"change the model field to 'gemini/{model}'."
                         )
+                        hint_field = "model"
                 # 404 / model-not-found from a self-hosted gateway — usually
                 # means the model id isn't loaded on that server.
                 elif cfg.api_base and (
@@ -613,6 +644,7 @@ class LLMRouter:
                         f"{cfg.api_base}. Check `GET {cfg.api_base.rstrip('/')}/models` "
                         "to see which model IDs that server actually serves."
                     )
+                    hint_field = "model"
                 # 401 / API key invalid
                 elif "api key" in lower_raw and "not valid" in lower_raw:
                     if cfg.api_base:
@@ -624,8 +656,10 @@ class LLMRouter:
                         )
                     else:
                         hint = "API key was rejected by the provider. Verify the key is correct and active."
+                    hint_field = "api_key"
                 elif "api key" in lower_raw and not cfg.api_key:
                     hint = "No API key set for this provider."
+                    hint_field = "api_key"
 
             payload: Dict[str, Any] = {
                 "success": False,
@@ -636,6 +670,8 @@ class LLMRouter:
             }
             if hint:
                 payload["hint"] = hint
+            if hint_field:
+                payload["hint_field"] = hint_field
             return payload
 
     # ------------------------------------------------------------ chains

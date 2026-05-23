@@ -281,13 +281,7 @@ async function validateWorkingDir() {
         }
     }
 }
-function showLoading(message = 'Loading...') {
-    const overlay = document.getElementById('loading-overlay');
-    if (overlay) {
-        overlay.querySelector('span').textContent = message;
-        overlay.classList.remove('hidden');
-    }
-}
+// showLoading/hideLoading are now provided by /static/js/utils/loading.js
 
 async function changeWorkingDir() {
     const newPath = document.getElementById('newWorkingDir').value.trim();
@@ -566,12 +560,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // Utility functions
 
-function hideLoading() {
-    const overlay = document.getElementById('loading-overlay');
-    if (overlay) {
-        overlay.classList.add('hidden');
-    }
-}
+// hideLoading is provided by /static/js/utils/loading.js
 
 // =============================================================================
 // Folder picker — modal that lets the user navigate the filesystem and pick a

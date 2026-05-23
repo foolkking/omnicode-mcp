@@ -17,10 +17,32 @@ class VectorStore:
         self.dimension = dimension
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        # FAISS index is persisted next to the SQLite metadata so semantic
+        # search survives process restarts.  Without this, ``index.ntotal``
+        # stays at 0 after a reboot and every semantic query returns [].
+        self.faiss_path = self.db_path.with_suffix(".faiss")
 
         # Use IndexIDMap to support deletion/updates in FAISS
-        self.index = faiss.IndexIDMap(faiss.IndexFlatIP(dimension))
+        if self.faiss_path.exists():
+            try:
+                self.index = faiss.read_index(str(self.faiss_path))
+                logger.info(
+                    "Loaded FAISS index from %s (ntotal=%d)",
+                    self.faiss_path, self.index.ntotal,
+                )
+            except Exception as exc:
+                logger.warning("Could not read FAISS index %s: %s — rebuilding empty", self.faiss_path, exc)
+                self.index = faiss.IndexIDMap(faiss.IndexFlatIP(dimension))
+        else:
+            self.index = faiss.IndexIDMap(faiss.IndexFlatIP(dimension))
         self._init_db()
+
+    def _persist_index(self) -> None:
+        """Flush the FAISS index to disk so semantic search survives restarts."""
+        try:
+            faiss.write_index(self.index, str(self.faiss_path))
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Failed to persist FAISS index to %s: %s", self.faiss_path, exc)
 
     def _init_db(self):
         self.conn = sqlite3.connect(self.db_path)
@@ -37,7 +59,51 @@ class VectorStore:
             metadata JSON
         )
         ''')
+        # Track FAISS embeddings as a BLOB column so we can rebuild the
+        # in-memory ANN index from disk on startup.  Older databases that
+        # were created without this column will get it migrated in here.
+        cursor.execute("PRAGMA table_info(chunks)")
+        cols = {row[1] for row in cursor.fetchall()}
+        if "embedding" not in cols:
+            cursor.execute("ALTER TABLE chunks ADD COLUMN embedding BLOB")
         self.conn.commit()
+
+        # Self-heal: if SQLite has chunks but the FAISS index doesn't, try
+        # rebuilding from the embedding BLOB column.  When that column is
+        # also empty (e.g. legacy DBs from before the BLOB was added) we
+        # leave a clear log line so the operator runs `/search/index`.
+        cursor.execute("SELECT COUNT(*) FROM chunks")
+        chunk_count = cursor.fetchone()[0]
+        if chunk_count > 0 and self.index.ntotal == 0:
+            cursor.execute("SELECT faiss_id, embedding FROM chunks WHERE embedding IS NOT NULL")
+            rows = cursor.fetchall()
+            rebuilt = 0
+            if rows:
+                ids = []
+                vecs = []
+                for r in rows:
+                    try:
+                        vec = np.frombuffer(r["embedding"], dtype=np.float32)
+                        if vec.size != self.dimension:
+                            continue
+                        ids.append(int(r["faiss_id"]))
+                        vecs.append(vec)
+                    except Exception:
+                        continue
+                if vecs:
+                    arr = np.vstack(vecs).astype(np.float32)
+                    faiss.normalize_L2(arr)
+                    self.index.add_with_ids(arr, np.array(ids, dtype=np.int64))
+                    rebuilt = len(vecs)
+                    self._persist_index()
+            if rebuilt:
+                logger.info("Rebuilt FAISS index from %d stored embeddings", rebuilt)
+            else:
+                logger.warning(
+                    "%d chunks in %s but no on-disk FAISS index — semantic search "
+                    "will return 0 results until you POST /search/index.",
+                    chunk_count, self.db_path,
+                )
 
     def _get_next_faiss_id(self) -> int:
         cursor = self.conn.cursor()
@@ -62,10 +128,15 @@ class VectorStore:
         # Add to SQLite
         cursor = self.conn.cursor()
         cursor.execute('''
-        INSERT OR REPLACE INTO chunks (faiss_id, chunk_id, file_path, chunk_type, content, metadata)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ''', (faiss_id, chunk_id, file_path, chunk_type, content, json.dumps(metadata or {})))
+        INSERT OR REPLACE INTO chunks (faiss_id, chunk_id, file_path, chunk_type, content, metadata, embedding)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            faiss_id, chunk_id, file_path, chunk_type, content,
+            json.dumps(metadata or {}),
+            embedding.tobytes(),  # 384 * float32 = 1536 bytes
+        ))
         self.conn.commit()
+        self._persist_index()
 
     async def delete_by_file(self, file_path: str):
         """Properly delete chunks associated with a file from both SQLite and FAISS"""
@@ -85,6 +156,7 @@ class VectorStore:
         # Remove from SQLite
         cursor.execute('DELETE FROM chunks WHERE file_path = ?', (file_path,))
         self.conn.commit()
+        self._persist_index()
 
     async def search(self, query_embedding: np.ndarray, top_k: int = 10, metadata_filter: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         """Search with post-filtering"""

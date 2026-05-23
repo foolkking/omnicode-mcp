@@ -64,10 +64,50 @@ async def initialize_services() -> None:
 
     try:
         # Initialize LLM Router (Model Gateway)
-        from omnicode.llm.provider_registry import get_provider_registry
-        # Initialise registry with the configured DB path before constructing
-        # the router so customs persist across restarts.
-        get_provider_registry(settings.PROVIDER_DB_PATH)
+        from omnicode.config.settings import resolve_provider_db_path, _user_data_dir
+        from omnicode.llm.provider_registry import get_provider_registry, reset_provider_registry
+        from omnicode.llm.provider_selection import (
+            get_provider_selection_store,
+            reset_provider_selection_store,
+        )
+        # Reset module-level singletons so a working-directory switch
+        # actually picks up the new (or shared) DB instead of reusing the
+        # one created on the previous boot.
+        reset_provider_registry()
+        reset_provider_selection_store()
+
+        # One-time migration: if the user previously had a project-local
+        # ``<wd>/.data/providers.db`` but no user-level one, copy it up so
+        # their existing API keys are immediately available across all
+        # projects.  Subsequent edits go through the user-level DB.
+        try:
+            from pathlib import Path as _P
+            import shutil as _shutil
+            user_db = _user_data_dir() / "providers.db"
+            project_db = _P(working_dir) / ".data" / "providers.db"
+            if project_db.exists() and not user_db.exists():
+                user_db.parent.mkdir(parents=True, exist_ok=True)
+                _shutil.copy2(project_db, user_db)
+                # Also copy the encryption key so existing rows can be
+                # decrypted with the same SecretBox.
+                project_key = project_db.with_name("providers.key")
+                user_key = user_db.with_name("providers.key")
+                if project_key.exists() and not user_key.exists():
+                    _shutil.copy2(project_key, user_key)
+                logger.info(
+                    "🔁 Migrated provider DB %s → %s (user-level shared store)",
+                    project_db, user_db,
+                )
+        except Exception as exc:
+            logger.warning("Provider DB migration skipped: %s", exc)
+
+        provider_db = resolve_provider_db_path(working_dir)
+        logger.info(f"📦 Provider registry DB: {provider_db}")
+        get_provider_registry(provider_db)
+        # Selections (role → provider mapping) live next to the registry.
+        from pathlib import Path as _Path
+        selections_db = str(_Path(provider_db).with_name("selections.db"))
+        get_provider_selection_store(selections_db)
         llm_router = LLMRouter()
         set_llm_router(llm_router)
         logger.info("✅ LLM Router (Model Gateway) initialized")

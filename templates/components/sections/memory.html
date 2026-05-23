@@ -316,8 +316,19 @@ function displayMemories(memories) {
                 const filesHtml = (memory.related_files && memory.related_files.length)
                     ? `<div class="mt-2 text-xs text-gray-500 flex items-center"><i class="fas fa-file-code mr-1"></i><span class="truncate" title="${_esc(memory.related_files.join('\n'))}">${memory.related_files.slice(0, 3).map(f => _esc(f.split(/[\\/]/).pop())).join(', ')}${memory.related_files.length > 3 ? ` +${memory.related_files.length - 3}` : ''}</span></div>`
                     : '';
-                const matchLabel = (item.match_field || item.match_reason)
-                    ? `<div class="mt-1 text-xs text-purple-700"><i class="fas fa-bullseye mr-1"></i>matched in <code class="font-mono">${_esc(item.match_field || item.match_reason)}</code></div>` : '';
+                const matchFields = item.match_fields || [];
+                const matchLabel = matchFields.length
+                    ? `<div class="mt-1 text-xs text-purple-700 dark:text-purple-300 space-y-0.5">
+                          <div><i class="fas fa-bullseye mr-1"></i>matched in: ${
+                            matchFields.map(f => `<code class="font-mono bg-purple-50 dark:bg-purple-900/30 px-1 rounded">${_esc(f.field)}</code>`).join(' + ')
+                          }</div>
+                          ${matchFields.filter(f => f.snippet && f.field !== 'embedding').slice(0, 2).map(f =>
+                            `<div class="pl-5 text-gray-500 dark:text-gray-400 truncate" title="${_esc(f.snippet)}">↪ ${_esc(f.snippet.slice(0, 100))}</div>`
+                          ).join('')}
+                       </div>`
+                    : (item.match_reason
+                        ? `<div class="mt-1 text-xs text-purple-700"><i class="fas fa-bullseye mr-1"></i>${_esc(item.match_reason)}</div>`
+                        : '');
                 return `
                     <div class="border border-gray-200 rounded-lg p-4 hover:shadow-md transition-shadow bg-white">
                         <div class="flex items-start justify-between mb-2">

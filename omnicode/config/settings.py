@@ -43,7 +43,18 @@ class Settings(BaseSettings):
     DEEPSEEK_API_KEY: Optional[str] = None
 
     # Provider registry (custom external LLM API integrations)
-    PROVIDER_DB_PATH: str = Field(default=".data/providers.db")
+    #
+    # Default location is the **user-level** directory
+    # ``~/.kiro/codebase-mcp/providers.db`` so the same LLM API keys are
+    # available across every project the user opens.  Per-project overrides
+    # are still supported: if a file exists at
+    # ``<working_dir>/.data/providers.db`` we prefer it via
+    # :func:`resolve_provider_db_path`.
+    #
+    # The user can also force a specific path via the ``PROVIDER_DB_PATH``
+    # environment variable / ``.env`` entry, in which case we honour it
+    # verbatim.
+    PROVIDER_DB_PATH: Optional[str] = Field(default=None)
 
     # File-system browser (native OS file picker backend)
     FS_BROWSER_ENABLED: bool = Field(default=True)
@@ -96,6 +107,57 @@ class Settings(BaseSettings):
 
         self.WORKING_DIR = str(path.absolute())
         logger.info(f"Working directory updated to: {self.WORKING_DIR}")
+
+
+# ---------------------------------------------------------------------------
+# Provider DB path resolution
+# ---------------------------------------------------------------------------
+def _user_data_dir() -> Path:
+    """Return the user-level data directory for codebase-mcp.
+
+    Honours XDG on Linux/macOS and uses ``~/.kiro/codebase-mcp`` as the
+    cross-platform fallback so Windows users don't end up with files in
+    their AppData by accident.
+    """
+    explicit = os.environ.get("CODEBASE_MCP_USER_DIR")
+    if explicit:
+        return Path(explicit).expanduser()
+    return Path.home() / ".kiro" / "codebase-mcp"
+
+
+def resolve_provider_db_path(working_dir: Optional[str] = None) -> str:
+    """Resolve the active provider DB path.
+
+    Resolution order (first hit wins):
+
+    1. ``PROVIDER_DB_PATH`` env var / ``.env`` setting — if set, use verbatim.
+    2. Per-project override: ``<working_dir>/.data/providers.db`` if the
+       file already exists (legacy projects keep working).
+    3. User-level shared DB: ``~/.kiro/codebase-mcp/providers.db``.
+
+    The directory for the chosen path is created on demand.
+    """
+    cfg = get_settings()
+    explicit = cfg.PROVIDER_DB_PATH
+    if explicit:
+        p = Path(explicit).expanduser()
+        if not p.is_absolute():
+            # Relative paths anchor at the *working dir* so existing
+            # ``.env`` files that say "PROVIDER_DB_PATH=.data/providers.db"
+            # still behave the same way.
+            wd = working_dir or cfg.WORKING_DIR
+            p = Path(wd) / p
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return str(p)
+
+    if working_dir:
+        project_db = Path(working_dir) / ".data" / "providers.db"
+        if project_db.exists():
+            return str(project_db)
+
+    user_db = _user_data_dir() / "providers.db"
+    user_db.parent.mkdir(parents=True, exist_ok=True)
+    return str(user_db)
 
 @lru_cache()
 def get_settings() -> Settings:

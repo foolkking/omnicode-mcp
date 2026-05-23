@@ -1,0 +1,624 @@
+<!-- Model Providers Section -->
+<div class="space-y-6">
+    <!-- Page Header -->
+    <div class="bg-gradient-to-r from-fuchsia-500 to-pink-600 rounded-lg shadow-lg p-6 text-white">
+        <div class="flex items-center justify-between">
+            <div>
+                <h2 class="text-2xl font-bold flex items-center">
+                    <i class="fas fa-plug mr-3"></i>
+                    Model Providers
+                </h2>
+                <p class="text-pink-100 mt-1">Register, test, and route between LLM providers (OpenAI-compatible, Anthropic, Gemini, Ollama, Bedrock, Azure…)</p>
+            </div>
+            <div class="flex items-center space-x-2">
+                <button onclick="reloadProviders()"
+                        class="bg-white bg-opacity-20 hover:bg-opacity-30 px-4 py-2 rounded-md transition-colors text-sm">
+                    <i class="fas fa-sync-alt mr-1"></i> Reload
+                </button>
+                <button onclick="openProviderEditor(null)"
+                        class="bg-white text-pink-600 hover:bg-pink-50 px-4 py-2 rounded-md font-medium text-sm shadow">
+                    <i class="fas fa-plus mr-1"></i> Add Provider
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Status strip -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div class="bg-white dark:bg-gray-800 shadow rounded-lg px-4 py-3">
+            <div class="text-xs text-gray-500 dark:text-gray-400">Total</div>
+            <div id="providersTotalCount" class="text-2xl font-semibold text-gray-900 dark:text-gray-100">—</div>
+        </div>
+        <div class="bg-white dark:bg-gray-800 shadow rounded-lg px-4 py-3">
+            <div class="text-xs text-gray-500 dark:text-gray-400">Enabled</div>
+            <div id="providersEnabledCount" class="text-2xl font-semibold text-green-600">—</div>
+        </div>
+        <div class="bg-white dark:bg-gray-800 shadow rounded-lg px-4 py-3">
+            <div class="text-xs text-gray-500 dark:text-gray-400">Built-in</div>
+            <div id="providersBuiltinCount" class="text-2xl font-semibold text-blue-600">—</div>
+        </div>
+        <div class="bg-white dark:bg-gray-800 shadow rounded-lg px-4 py-3">
+            <div class="text-xs text-gray-500 dark:text-gray-400">Custom</div>
+            <div id="providersCustomCount" class="text-2xl font-semibold text-purple-600">—</div>
+        </div>
+    </div>
+
+    <!-- Role assignments -->
+    <div class="bg-white dark:bg-gray-800 shadow-lg rounded-lg overflow-hidden">
+        <div class="px-6 py-4 bg-gradient-to-r from-gray-50 to-fuchsia-50 dark:from-gray-900 dark:to-fuchsia-900/30 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
+            <h3 class="text-lg font-semibold text-gray-900 dark:text-gray-100 flex items-center">
+                <i class="fas fa-route text-fuchsia-500 mr-2"></i>
+                Role Assignments
+            </h3>
+            <div class="space-x-2">
+                <button onclick="resetSelectionsForm()"
+                        class="text-xs px-3 py-1.5 rounded border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700">
+                    <i class="fas fa-undo mr-1"></i> Reset Selections
+                </button>
+                <button onclick="saveSelectionsForm()"
+                        class="text-xs px-3 py-1.5 rounded bg-fuchsia-500 hover:bg-fuchsia-600 text-white shadow">
+                    <i class="fas fa-check mr-1"></i> Apply Selections
+                </button>
+            </div>
+        </div>
+        <div class="p-6">
+            <p class="text-xs text-gray-500 dark:text-gray-400 mb-4">
+                Choose which provider serves each role. Leave a role blank to fall back to automatic routing
+                (the gateway picks from <code>quality_chain</code> / <code>cost_chain</code> based on the request).
+            </p>
+            <div id="selectionsContainer" class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <!-- populated by renderSelections() -->
+            </div>
+            <div id="selectionsWarnings" class="mt-3 space-y-1 text-xs text-amber-700 dark:text-amber-300"></div>
+        </div>
+    </div>
+
+    <!-- Provider list -->
+    <div class="bg-white dark:bg-gray-800 shadow-lg rounded-lg overflow-hidden">
+        <div class="px-6 py-4 bg-gradient-to-r from-gray-50 to-purple-50 dark:from-gray-900 dark:to-purple-900/30 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
+            <h3 class="text-lg font-semibold text-gray-900 dark:text-gray-100 flex items-center">
+                <i class="fas fa-server text-purple-500 mr-2"></i>
+                Registered Providers
+            </h3>
+            <label class="flex items-center text-xs text-gray-500 dark:text-gray-400 cursor-pointer">
+                <input id="providersRevealSecrets" type="checkbox" class="mr-2"
+                       onchange="loadProviders()">
+                Reveal API keys
+            </label>
+        </div>
+        <div id="providersTable" class="divide-y divide-gray-100 dark:divide-gray-700">
+            <div class="p-8 text-center text-gray-400">Loading…</div>
+        </div>
+    </div>
+
+    <!-- Provider editor modal -->
+    <div id="providerEditorModal"
+         class="fixed inset-0 bg-black bg-opacity-60 z-[80] hidden flex items-center justify-center p-4">
+        <div class="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+            <div class="px-5 py-3 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between flex-shrink-0">
+                <h3 class="text-base font-semibold text-gray-900 dark:text-gray-100">
+                    <i class="fas fa-edit text-fuchsia-500 mr-2"></i>
+                    <span id="providerEditorTitle">Add Provider</span>
+                </h3>
+                <button onclick="closeProviderEditor()" class="text-gray-500 hover:text-gray-700 dark:hover:text-white">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="flex-1 overflow-auto p-5 space-y-4">
+                <input type="hidden" id="providerOriginalName" />
+                <div id="providerEditorErrorBanner"
+                     class="hidden rounded-md border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-900/30 text-red-800 dark:text-red-200 text-xs px-3 py-2"></div>
+                <div>
+                    <label class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
+                        Provider Name <span class="text-red-500">*</span>
+                    </label>
+                    <input id="providerName" type="text" placeholder="my-gemini-proxy"
+                           class="w-full border border-gray-300 dark:border-gray-600 rounded-md px-3 py-2 text-sm bg-white dark:bg-gray-800 dark:text-gray-100" />
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div>
+                        <label class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
+                            Model <span class="text-red-500">*</span>
+                        </label>
+                        <input id="providerModel" type="text" placeholder="gemini/gemini-2.5-flash"
+                               class="w-full border border-gray-300 dark:border-gray-600 rounded-md px-3 py-2 text-sm bg-white dark:bg-gray-800 dark:text-gray-100" />
+                        <p class="text-[11px] text-gray-500 mt-1">LiteLLM model string (provider/model)</p>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">Provider Type</label>
+                        <select id="providerType"
+                                class="w-full border border-gray-300 dark:border-gray-600 rounded-md px-3 py-2 text-sm bg-white dark:bg-gray-800 dark:text-gray-100">
+                            <option value="openai-compatible">openai-compatible</option>
+                            <option value="anthropic">anthropic</option>
+                            <option value="gemini">gemini</option>
+                            <option value="ollama">ollama</option>
+                            <option value="azure">azure</option>
+                            <option value="bedrock">bedrock</option>
+                            <option value="custom">custom</option>
+                        </select>
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">API Key</label>
+                    <input id="providerApiKey" type="password" placeholder="sk-…"
+                           class="w-full border border-gray-300 dark:border-gray-600 rounded-md px-3 py-2 text-sm font-mono bg-white dark:bg-gray-800 dark:text-gray-100" />
+                    <p class="text-[11px] text-gray-500 mt-1">Stored encrypted in <code>.data/providers.db</code>. Leave blank to keep the existing key.</p>
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">API Base URL</label>
+                    <input id="providerApiBase" type="text" placeholder="https://your-gateway.example.com/v1"
+                           class="w-full border border-gray-300 dark:border-gray-600 rounded-md px-3 py-2 text-sm font-mono bg-white dark:bg-gray-800 dark:text-gray-100" />
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div>
+                        <label class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">Group</label>
+                        <select id="providerGroup"
+                                class="w-full border border-gray-300 dark:border-gray-600 rounded-md px-3 py-2 text-sm bg-white dark:bg-gray-800 dark:text-gray-100">
+                            <option value="balanced">balanced</option>
+                            <option value="quality">quality</option>
+                            <option value="cost">cost</option>
+                        </select>
+                    </div>
+                    <div class="flex items-end">
+                        <label class="flex items-center text-sm text-gray-700 dark:text-gray-300 cursor-pointer">
+                            <input id="providerEnabled" type="checkbox" class="mr-2" checked />
+                            Enabled
+                        </label>
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">Description</label>
+                    <textarea id="providerDescription" rows="2" placeholder="Optional notes about this provider"
+                              class="w-full border border-gray-300 dark:border-gray-600 rounded-md px-3 py-2 text-sm bg-white dark:bg-gray-800 dark:text-gray-100"></textarea>
+                </div>
+                <details class="text-xs text-gray-600 dark:text-gray-300">
+                    <summary class="cursor-pointer select-none">Extra HTTP headers (advanced)</summary>
+                    <div class="mt-2">
+                        <textarea id="providerExtraHeaders" rows="3" placeholder='{"X-API-Version":"2025-01"}'
+                                  class="w-full border border-gray-300 dark:border-gray-600 rounded-md px-3 py-2 text-xs font-mono bg-white dark:bg-gray-800 dark:text-gray-100"></textarea>
+                        <p class="mt-1">JSON object. Sent on every request to this provider.</p>
+                    </div>
+                </details>
+            </div>
+            <div class="px-5 py-3 border-t border-gray-200 dark:border-gray-700 flex justify-end space-x-2 flex-shrink-0">
+                <button onclick="testProviderFromEditor()"
+                        class="px-3 py-1.5 rounded text-sm border border-gray-300 dark:border-gray-600 text-yellow-600 dark:text-yellow-300 hover:bg-yellow-50 dark:hover:bg-yellow-900/20"
+                        title="Send a tiny ping to verify config">
+                    <i class="fas fa-bolt mr-1"></i> Test
+                </button>
+                <button onclick="closeProviderEditor()"
+                        class="px-3 py-1.5 rounded text-sm border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700">
+                    Cancel
+                </button>
+                <button onclick="submitProviderEditor()"
+                        class="px-4 py-1.5 rounded text-sm bg-fuchsia-500 hover:bg-fuchsia-600 text-white shadow">
+                    <i class="fas fa-save mr-1"></i> Save
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// Section state
+// ---------------------------------------------------------------------------
+window.__providersState = window.__providersState || {
+    providers: [],
+    activeProviders: [],
+    selections: {},
+    validRoles: [],
+    qualityChain: [],
+    costChain: [],
+};
+
+async function loadProviders() {
+    const reveal = document.getElementById('providersRevealSecrets')?.checked || false;
+    const result = await apiRoutes.providers.list(reveal);
+    if (!result.success || !result.data?.result) {
+        document.getElementById('providersTable').innerHTML =
+            `<div class="p-6 text-center text-red-500">Failed to load providers: ${result.error || 'unknown error'}</div>`;
+        return;
+    }
+    const data = result.data.result;
+    __providersState.providers = data.providers || [];
+    __providersState.activeProviders = data.active_providers || [];
+    __providersState.qualityChain = data.quality_chain || [];
+    __providersState.costChain = data.cost_chain || [];
+    renderProviderStats();
+    renderProviderTable();
+
+    // Refresh selections too — its dropdowns depend on the provider list.
+    await loadSelections();
+}
+
+async function loadSelections() {
+    const result = await apiRoutes.providers.selections();
+    if (!result.success || !result.data?.result) return;
+    const data = result.data.result;
+    __providersState.selections = data.assignments || {};
+    __providersState.validRoles = data.valid_roles || [];
+    renderSelections(data.warnings || []);
+}
+
+async function reloadProviders() {
+    showLoading('Reloading provider registry…');
+    try {
+        const r = await apiRoutes.providers.reload();
+        if (r.success) {
+            notifications.success('Provider registry reloaded');
+        } else {
+            notifications.error('Reload failed: ' + (r.error || 'unknown'));
+        }
+        await loadProviders();
+    } finally {
+        hideLoading();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stats / table rendering
+// ---------------------------------------------------------------------------
+function renderProviderStats() {
+    const list = __providersState.providers || [];
+    const enabled = list.filter(p => p.enabled !== false).length;
+    const builtin = list.filter(p => p.built_in).length;
+    document.getElementById('providersTotalCount').textContent = list.length;
+    document.getElementById('providersEnabledCount').textContent = enabled;
+    document.getElementById('providersBuiltinCount').textContent = builtin;
+    document.getElementById('providersCustomCount').textContent = list.length - builtin;
+}
+
+function _esc(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
+function renderProviderTable() {
+    const list = __providersState.providers || [];
+    const container = document.getElementById('providersTable');
+    if (!list.length) {
+        container.innerHTML = `
+            <div class="p-8 text-center text-gray-500 dark:text-gray-400">
+                <i class="fas fa-server text-3xl mb-2"></i>
+                <p>No providers registered yet.</p>
+                <p class="text-xs mt-1">Click "Add Provider" to register your first LLM endpoint.</p>
+            </div>`;
+        return;
+    }
+    container.innerHTML = list.map(p => {
+        const name = _esc(p.name);
+        const model = _esc(p.model || '');
+        const apiBase = _esc(p.api_base || '');
+        const apiKey = _esc(p.api_key || '');
+        const group = _esc(p.group || 'balanced');
+        const desc = _esc(p.description || '');
+        const enabled = p.enabled !== false;
+        const isBuiltin = !!p.built_in;
+        const isActive = (__providersState.activeProviders || []).indexOf(p.name) >= 0;
+        const groupColor = group === 'quality' ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300'
+                          : group === 'cost'   ? 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300'
+                          :                       'bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-300';
+        return `
+        <div class="px-5 py-4 hover:bg-gray-50 dark:hover:bg-gray-700/40 transition-colors">
+            <div class="flex items-start justify-between gap-4">
+                <div class="flex-1 min-w-0">
+                    <div class="flex items-center flex-wrap gap-2 mb-1">
+                        <span class="font-semibold text-gray-900 dark:text-gray-100">${name}</span>
+                        ${isBuiltin ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300">built-in</span>' : ''}
+                        <span class="text-[10px] px-1.5 py-0.5 rounded ${groupColor}">${group}</span>
+                        ${enabled
+                            ? (isActive
+                                ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300"><i class="fas fa-circle text-[6px] mr-1"></i>active</span>'
+                                : '<span class="text-[10px] px-1.5 py-0.5 rounded bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-300">inactive</span>')
+                            : '<span class="text-[10px] px-1.5 py-0.5 rounded bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300">disabled</span>'}
+                    </div>
+                    <div class="font-mono text-xs text-gray-700 dark:text-gray-300 mb-1">
+                        <i class="fas fa-cube text-gray-400 mr-1"></i> ${model}
+                    </div>
+                    ${apiBase
+                        ? `<div class="font-mono text-[11px] text-gray-500 dark:text-gray-400 truncate"><i class="fas fa-link text-gray-400 mr-1"></i> ${apiBase}</div>`
+                        : ''}
+                    ${apiKey
+                        ? `<div class="font-mono text-[11px] text-gray-400 truncate"><i class="fas fa-key text-gray-400 mr-1"></i> ${apiKey}</div>`
+                        : '<div class="text-[11px] text-amber-600 dark:text-amber-400"><i class="fas fa-exclamation-triangle mr-1"></i>no api key configured</div>'}
+                    ${desc ? `<div class="text-xs text-gray-500 dark:text-gray-400 mt-1">${desc}</div>` : ''}
+                </div>
+                <div class="flex items-center space-x-1.5 flex-shrink-0">
+                    <button onclick="testProvider('${name}')"
+                            class="text-xs px-2 py-1 rounded border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
+                            title="Send a tiny ping to this provider">
+                        <i class="fas fa-bolt text-yellow-500"></i>
+                    </button>
+                    <button onclick="toggleProvider('${name}', ${!enabled})"
+                            class="text-xs px-2 py-1 rounded border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
+                            title="${enabled ? 'Disable' : 'Enable'} this provider">
+                        <i class="fas fa-${enabled ? 'pause' : 'play'} text-${enabled ? 'orange' : 'green'}-500"></i>
+                    </button>
+                    <button onclick="openProviderEditor('${name}')"
+                            class="text-xs px-2 py-1 rounded border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
+                            title="Edit">
+                        <i class="fas fa-pen"></i>
+                    </button>
+                    <button onclick="deleteProvider('${name}', ${isBuiltin})"
+                            class="text-xs px-2 py-1 rounded border border-gray-300 dark:border-gray-600 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30 ${isBuiltin ? 'opacity-40 cursor-not-allowed' : ''}"
+                            title="${isBuiltin ? 'Built-in providers cannot be deleted; disable instead' : 'Delete'}">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                </div>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+function renderSelections(warnings) {
+    const container = document.getElementById('selectionsContainer');
+    const enabledNames = (__providersState.providers || [])
+        .filter(p => p.enabled !== false)
+        .map(p => p.name);
+    const roles = __providersState.validRoles || [];
+    const selections = __providersState.selections || {};
+    container.innerHTML = roles.map(role => {
+        const current = selections[role] || '';
+        const opts = ['<option value="">(auto)</option>'].concat(
+            enabledNames.map(n =>
+                `<option value="${_esc(n)}" ${n === current ? 'selected' : ''}>${_esc(n)}</option>`
+            )
+        ).join('');
+        return `
+        <label class="flex items-center justify-between gap-3 p-2 rounded border border-gray-200 dark:border-gray-700">
+            <span class="text-xs font-medium text-gray-700 dark:text-gray-300">${_esc(role)}</span>
+            <select data-role="${_esc(role)}"
+                    class="provider-role-select flex-shrink-0 text-xs border border-gray-300 dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-800 dark:text-gray-100">
+                ${opts}
+            </select>
+        </label>`;
+    }).join('');
+    const warn = document.getElementById('selectionsWarnings');
+    warn.innerHTML = (warnings || []).map(w =>
+        `<div><i class="fas fa-exclamation-triangle mr-1"></i>${_esc(w)}</div>`
+    ).join('');
+}
+
+// ---------------------------------------------------------------------------
+// Editor modal
+// ---------------------------------------------------------------------------
+function openProviderEditor(name) {
+    const modal = document.getElementById('providerEditorModal');
+    const titleEl = document.getElementById('providerEditorTitle');
+    const isEdit = !!name;
+    titleEl.textContent = isEdit ? `Edit Provider — ${name}` : 'Add Provider';
+    document.getElementById('providerOriginalName').value = name || '';
+    _clearProviderEditorErrors();
+
+    let cfg = null;
+    if (isEdit) {
+        cfg = (__providersState.providers || []).find(p => p.name === name);
+    }
+    document.getElementById('providerName').value = cfg?.name || '';
+    document.getElementById('providerName').disabled = !!cfg;
+    document.getElementById('providerModel').value = cfg?.model || '';
+    document.getElementById('providerType').value = cfg?.provider_type || 'openai-compatible';
+    document.getElementById('providerApiKey').value = '';
+    document.getElementById('providerApiKey').placeholder = isEdit ? '(leave blank to keep existing key)' : 'sk-…';
+    document.getElementById('providerApiBase').value = cfg?.api_base || '';
+    document.getElementById('providerGroup').value = cfg?.group || 'balanced';
+    document.getElementById('providerEnabled').checked = cfg ? cfg.enabled !== false : true;
+    document.getElementById('providerDescription').value = cfg?.description || '';
+    document.getElementById('providerExtraHeaders').value =
+        cfg?.extra_headers && Object.keys(cfg.extra_headers).length
+            ? JSON.stringify(cfg.extra_headers, null, 2)
+            : '';
+
+    modal.classList.remove('hidden');
+}
+
+function closeProviderEditor() {
+    document.getElementById('providerEditorModal').classList.add('hidden');
+}
+
+async function submitProviderEditor() {
+    const original = document.getElementById('providerOriginalName').value;
+    const name = document.getElementById('providerName').value.trim();
+    const model = document.getElementById('providerModel').value.trim();
+    if (!name) { notifications.warning('Provider name is required'); return; }
+    if (!model) { notifications.warning('Model is required'); return; }
+
+    let extraHeaders = {};
+    const rawHeaders = document.getElementById('providerExtraHeaders').value.trim();
+    if (rawHeaders) {
+        try { extraHeaders = JSON.parse(rawHeaders); }
+        catch (e) { notifications.error('Extra headers must be valid JSON'); return; }
+    }
+
+    const apiKeyEl = document.getElementById('providerApiKey');
+    const apiKeyValue = apiKeyEl.value;
+
+    const payload = {
+        name,
+        model,
+        provider_type: document.getElementById('providerType').value,
+        // Don't send the api_key field at all when the user left it blank in
+        // edit mode — backend keeps the existing one.  Sending "" would
+        // overwrite it with an empty string.
+        ...(apiKeyValue ? { api_key: apiKeyValue } : {}),
+        api_base: document.getElementById('providerApiBase').value.trim() || null,
+        group: document.getElementById('providerGroup').value,
+        enabled: document.getElementById('providerEnabled').checked,
+        description: document.getElementById('providerDescription').value.trim(),
+        extra_headers: extraHeaders,
+    };
+
+    showLoading('Saving provider…');
+    try {
+        const result = original
+            ? await apiRoutes.providers.update(original, payload)
+            : await apiRoutes.providers.create(payload);
+        if (result.success && result.data?.result) {
+            notifications.success(`Provider '${name}' saved`);
+            closeProviderEditor();
+            await loadProviders();
+        } else {
+            notifications.error('Save failed: ' + (result.error || 'unknown'));
+        }
+    } finally {
+        hideLoading();
+    }
+}
+
+async function deleteProvider(name, isBuiltin) {
+    if (isBuiltin) {
+        notifications.warning(`Provider '${name}' is built-in. Disable it instead.`);
+        return;
+    }
+    if (!confirm(`Delete provider '${name}'?  This cannot be undone.`)) return;
+    showLoading('Deleting provider…');
+    try {
+        const r = await apiRoutes.providers.remove(name);
+        if (r.success) {
+            notifications.success(`Provider '${name}' deleted`);
+            await loadProviders();
+        } else {
+            notifications.error('Delete failed: ' + (r.error || 'unknown'));
+        }
+    } finally {
+        hideLoading();
+    }
+}
+
+async function toggleProvider(name, enable) {
+    showLoading(enable ? 'Enabling…' : 'Disabling…');
+    try {
+        const r = enable
+            ? await apiRoutes.providers.enable(name)
+            : await apiRoutes.providers.disable(name);
+        if (r.success) {
+            notifications.success(`Provider '${name}' ${enable ? 'enabled' : 'disabled'}`);
+            await loadProviders();
+        } else {
+            notifications.error('Toggle failed: ' + (r.error || 'unknown'));
+        }
+    } finally {
+        hideLoading();
+    }
+}
+
+async function testProvider(name) {
+    // Test happens against the saved provider DB entry; clear any stale
+    // field-error styling on the editor (in case the user has it open).
+    _clearProviderEditorErrors();
+    showLoading(`Testing provider '${name}'…`);
+    try {
+        const r = await apiRoutes.providers.test(name);
+        const inner = r.data?.result || {};
+        if (inner.success) {
+            const ms = inner.duration_ms != null ? ` (${inner.duration_ms} ms)` : '';
+            notifications.success(`✅ ${name}: ${inner.content || 'pong'}${ms}`);
+        } else {
+            const hint = inner.hint ? `\nHint: ${inner.hint}` : '';
+            notifications.error(`❌ ${name}: ${inner.error || 'unknown error'}${hint}`, 8000);
+            // If the editor is open for this same provider, highlight the
+            // most-likely-wrong field so the user sees it immediately.
+            const editor = document.getElementById('providerEditorModal');
+            if (editor && !editor.classList.contains('hidden')) {
+                const editingName = document.getElementById('providerOriginalName').value
+                    || document.getElementById('providerName').value;
+                if (editingName === name && inner.hint_field) {
+                    _highlightProviderEditorField(inner.hint_field, inner.hint || inner.error);
+                }
+            }
+        }
+    } catch (e) {
+        notifications.error(`❌ ${name}: ${e.message || e}`);
+    } finally {
+        hideLoading();
+    }
+}
+
+function _providerFieldElements() {
+    return {
+        api_key: document.getElementById('providerApiKey'),
+        api_base: document.getElementById('providerApiBase'),
+        model: document.getElementById('providerModel'),
+        provider_type: document.getElementById('providerType'),
+        name: document.getElementById('providerName'),
+    };
+}
+
+function _clearProviderEditorErrors() {
+    const fields = _providerFieldElements();
+    Object.values(fields).forEach(el => {
+        if (!el) return;
+        el.classList.remove(
+            'border-red-500', 'ring-2', 'ring-red-200', 'dark:ring-red-900/40'
+        );
+    });
+    const banner = document.getElementById('providerEditorErrorBanner');
+    if (banner) banner.classList.add('hidden');
+}
+
+function _highlightProviderEditorField(fieldName, message) {
+    const fields = _providerFieldElements();
+    const el = fields[fieldName];
+    if (el) {
+        el.classList.add('border-red-500', 'ring-2', 'ring-red-200', 'dark:ring-red-900/40');
+        el.focus();
+        el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+    const banner = document.getElementById('providerEditorErrorBanner');
+    if (banner && message) {
+        banner.textContent = message;
+        banner.classList.remove('hidden');
+    }
+}
+
+async function testProviderFromEditor() {
+    const editingName = document.getElementById('providerOriginalName').value
+        || document.getElementById('providerName').value.trim();
+    if (!editingName) {
+        notifications.warning('Save the provider first, then test.');
+        return;
+    }
+    await testProvider(editingName);
+}
+
+// ---------------------------------------------------------------------------
+// Selections form
+// ---------------------------------------------------------------------------
+function resetSelectionsForm() {
+    document.querySelectorAll('.provider-role-select').forEach(sel => {
+        const role = sel.getAttribute('data-role');
+        sel.value = (__providersState.selections || {})[role] || '';
+    });
+}
+
+async function saveSelectionsForm() {
+    const assignments = {};
+    document.querySelectorAll('.provider-role-select').forEach(sel => {
+        const role = sel.getAttribute('data-role');
+        assignments[role] = sel.value || '';
+    });
+    showLoading('Updating role assignments…');
+    try {
+        const r = await apiRoutes.providers.updateSelections(assignments);
+        if (r.success) {
+            notifications.success('Role assignments updated');
+            await loadSelections();
+        } else {
+            notifications.error('Update failed: ' + (r.error || 'unknown'));
+        }
+    } finally {
+        hideLoading();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Boot
+// ---------------------------------------------------------------------------
+document.addEventListener('DOMContentLoaded', () => {
+    if (typeof loadProviders === 'function') loadProviders();
+});
+// Also boot when the section gets injected dynamically
+loadProviders();
+</script>

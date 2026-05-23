@@ -40,6 +40,7 @@
         if (dirResult.success && dirResult.data.result) {
             const workingDir = dirResult.data.result.working_directory;
             appState.set('workingDirectory', workingDir);
+            window.__appWorkingDir = workingDir;
             
             // Update sidebar status
             const dirElement = document.getElementById('dirStatus');

@@ -151,10 +151,18 @@ def get_provider_selection_store(
     with _singleton_lock:
         if _default_store is None:
             if db_path is None:
-                db_path = Path(".data") / "providers.db"
+                from omnicode.config.settings import _user_data_dir
+                db_path = _user_data_dir() / "selections.db"
             _default_store = ProviderSelectionStore(db_path)
             logger.info("Provider selection store initialised at %s", db_path)
         return _default_store
+
+
+def reset_provider_selection_store() -> None:
+    """Clear the cached singleton (used on working-directory switches)."""
+    global _default_store
+    with _singleton_lock:
+        _default_store = None
 
 
 def list_valid_roles() -> List[str]:

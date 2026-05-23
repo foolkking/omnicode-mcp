@@ -57,20 +57,21 @@ const API_ROUTES = {
             }
         ),
         
-        symbols: (query, options = {}) => api.post('/search/symbols',
-            null,
-            {
-                params: {
-                    query,
-                    symbol_type: options.symbolType || null,
-                    file_pattern: options.filePattern || null,
-                    fuzzy: options.fuzzy !== false,
-                    min_score: options.minScore || 0.5,
-                    max_results: options.maxResults || 20
-                },
-                userAction: 'Symbol Search'
-            }
-        ),
+        symbols: (query, options = {}) => {
+            // Build params, skip null/empty so we don't hit the FastAPI
+            // "?symbol_type=null" footgun (the backend receives the literal
+            // string "null" and the engine filters chunks against it,
+            // dropping every match).
+            const params = { query, fuzzy: options.fuzzy !== false };
+            if (options.symbolType) params.symbol_type = options.symbolType;
+            if (options.filePattern) params.file_pattern = options.filePattern;
+            if (options.minScore != null) params.min_score = options.minScore;
+            params.max_results = options.maxResults || 20;
+            return api.post('/search/symbols', null, {
+                params,
+                userAction: 'Symbol Search',
+            });
+        },
         
         index: () => api.post('/search/index', null, { userAction: 'Rebuild Index' }),
         
@@ -297,7 +298,10 @@ const API_ROUTES = {
                 min_importance: options.minImportance || 1,
                 max_results: options.maxResults || 10,
                 include_archived: options.includeArchived || false,
-                recent_days: options.recentDays || null
+                recent_days: options.recentDays || null,
+                // 0..1 — drop memories below this combined keyword+semantic score.
+                // Default 0.35 matches backend; UI can override via slider.
+                min_score: (typeof options.minScore === 'number') ? options.minScore : 0.35,
             },
             { userAction: 'Search Memory' }
         ),
@@ -367,6 +371,32 @@ const API_ROUTES = {
         ),
     },
     
+    // ============================================================================
+    // MODEL PROVIDERS (LLM gateway)
+    // ============================================================================
+    providers: {
+        list: (revealSecrets = false) => api.get('/providers',
+            { params: { reveal_secrets: revealSecrets }, userAction: 'List Providers' }
+        ),
+        create: (payload) => api.post('/providers', payload, { userAction: 'Add Provider' }),
+        update: (name, payload) => api.put(`/providers/${encodeURIComponent(name)}`, payload, { userAction: 'Update Provider' }),
+        remove: (name) => api.delete(`/providers/${encodeURIComponent(name)}`, { userAction: 'Delete Provider' }),
+        enable: (name) => api.post(`/providers/${encodeURIComponent(name)}/enable`, null, { userAction: 'Enable Provider' }),
+        disable: (name) => api.post(`/providers/${encodeURIComponent(name)}/disable`, null, { userAction: 'Disable Provider' }),
+        test: (name, prompt = null) => api.post(
+            `/providers/${encodeURIComponent(name)}/test`,
+            prompt ? { prompt } : {},
+            { userAction: 'Test Provider' }
+        ),
+        reload: () => api.post('/providers/reload', null, { userAction: 'Reload Providers' }),
+        modelStatus: () => api.get('/model-status', { userAction: 'Model Status' }),
+        selections: () => api.get('/selections', { userAction: 'Get Selections' }),
+        updateSelections: (assignments) => api.put('/selections',
+            { assignments },
+            { userAction: 'Update Selections' }
+        ),
+    },
+
     directory: {
         list: (dirPath = '.', options = {}) => api.get('/directory/list',
             {

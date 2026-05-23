@@ -17,6 +17,7 @@ from .models import (
     MemoryRequest,
     MemorySearchRequest,
     MemoryResult,
+    MemoryMatchField,
     MemoryStats,
     ContextSummary,
     MemoryCategory,
@@ -475,12 +476,33 @@ class MemoryManager:
                 "last_accessed": getattr(mem, "last_accessed", None),
                 "relevance_score": r.relevance_score,
                 "match_reason": r.match_reason,
+                "match_fields": [
+                    {"field": f.field, "snippet": f.snippet, "weight": f.weight}
+                    for f in (r.match_fields or [])
+                ],
+                "semantic_score": r.semantic_score,
+                "keyword_score": r.keyword_score,
             }
             out.append(d)
         return {"memories": out}
 
     async def search_memories(self, request: MemorySearchRequest) -> List[MemoryResult]:
-        """Search memories using semantic search and filters"""
+        """Search memories using semantic + keyword scoring with a threshold.
+
+        Three notable behaviours that fix the "every memory always returns" bug:
+
+        1. **Threshold filtering** — memories whose combined semantic + keyword
+           score is below ``request.min_score`` are dropped instead of returned
+           with a near-zero relevance.  Default 0.35.
+        2. **Per-field match localisation** — we tell the UI exactly *where*
+           the query landed (content / tags / category / related_files /
+           subcategory / embedding) plus a short snippet, so the user can
+           understand why the memory was returned.
+        3. **Hybrid scoring** — the cosine similarity is combined with a
+           keyword overlap score against every searchable text field, which
+           rescues queries that target a tag or filename even when the
+           sentence-level embedding doesn't match.
+        """
         if not self.embedding_model:
             await self.initialize()
 
@@ -518,39 +540,146 @@ class MemoryManager:
 
         memories = [self._memory_from_row(row) for row in rows]
 
-        # Apply semantic search if query provided
-        if request.query and memories:
-            query_embedding = self.embedding_model.encode(request.query)  # type:ignore
+        # Tag-only filter — when no query is provided but specific tags are.
+        if request.tags and not request.query:
+            tag_set = {t.lower() for t in request.tags}
+            memories = [
+                m for m in memories
+                if {(t or "").lower() for t in (m.tags or [])} & tag_set
+            ]
 
-            results = []
-            for memory in memories:
-                if memory.embedding_vector:
-                    memory_embedding = np.array(memory.embedding_vector)
+        # Path A: semantic + keyword hybrid scoring (query supplied).
+        if request.query:
+            return self._rank_with_query(memories, request)
 
-                    # Calculate cosine similarity
-                    similarity = np.dot(query_embedding, memory_embedding) / (
-                        np.linalg.norm(query_embedding)
-                        * np.linalg.norm(memory_embedding)
-                    )
-
-                    results.append(
-                        MemoryResult(
-                            memory=memory,
-                            relevance_score=float(similarity),
-                            match_reason="Semantic similarity",
-                        )
-                    )
-
-            # Sort by relevance and limit
-            results.sort(key=lambda x: x.relevance_score or 0, reverse=True)
-            return results[: request.max_results]
-
-        # Return without semantic ranking
+        # Path B: no query — straight filter pass with a uniform "filter" reason.
         results = [
-            MemoryResult(memory=memory, match_reason="Filter match")
+            MemoryResult(
+                memory=memory,
+                relevance_score=1.0,  # filter-only matches are exact
+                match_reason="Filter match",
+                match_fields=[MemoryMatchField(field="filter", snippet="filter only", weight=1.0)],
+            )
             for memory in memories
         ]
         return results[: request.max_results]
+
+    # ---------- internal: hybrid scoring & per-field localisation ---------------
+    def _rank_with_query(
+        self,
+        memories: List[Memory],
+        request: MemorySearchRequest,
+    ) -> List[MemoryResult]:
+        """Score & filter memories against ``request.query``.
+
+        Returns only memories whose combined score >= ``request.min_score``.
+        """
+        query = (request.query or "").strip()
+        if not query or not memories:
+            return []
+
+        query_emb = self.embedding_model.encode(query) if self.embedding_model else None  # type: ignore
+        query_norm = float(np.linalg.norm(query_emb)) if query_emb is not None else 0.0
+        # Tokenise the query: split on whitespace + punctuation, lowercase.
+        import re as _re
+        tokens = [t.lower() for t in _re.split(r"[^\w\u4e00-\u9fff]+", query) if len(t) >= 2]
+        token_set = set(tokens)
+
+        scored: List[MemoryResult] = []
+        for memory in memories:
+            # Per-field exact-keyword matches
+            field_hits: List[MemoryMatchField] = []
+
+            content = (memory.content or "")
+            content_lc = content.lower()
+            content_tokens = sum(1 for t in tokens if t in content_lc)
+            if content_tokens:
+                # snippet around the first hit
+                first = next((content_lc.find(t) for t in tokens if t in content_lc), -1)
+                start = max(0, first - 40)
+                end = min(len(content), first + 80)
+                snippet = content[start:end].replace("\n", " ")
+                field_hits.append(MemoryMatchField(
+                    field="content",
+                    snippet=("…" + snippet + "…") if start > 0 or end < len(content) else snippet,
+                    weight=content_tokens / max(1, len(tokens)),
+                ))
+
+            tag_set = {(t or "").lower() for t in (memory.tags or [])}
+            matched_tags = [t for t in tokens if t in tag_set]
+            # also direct tag overlap (whole tag match)
+            for t in tag_set:
+                if t in token_set and t not in matched_tags:
+                    matched_tags.append(t)
+            if matched_tags:
+                field_hits.append(MemoryMatchField(
+                    field="tags",
+                    snippet=", ".join(sorted(set(matched_tags))[:6]),
+                    weight=min(1.0, len(matched_tags) / max(1, len(tokens))),
+                ))
+
+            cat = (memory.category.value if memory.category else "").lower()
+            if cat and any(t in cat for t in tokens):
+                field_hits.append(MemoryMatchField(field="category", snippet=cat, weight=0.4))
+
+            sub = (memory.subcategory or "").lower()
+            if sub and any(t in sub for t in tokens):
+                field_hits.append(MemoryMatchField(field="subcategory", snippet=sub, weight=0.3))
+
+            files_lc = [(f or "").lower() for f in (memory.related_files or [])]
+            for f in files_lc:
+                if any(t in f for t in tokens):
+                    field_hits.append(MemoryMatchField(field="related_files", snippet=f, weight=0.5))
+                    break
+
+            keyword_score = min(1.0, sum(h.weight for h in field_hits) / 1.5) if field_hits else 0.0
+
+            # Semantic similarity
+            semantic_score = 0.0
+            if memory.embedding_vector and query_emb is not None and query_norm > 0:
+                memory_embedding = np.array(memory.embedding_vector, dtype=np.float32)
+                memory_norm = float(np.linalg.norm(memory_embedding))
+                if memory_norm > 0:
+                    semantic_score = float(
+                        np.dot(query_emb, memory_embedding) / (query_norm * memory_norm)
+                    )
+                    semantic_score = max(0.0, semantic_score)  # cosine in [-1, 1]; clamp
+
+            if semantic_score > 0:
+                field_hits.append(MemoryMatchField(
+                    field="embedding",
+                    snippet=f"cosine={semantic_score:.2f}",
+                    weight=semantic_score,
+                ))
+
+            # Combined score: keyword wins when present, otherwise semantic with
+            # a 30% discount so it doesn't dominate everything.
+            combined = max(keyword_score, semantic_score * 0.7)
+            if keyword_score > 0 and semantic_score > 0:
+                combined = min(1.0, keyword_score + semantic_score * 0.3)
+
+            if combined < request.min_score:
+                continue  # drop irrelevant rows — fixes "all 3 memories returned" bug
+
+            # Build a human-readable summary of where it matched.
+            field_names = [h.field for h in field_hits]
+            if not field_names:
+                continue
+            reason = "Matched in " + " + ".join(field_names)
+
+            scored.append(
+                MemoryResult(
+                    memory=memory,
+                    relevance_score=round(combined, 4),
+                    match_reason=reason,
+                    match_fields=field_hits,
+                    semantic_score=round(semantic_score, 4),
+                    keyword_score=round(keyword_score, 4),
+                )
+            )
+
+        scored.sort(key=lambda r: r.relevance_score or 0.0, reverse=True)
+        return scored[: request.max_results]
 
     async def get_context_summary(
         self, session_id: Optional[str] = None

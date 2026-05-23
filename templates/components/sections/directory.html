@@ -81,13 +81,7 @@
 </div>
 
 <script>
-function showLoading(message = 'Loading...') {
-    const overlay = document.getElementById('loading-overlay');
-    if (overlay) {
-        overlay.querySelector('span').textContent = message;
-        overlay.classList.remove('hidden');
-    }
-}
+// showLoading/hideLoading provided by /static/js/utils/loading.js
 
 // Directory Browser Functions
 async function browseDirectory() {

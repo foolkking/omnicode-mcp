@@ -144,6 +144,24 @@ class SemanticSearchEngine:
         except Exception as e:
             logger.warning(f"Failed to load search stats from DB: {e}")
 
+        # Auto-recover semantic search index when chunks exist on disk but
+        # FAISS knows nothing about them (legacy DB without embedding BLOB,
+        # corrupted .faiss file, etc.).  Without this users see "0 results"
+        # for semantic search until they manually run /search/index.
+        try:
+            chunk_count = self.stats.get("total_chunks", 0)
+            faiss_total = getattr(self.vector_store.index, "ntotal", 0)
+            if chunk_count > 0 and faiss_total == 0:
+                logger.warning(
+                    "Semantic index out of sync (%d chunks, FAISS empty) — "
+                    "running automatic reindex to repopulate embeddings.",
+                    chunk_count,
+                )
+                await self.index_codebase()
+                self.stats["last_indexed"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Automatic semantic reindex failed: %s", exc)
+
     def get_stats(self) -> dict:
         return self.stats
 

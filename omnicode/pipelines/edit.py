@@ -574,10 +574,17 @@ class EditPipeline:
         errors: List[str] = []
         final_content = original_content
         try:
+            # Disable extended-thinking output for reasoning models (e.g.
+            # gemini-2.5-flash-thinking, claude-3.5-sonnet-thinking-* , o1).
+            # Without this they leak chain-of-thought into the response,
+            # which then trips our prose detector and rejects the edit.
+            # LiteLLM forwards `reasoning_effort` to whichever underlying
+            # provider supports it, and silently ignores it elsewhere.
             response = await self.router.complete(
                 messages=messages,
                 strategy=RoutingStrategy.QUALITY_FIRST,
                 task=role,  # forwarded into get_provider_for / chain resolution
+                reasoning_effort="none",
             )
             llm_text = response.content or ""
             extracted = self._extract_code_block(llm_text, language)
@@ -1276,7 +1283,34 @@ class EditPipeline:
         return None
 
     @staticmethod
+    def _strip_thinking_blocks(text: str) -> str:
+        """Remove obvious 'thinking' artefacts that some reasoning models
+        emit ahead of the actual answer.
+
+        We only strip *outside* fenced blocks — the fence itself is left
+        untouched so the existing extractor can find it.
+        """
+        if not text:
+            return text
+        import re as _re
+        # XML-style: <thinking>...</thinking>, <think>...</think>
+        text = _re.sub(r"<\s*thinking[^>]*>.*?<\s*/\s*thinking\s*>", "", text, flags=_re.DOTALL | _re.IGNORECASE)
+        text = _re.sub(r"<\s*think[^>]*>.*?<\s*/\s*think\s*>", "", text, flags=_re.DOTALL | _re.IGNORECASE)
+        # Markdown headers used by Gemini-2.5-flash-thinking when leaking
+        # chain-of-thought before code.  Only strip when they appear before
+        # the first fence — we don't want to eat user-authored prose
+        # *inside* a fence.
+        first_fence = text.find("```")
+        if first_fence > 0:
+            head = text[:first_fence]
+            # Drop bold-only paragraphs that look like "**Reviewing...**"
+            head = _re.sub(r"\*\*[^*\n]{1,80}\*\*[^\n]*\n", "", head)
+            text = head + text[first_fence:]
+        return text
+
+    @staticmethod
     def _extract_code_block(text: str, language: str) -> Optional[str]:
+        text = EditPipeline._strip_thinking_blocks(text)
         marker = f"```{language}"
         if marker in text:
             tail = text.split(marker, 1)[1]
