@@ -423,3 +423,69 @@
 }
 
 /* Modal backdrop is already black/50 — fine. Modal panels are .bg-white above. */
+
+
+/* ============================================================================
+ * Dark Mode — strengthened overrides
+ * ----------------------------------------------------------------------------
+ * Some Tailwind utility classes (.bg-sidebar, .bg-sidebarHover) come from the
+ * extended palette and were missed by the generic rules above.  Body and
+ * sticky header surfaces need explicit overrides too — when applied via the
+ * Tailwind CDN their inline rules can outrank the generic .bg-white selector.
+ * ========================================================================= */
+
+[data-theme="dark"] body {
+    background-color: #0f172a !important;
+    color: #f1f5f9 !important;
+}
+
+[data-theme="dark"] header.bg-white,
+[data-theme="dark"] aside,
+[data-theme="dark"] .bg-sidebar {
+    background-color: #1e293b !important;
+}
+[data-theme="dark"] .bg-sidebarHover,
+[data-theme="dark"] .hover\:bg-sidebarHover:hover {
+    background-color: #334155 !important;
+}
+
+/* Sticky header bottom border */
+[data-theme="dark"] header.border-b,
+[data-theme="dark"] .border-b,
+[data-theme="dark"] .border-t,
+[data-theme="dark"] .border-l,
+[data-theme="dark"] .border-r {
+    border-color: #334155 !important;
+}
+
+/* Quick Stats Bar (gray-50 background) */
+[data-theme="dark"] #quickStatsBar.bg-gray-50,
+[data-theme="dark"] .bg-gray-50.border-t {
+    background-color: #1e293b !important;
+}
+
+/* Loading overlay panel */
+[data-theme="dark"] #loading-overlay > div.bg-white {
+    background-color: #1e293b !important;
+    color: #f1f5f9 !important;
+}
+
+/* Notifications panel */
+[data-theme="dark"] .notification.bg-white {
+    background-color: #1e293b !important;
+    color: #f1f5f9 !important;
+}
+
+/* Make gradient banners legible on dark — slightly dim them */
+[data-theme="dark"] .bg-gradient-to-r {
+    filter: brightness(0.9) saturate(0.95);
+}
+
+/* Force input/textarea cursor color */
+[data-theme="dark"] input,
+[data-theme="dark"] textarea,
+[data-theme="dark"] select {
+    caret-color: #f1f5f9;
+}
+
+/* Code preview modal stays dark in both themes — already styled inline */

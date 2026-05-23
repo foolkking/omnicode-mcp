@@ -28,10 +28,14 @@
     
     <!-- Font Awesome -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <!-- App stylesheet (incl. dark-mode rules) -->
+    <link rel="stylesheet" href="/static/css/styles.css">
     
     <!-- Tailwind Configuration -->
     <script>
         tailwind.config = {
+            darkMode: 'class',
             theme: {
                 extend: {
                     colors: {
@@ -139,6 +143,7 @@
     <!-- 3. Utilities -->
     <script src="/static/js/utils/format.js"></script>
     <script src="/static/js/utils/storage.js"></script>
+    <script src="/static/js/utils/i18n.js"></script>
     <script src="/static/js/utils/theme.js"></script>
     
     <!-- 4. Components -->
