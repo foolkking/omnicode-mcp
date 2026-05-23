@@ -79,11 +79,19 @@
                 <!-- New Directory Input -->
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-2">New Directory Path</label>
-                    <input type="text" id="newWorkingDir" placeholder="C:/path/to/your/project" 
-                           class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-orange-500 focus:border-transparent">
+                    <div class="flex space-x-2">
+                        <input type="text" id="newWorkingDir" placeholder="C:/path/to/your/project"
+                               class="flex-1 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-orange-500 focus:border-transparent">
+                        <button onclick="openFolderPicker()" type="button"
+                                class="bg-gray-100 hover:bg-gray-200 text-gray-700 px-4 py-2 rounded-md text-sm font-medium transition-colors flex items-center"
+                                title="Browse system folders">
+                            <i class="fas fa-folder-open mr-1.5"></i>
+                            Browse
+                        </button>
+                    </div>
                     <p class="text-xs text-gray-500 mt-1">
                         <i class="fas fa-info-circle"></i>
-                        Enter absolute path to your project directory
+                        Enter absolute path to your project directory, or click Browse to pick from system folders
                     </p>
                 </div>
                 
@@ -110,6 +118,13 @@
                             <p class="text-sm text-yellow-800 font-medium">Important</p>
                             <p class="text-xs text-yellow-700 mt-1">
                                 Changing the working directory will reinitialize all services including search index, git repo, and memory system.
+                            </p>
+                            <p class="text-xs text-yellow-700 mt-2">
+                                <i class="fas fa-database mr-1"></i>
+                                Each project keeps its own <code class="bg-yellow-100 px-1 rounded">.data/</code> folder
+                                (vector index, memory store, provider registry).
+                                Switching to a different folder loads <strong>that</strong> project's data;
+                                switching back restores the previous project's data — nothing is lost.
                             </p>
                         </div>
                     </div>
@@ -283,7 +298,7 @@ async function changeWorkingDir() {
         return;
     }
     
-    if (!confirm(`⚠️ Change Working Directory?\n\nNew Path: ${newPath}\n\nThis will reinitialize all services:\n• Search Index\n• Git Repository\n• Memory System\n• All Pipelines\n\nContinue?`)) {
+    if (!confirm(`⚠️ Change Working Directory?\n\nNew Path: ${newPath}\n\nThis will reinitialize all services:\n• Search Index\n• Git Repository\n• Memory System\n• All Pipelines\n\n💡 Each project keeps its own .data/ folder, so switching back\n  to the previous folder will restore its memories, index, and\n  provider settings — nothing is deleted.\n\nContinue?`)) {
         return;
     }
     
@@ -325,6 +340,23 @@ async function changeWorkingDir() {
                     <div class="text-sm text-green-800">
                         <div><strong>Old:</strong> ${data.old_working_directory}</div>
                         <div><strong>New:</strong> ${data.new_working_directory}</div>
+                        ${data.is_existing_project ? `
+                            <div class="mt-2 p-2 bg-blue-50 border border-blue-200 rounded text-blue-800">
+                                <i class="fas fa-database mr-1"></i>
+                                <strong>Existing project detected.</strong> Restored
+                                ${(data.loaded && data.loaded.memories) || 0} memories and
+                                ${(data.loaded && data.loaded.indexed_files) || 0} indexed files
+                                from <code class="bg-blue-100 px-1 rounded">.data/</code>.
+                            </div>
+                        ` : `
+                            <div class="mt-2 p-2 bg-amber-50 border border-amber-200 rounded text-amber-800">
+                                <i class="fas fa-seedling mr-1"></i>
+                                <strong>Fresh project.</strong> No
+                                <code class="bg-amber-100 px-1 rounded">.data/</code> folder existed —
+                                a new memory store, vector index and provider registry
+                                were created. Run "Index Codebase" from Search to populate them.
+                            </div>
+                        `}
                         <div class="mt-2">
                             <strong>Services Reinitialized:</strong>
                             <div class="grid grid-cols-2 gap-1 mt-1">
@@ -538,6 +570,210 @@ function hideLoading() {
     const overlay = document.getElementById('loading-overlay');
     if (overlay) {
         overlay.classList.add('hidden');
+    }
+}
+
+// =============================================================================
+// Folder picker — modal that lets the user navigate the filesystem and pick a
+// directory.  Uses /fs/drives + /fs/list?dirs_only=true (already shipped in
+// api/v1/routers/fs_browser.py).
+// =============================================================================
+window.__pickerState = window.__pickerState || { current: null, history: [] };
+
+async function openFolderPicker() {
+    var existing = document.getElementById('folderPickerModal');
+    if (existing) existing.remove();
+
+    var modal = document.createElement('div');
+    modal.id = 'folderPickerModal';
+    modal.className = 'fixed inset-0 bg-black bg-opacity-60 z-[80] flex items-center justify-center p-4';
+    modal.innerHTML = `
+        <div class="bg-white rounded-lg shadow-2xl max-w-3xl w-full max-h-[85vh] flex flex-col">
+            <div class="px-5 py-3 border-b border-gray-200 flex items-center justify-between">
+                <h3 class="text-base font-semibold text-gray-900 flex items-center">
+                    <i class="fas fa-folder-open text-blue-500 mr-2"></i>
+                    Pick a folder
+                </h3>
+                <button onclick="closeFolderPicker()" class="text-gray-500 hover:text-gray-700">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+
+            <div class="px-5 py-2 border-b border-gray-100 flex items-center space-x-2 text-sm">
+                <button onclick="pickerGoUp()" class="text-gray-600 hover:text-gray-900 px-2 py-1 rounded hover:bg-gray-100" title="Up">
+                    <i class="fas fa-arrow-up"></i>
+                </button>
+                <button onclick="pickerGoRoots()" class="text-gray-600 hover:text-gray-900 px-2 py-1 rounded hover:bg-gray-100" title="Roots / Drives">
+                    <i class="fas fa-hard-drive"></i>
+                </button>
+                <input id="pickerPathBar" type="text"
+                       class="flex-1 border border-gray-300 rounded px-2 py-1 text-sm font-mono"
+                       placeholder="(roots)" />
+                <button onclick="pickerGoTo()" class="px-2 py-1 bg-blue-500 hover:bg-blue-600 text-white rounded text-sm">Go</button>
+            </div>
+
+            <div id="pickerList" class="flex-1 overflow-y-auto p-3 space-y-1 text-sm bg-gray-50">
+                <div class="text-center text-gray-500 py-6">
+                    <i class="fas fa-spinner fa-spin mr-1"></i> Loading roots...
+                </div>
+            </div>
+
+            <div class="px-5 py-3 border-t border-gray-200 flex items-center justify-between">
+                <div class="text-xs text-gray-500">
+                    <i class="fas fa-info-circle"></i>
+                    Double-click to enter a folder, or click Pick to use the highlighted folder.
+                </div>
+                <div class="flex space-x-2">
+                    <button onclick="closeFolderPicker()" class="px-4 py-2 rounded-md bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm">Cancel</button>
+                    <button onclick="pickerConfirm()" id="pickerConfirmBtn" disabled
+                            class="px-4 py-2 rounded-md bg-orange-500 hover:bg-orange-600 disabled:bg-gray-300 disabled:cursor-not-allowed text-white text-sm font-medium">
+                        <i class="fas fa-check mr-1"></i> Pick this folder
+                    </button>
+                </div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+
+    modal.addEventListener('click', function (ev) {
+        if (ev.target === modal) closeFolderPicker();
+    });
+    document.addEventListener('keydown', _pickerKeydown);
+
+    // Pre-fill with current input value if it's a real path; otherwise show roots
+    var prefill = document.getElementById('newWorkingDir').value.trim();
+    if (prefill && (prefill.includes('/') || prefill.includes('\\'))) {
+        await pickerNavigate(prefill);
+    } else {
+        await pickerGoRoots();
+    }
+}
+
+function closeFolderPicker() {
+    var m = document.getElementById('folderPickerModal');
+    if (m) m.remove();
+    document.removeEventListener('keydown', _pickerKeydown);
+}
+
+function _pickerKeydown(ev) {
+    if (ev.key === 'Escape') closeFolderPicker();
+    else if (ev.key === 'Enter' && ev.target && ev.target.id === 'pickerPathBar') {
+        ev.preventDefault();
+        pickerGoTo();
+    }
+}
+
+async function pickerGoRoots() {
+    var list = document.getElementById('pickerList');
+    list.innerHTML = '<div class="text-center text-gray-500 py-6"><i class="fas fa-spinner fa-spin mr-1"></i> Loading roots...</div>';
+    document.getElementById('pickerPathBar').value = '';
+    window.__pickerState.current = null;
+    document.getElementById('pickerConfirmBtn').disabled = true;
+
+    try {
+        var resp = await fetch('/fs/drives');
+        var body = await resp.json();
+        var data = (body && body.result) || body || {};
+        var entries = data.drives || data.roots || [];
+        if (!entries.length) {
+            list.innerHTML = '<div class="text-center text-red-500 py-6">No drives / roots returned. Check FS browser is enabled.</div>';
+            return;
+        }
+        list.innerHTML = entries.map(function (e) {
+            var path = e.path || e;
+            var label = e.label || path;
+            return _pickerRow(path, label, true);
+        }).join('');
+    } catch (e) {
+        list.innerHTML = '<div class="text-center text-red-500 py-6">Failed to load roots: ' + (e.message || e) + '</div>';
+    }
+}
+
+function _pickerRow(path, label, isDir) {
+    var icon = isDir ? 'fa-folder text-yellow-600' : 'fa-file text-gray-500';
+    var safe = String(path).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    var safeLabel = String(label).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return '<div class="picker-row flex items-center space-x-2 px-3 py-1.5 rounded hover:bg-blue-100 cursor-pointer"'
+        + ' data-path="' + safe + '"'
+        + ' onclick="pickerSelect(this)"'
+        + ' ondblclick="pickerNavigate(this.getAttribute(\'data-path\'))">'
+        + '<i class="fas ' + icon + ' w-4"></i>'
+        + '<span class="font-mono text-xs">' + safeLabel + '</span>'
+        + '</div>';
+}
+
+function pickerSelect(row) {
+    var prev = document.querySelector('.picker-row.bg-blue-200');
+    if (prev) prev.classList.remove('bg-blue-200', 'border', 'border-blue-400');
+    row.classList.add('bg-blue-200', 'border', 'border-blue-400');
+    var path = row.getAttribute('data-path');
+    document.getElementById('pickerPathBar').value = path;
+    window.__pickerState.current = path;
+    document.getElementById('pickerConfirmBtn').disabled = false;
+}
+
+async function pickerNavigate(path) {
+    if (!path) return;
+    var list = document.getElementById('pickerList');
+    list.innerHTML = '<div class="text-center text-gray-500 py-6"><i class="fas fa-spinner fa-spin mr-1"></i> Loading...</div>';
+    document.getElementById('pickerPathBar').value = path;
+    window.__pickerState.current = path;
+    document.getElementById('pickerConfirmBtn').disabled = false;
+
+    try {
+        var qs = '/fs/list?path=' + encodeURIComponent(path) + '&dirs_only=true';
+        var resp = await fetch(qs);
+        var body = await resp.json();
+        if (!resp.ok || (body && body.success === false)) {
+            list.innerHTML = '<div class="text-center text-red-600 py-6 px-3">'
+                + (body && body.error ? body.error : ('HTTP ' + resp.status))
+                + '<div class="text-xs text-gray-500 mt-2">You can still pick this path with the button below.</div>'
+                + '</div>';
+            return;
+        }
+        var data = (body && body.result) || body || {};
+        var entries = data.entries || data.items || [];
+        if (!entries.length) {
+            list.innerHTML = '<div class="text-center text-gray-500 py-6">(empty folder — Pick to use as working dir)</div>';
+            return;
+        }
+        list.innerHTML = entries.map(function (e) {
+            var p = e.path || ((path.endsWith('/') || path.endsWith('\\')) ? path : path + '/') + (e.name || e);
+            var label = e.name || p;
+            return _pickerRow(p, label, true);
+        }).join('');
+    } catch (e) {
+        list.innerHTML = '<div class="text-center text-red-500 py-6">Failed to list: ' + (e.message || e) + '</div>';
+    }
+}
+
+function pickerGoUp() {
+    var cur = window.__pickerState.current;
+    if (!cur) return;
+    var trimmed = cur.replace(/[\\/]+$/, '');
+    var idx = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
+    if (idx <= 0) {
+        pickerGoRoots();
+        return;
+    }
+    var parent = trimmed.slice(0, idx);
+    // Windows drive root like "C:" needs trailing slash
+    if (/^[A-Za-z]:$/.test(parent)) parent = parent + '/';
+    pickerNavigate(parent);
+}
+
+function pickerGoTo() {
+    var path = document.getElementById('pickerPathBar').value.trim();
+    if (path) pickerNavigate(path);
+}
+
+function pickerConfirm() {
+    var path = window.__pickerState.current;
+    if (!path) return;
+    document.getElementById('newWorkingDir').value = path;
+    closeFolderPicker();
+    if (typeof notifications !== 'undefined' && notifications.success) {
+        notifications.success('Path filled: ' + path);
     }
 }
 </script>

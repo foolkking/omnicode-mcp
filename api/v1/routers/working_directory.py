@@ -147,9 +147,29 @@ async def change_working_directory(request: WorkingDirectoryRequest):
 
         old_working_dir = settings.WORKING_DIR
 
+        # Detect whether the target directory is a fresh project (no .data/
+        # folder yet) so the UI can tell the user whether memories/index were
+        # restored from a previous session here.
+        from pathlib import Path as _Path
+        data_dir = _Path(new_dir) / ".data"
+        is_existing_project = (
+            data_dir.exists() and any(data_dir.iterdir())
+        ) if data_dir.exists() else False
+
         try:
             # Reinitialize all services
             await reinitialize_services(new_dir)
+
+            # After reinit, peek at memory + index sizes to give the user a
+            # one-line summary of what was loaded.
+            try:
+                from core import get_memory_manager, get_search_engine
+                mem = get_memory_manager()
+                se = get_search_engine()
+                mem_count = mem.get_stats().total_memories if mem else 0
+                index_files = (se.get_stats() or {}).get("total_files", 0) if se else 0
+            except Exception:
+                mem_count, index_files = 0, 0
 
             return create_success_response(
                 {
@@ -158,6 +178,11 @@ async def change_working_directory(request: WorkingDirectoryRequest):
                     "new_working_directory": settings.WORKING_DIR,
                     "changed": True,
                     "services_reinitialized": get_services_status(),
+                    "is_existing_project": is_existing_project,
+                    "loaded": {
+                        "memories": mem_count,
+                        "indexed_files": index_files,
+                    },
                 }
             )
 
