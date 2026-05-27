@@ -11,6 +11,7 @@ from api.v1.routers.git import router2 as session_router
 from api.v1.routers.guard import router as guard_router
 from api.v1.routers.health import router as health_router
 from api.v1.routers.logs import router as logs_router
+from api.v1.routers.lsp import router as lsp_router
 from api.v1.routers.memory import router as memory_router
 from api.v1.routers.model import router as model_router
 from api.v1.routers.patch import router as patch_router
@@ -36,6 +37,7 @@ all_routers = [
     guard_router,
     fs_browser_router,
     patch_router,
+    lsp_router,
 ]
 
 __all__ = [
