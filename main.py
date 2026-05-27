@@ -27,7 +27,15 @@ def create_app() -> FastAPI:
     Returns:
         Configured FastAPI app instance
     """
+    import os
+    from omnicode_core.config.features import get_features
+
     settings = get_settings()
+    features = get_features()
+
+    # Headless mode check — OMNICODE_WEB_CONSOLE=false disables static file serving
+    if os.environ.get("OMNICODE_WEB_CONSOLE", "").lower() == "false":
+        features.headless()
 
     # Create FastAPI app
     app = FastAPI(
@@ -46,8 +54,12 @@ def create_app() -> FastAPI:
         allow_headers=settings.CORS_HEADERS,
     )
 
-    # Register all routers
+    # Register routers — skip static file / web console routers in headless mode
     for router in all_routers:
+        # In headless mode, skip the static file router (serves templates/*)
+        if not features.web_console and getattr(router, "tags", None) == ["static"]:
+            logger.info("⏭️  Skipping static file router (headless mode)")
+            continue
         app.include_router(router)
         logger.info(f"✅ Registered router: {router.tags}")
 

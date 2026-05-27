@@ -465,14 +465,33 @@ async def read_code_content(
     ),
     end_line: Optional[str] = Query(None, description="End line number (inclusive)"),
     with_line_numbers: bool = Query(True, description="Include line numbers in output"),
+    mode: str = Query(
+        "full",
+        description=(
+            "Read mode: full (entire file), outline (signatures + first docstring line), "
+            "symbols (symbol list only), diagnostics (lint issues only), imports (import lines only)"
+        ),
+    ),
 ):
-    """Read code content with enhanced error handling for line ranges"""
+    """Read code content with multiple modes for token efficiency.
+
+    Modes:
+      - full: complete file content (default, backward-compatible)
+      - outline: only function/class signatures + first docstring line (~90% token savings)
+      - symbols: structured symbol list (name, kind, lines) — no code content
+      - diagnostics: only ruff/eslint diagnostics for this file
+      - imports: only import/require statements
+    """
     # Defensive coercion: some clients (URLSearchParams in older JS code,
     # MCP wrappers) serialize Python None as the literal string "null" or
     # "undefined".  Treat those as if the param were omitted and parse the
     # remaining strings into ints.
     if isinstance(symbol_name, str) and symbol_name.lower() in {"null", "undefined", ""}:
         symbol_name = None
+
+    # Handle non-full modes early — they don't need line range / symbol resolution
+    if mode and mode.lower() not in ("full", ""):
+        return await _read_mode_dispatch(file_path, mode.lower(), with_line_numbers)
 
     def _coerce_int(v: Optional[str], field: str):
         if v is None:
@@ -883,3 +902,183 @@ async def file_operations(request: FileRequest):
             request.operation,
             settings.WORKING_DIR,
         )
+
+
+# =============================================================================
+# Multi-mode read dispatch (outline / symbols / diagnostics / imports)
+# =============================================================================
+
+async def _read_mode_dispatch(file_path: str, mode: str, with_line_numbers: bool):
+    """Handle non-full read modes that return structured, token-efficient output.
+
+    These modes are designed to give AI agents the minimum context they need
+    without reading the entire file — typically saving 50-90% of tokens.
+    """
+    import os
+
+    from core.config import get_settings
+    from core import get_search_engine, get_ast_parser
+    from utils import create_success_response, create_error_response, validate_file_path
+
+    settings = get_settings()
+
+    try:
+        await validate_file_path(file_path, settings.WORKING_DIR)
+    except Exception as e:
+        return create_error_response(f"Invalid file path: {file_path} — {e}", 400)
+
+    full_path = os.path.abspath(os.path.join(settings.WORKING_DIR, file_path))
+    if not os.path.exists(full_path):
+        return create_error_response(f"File not found: {file_path}", 404)
+
+    try:
+        with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+    except Exception as exc:
+        return create_error_response(f"Cannot read file: {exc}", 500)
+
+    lines = content.splitlines()
+    total_lines = len(lines)
+
+    # -------------------------------------------------------------------------
+    # MODE: outline — signatures + first docstring line
+    # -------------------------------------------------------------------------
+    if mode == "outline":
+        search_engine = get_search_engine()
+        if not search_engine:
+            return create_error_response("Search engine not initialized", 500)
+
+        symbols_data = await search_engine.list_symbols_in_file(file_path)
+        symbols = symbols_data.get("symbols") or []
+
+        outline_items = []
+        for sym in symbols:
+            name = sym.get("name", "?")
+            stype = sym.get("type", "symbol")
+            sline = sym.get("line_start", 1)
+            eline = sym.get("line_end", sline)
+            parent = sym.get("parent")
+
+            # Extract signature (first non-empty line of the symbol)
+            signature = ""
+            if 1 <= sline <= total_lines:
+                for ln in lines[sline - 1: min(eline, sline + 3)]:
+                    stripped = ln.strip()
+                    if stripped:
+                        signature = stripped[:200]
+                        break
+
+            # Extract first docstring line (Python only for now)
+            docstring_line = ""
+            if sline < total_lines:
+                for ln in lines[sline: min(eline, sline + 5)]:
+                    stripped = ln.strip()
+                    if stripped.startswith(('"""', "'''")):
+                        doc = stripped.strip("\"'").strip()
+                        if doc:
+                            docstring_line = doc[:150]
+                        break
+                    elif stripped.startswith(('#', '//')):
+                        docstring_line = stripped.lstrip('#/ ').strip()[:150]
+                        break
+
+            outline_items.append({
+                "name": name,
+                "kind": stype,
+                "signature": signature,
+                "doc": docstring_line,
+                "lines": [sline, eline],
+                "parent": parent,
+            })
+
+        return create_success_response({
+            "file": file_path,
+            "mode": "outline",
+            "total_lines": total_lines,
+            "language": symbols_data.get("language", ""),
+            "symbols": outline_items,
+            "symbol_count": len(outline_items),
+        })
+
+    # -------------------------------------------------------------------------
+    # MODE: symbols — just the symbol list (even more compact than outline)
+    # -------------------------------------------------------------------------
+    if mode == "symbols":
+        search_engine = get_search_engine()
+        if not search_engine:
+            return create_error_response("Search engine not initialized", 500)
+
+        symbols_data = await search_engine.list_symbols_in_file(file_path)
+        symbols = symbols_data.get("symbols") or []
+
+        return create_success_response({
+            "file": file_path,
+            "mode": "symbols",
+            "total_lines": total_lines,
+            "language": symbols_data.get("language", ""),
+            "symbols": [
+                {
+                    "name": s.get("name"),
+                    "kind": s.get("type"),
+                    "lines": [s.get("line_start", 1), s.get("line_end", 1)],
+                    "parent": s.get("parent"),
+                }
+                for s in symbols
+            ],
+            "symbol_count": len(symbols),
+        })
+
+    # -------------------------------------------------------------------------
+    # MODE: imports — only import/require lines
+    # -------------------------------------------------------------------------
+    if mode == "imports":
+        import_lines = []
+        for i, ln in enumerate(lines, 1):
+            stripped = ln.strip()
+            if stripped.startswith(("import ", "from ", "require(", "require (")) or \
+               stripped.startswith(("const ", "let ", "var ")) and " require(" in stripped or \
+               stripped.startswith("#include"):
+                import_lines.append({"line": i, "text": stripped})
+
+        rendered = "\n".join(f"{il['line']:>4} | {il['text']}" for il in import_lines) if with_line_numbers else \
+                   "\n".join(il["text"] for il in import_lines)
+
+        return create_success_response({
+            "file": file_path,
+            "mode": "imports",
+            "total_lines": total_lines,
+            "imports": import_lines,
+            "import_count": len(import_lines),
+            "content": rendered,
+        })
+
+    # -------------------------------------------------------------------------
+    # MODE: diagnostics — run guard checks on this file
+    # -------------------------------------------------------------------------
+    if mode == "diagnostics":
+        try:
+            from omnicode.guard import ProactiveGuard
+            guard = ProactiveGuard()
+            result = await guard.check(file_path)
+            return create_success_response({
+                "file": file_path,
+                "mode": "diagnostics",
+                "total_lines": total_lines,
+                "diagnostics": result if isinstance(result, list) else [result] if result else [],
+            })
+        except Exception as exc:
+            return create_success_response({
+                "file": file_path,
+                "mode": "diagnostics",
+                "total_lines": total_lines,
+                "diagnostics": [],
+                "note": f"Guard check unavailable: {exc}",
+            })
+
+    # -------------------------------------------------------------------------
+    # Unknown mode — fall back to full
+    # -------------------------------------------------------------------------
+    return create_error_response(
+        f"Unknown read mode: '{mode}'. Valid modes: full, outline, symbols, imports, diagnostics",
+        400,
+    )
