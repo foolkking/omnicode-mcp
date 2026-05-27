@@ -1,0 +1,49 @@
+# =============================================================================
+# OmniCode-MCP — cloud-mode docker-compose (Wave 2, W2-3).
+#
+# Adds a Caddy reverse-proxy in front of the existing OmniCode container.
+# Caddy auto-provisions Let's Encrypt certificates if the host has a
+# public DNS name pointed at it; for testing on localhost, replace the
+# ``omnicode.example.com`` block in Caddyfile with ``:80, :443``.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f deploy/docker-compose.cloud.yml up -d
+# =============================================================================
+
+services:
+  omnicode:
+    # Inherit the base service from ``../docker-compose.yml``; the
+    # cloud overlay just hardens its env + binds to loopback.
+    environment:
+      - OMNICODE_MODE=cloud
+      - OMNICODE_READ_ONLY=true
+      - OMNICODE_ALLOW_APPLY_PATCH=false
+      - OMNICODE_API_KEY=${OMNICODE_API_KEY:?Set OMNICODE_API_KEY in .env}
+    expose:
+      - "6789"
+    ports: !reset []      # drop the default localhost:6789 mapping
+    networks:
+      - omnicode-internal
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - omnicode
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - omnicode-internal
+
+volumes:
+  caddy-data:
+  caddy-config:
+
+networks:
+  omnicode-internal:
+    driver: bridge

@@ -57,6 +57,18 @@ def run(
 
     _apply_mode_preset(mode)
 
+    # TOML config file (optional). Applied AFTER mode preset so the
+    # preset acts as a baseline and the TOML can override individual
+    # keys; explicit env vars still win because the loader uses
+    # ``setdefault``.
+    try:
+        from omnicode_core.config.toml_loader import load_toml_config
+
+        load_toml_config(start=os.getcwd())
+    except Exception as exc:
+        # Never block startup over a config-file issue.
+        print(f"[serve] TOML loader skipped: {exc}")
+
     try:
         import uvicorn
     except ImportError:

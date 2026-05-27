@@ -1,0 +1,46 @@
+# =============================================================================
+# OmniCode-MCP — sample systemd unit for the MCP-over-HTTP transport.
+#
+# Optional companion to ``omnicode.service``. Run only if you need
+# to expose MCP over the wire (SSE) for remote AI editors. Local-only
+# stdio MCP does NOT need this unit.
+# =============================================================================
+
+[Unit]
+Description=OmniCode-MCP — MCP-over-HTTP transport (SSE)
+After=network.target omnicode.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=omnicode
+Group=omnicode
+
+WorkingDirectory=/srv/omnicode/workspaces/project-a
+Environment=PATH=/opt/omnicode/.venv/bin
+Environment=PYTHONUNBUFFERED=1
+Environment=OMNICODE_CONFIG=/etc/omnicode/omnicode.toml
+# REQUIRE auth — refuse to start if neither key nor users are configured.
+Environment=OMNICODE_MCP_REQUIRE_AUTH=true
+
+ExecStart=/opt/omnicode/.venv/bin/python /opt/omnicode/mcp_server.py \
+    --transport sse \
+    --port 6790 \
+    --auth required
+
+Restart=on-failure
+RestartSec=5s
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/srv/omnicode/workspaces
+ProtectKernelTunables=yes
+RestrictNamespaces=yes
+
+LimitNOFILE=65535
+MemoryMax=2G
+
+[Install]
+WantedBy=multi-user.target

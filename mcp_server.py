@@ -2370,6 +2370,16 @@ async def cleanup():
         http_client = None
 
 
+def _has_users_configured() -> bool:
+    """Lightweight probe — returns True when at least one RBAC user exists."""
+    try:
+        from omnicode_core.auth.users import get_user_store
+
+        return bool(get_user_store().list_users())
+    except Exception:
+        return False
+
+
 def main():
     """Main entry point.
 
@@ -2404,6 +2414,17 @@ def main():
         default=None,
         help="URL prefix for sse/streamable-http transports (default: /).",
     )
+    parser.add_argument(
+        "--auth",
+        choices=("auto", "required", "off"),
+        default="auto",
+        help=(
+            "Auth posture for sse/streamable-http transports. "
+            "auto (default): on when OMNICODE_API_KEY or any user exists. "
+            "required: refuse to start unless auth is configured. "
+            "off: no-op gate (NOT recommended for cloud deployments)."
+        ),
+    )
     args = parser.parse_args()
 
     # FastMCP reads its host/port from the constructor; rebuild if user
@@ -2416,10 +2437,49 @@ def main():
             logger.warning("Could not set FastMCP port; ignoring --port flag.")
 
     try:
-        if args.mount_path:
-            mcp.run(transport=args.transport, mount_path=args.mount_path)
+        if args.transport == "stdio":
+            mcp.run(transport="stdio")
         else:
-            mcp.run(transport=args.transport)
+            # SSE / streamable-http both expose a Starlette ASGI app.
+            # Wrap it with our bearer-token gate so cloud deployments
+            # don't expose tools to anonymous callers (W2-5).
+            import uvicorn
+
+            from omnicode_adapters.mcp_server.http_auth import make_auth_middleware
+
+            host = mcp.settings.host  # type: ignore[attr-defined]
+            port = mcp.settings.port  # type: ignore[attr-defined]
+
+            if args.transport == "sse":
+                inner = mcp.sse_app(mount_path=args.mount_path)
+            else:  # streamable-http
+                inner = mcp.streamable_http_app()
+
+            require_auth = (
+                _os.environ.get("OMNICODE_MCP_REQUIRE_AUTH", "").lower()
+                in ("1", "true", "yes")
+            ) or args.auth == "required"
+            if require_auth and not (
+                _os.environ.get("OMNICODE_API_KEY")
+                or _has_users_configured()
+            ):
+                logger.error(
+                    "MCP transport=%s requires --auth required but no auth "
+                    "is configured. Set OMNICODE_API_KEY or create a user "
+                    "via POST /admin/users first.",
+                    args.transport,
+                )
+                sys.exit(2)
+
+            wrapped = make_auth_middleware(inner)
+            logger.info(
+                "MCP transport=%s listening on %s:%d (auth %s)",
+                args.transport,
+                host,
+                port,
+                "ON" if (_os.environ.get("OMNICODE_API_KEY") or _has_users_configured()) else "OFF",
+            )
+            uvicorn.run(wrapped, host=host, port=port, log_level="info")
     except KeyboardInterrupt:
         pass
     except Exception as exc:

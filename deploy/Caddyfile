@@ -1,0 +1,31 @@
+# Sample Caddyfile for the docker-compose.cloud.yml deployment.
+# Replace ``omnicode.example.com`` with your real DNS name OR delete
+# the hostname line entirely to bind to the host's public IP without
+# automatic TLS (testing only).
+
+omnicode.example.com {
+    encode gzip zstd
+
+    # Standard REST + Web Console.
+    reverse_proxy /* omnicode:6789 {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    # Live log WebSocket.
+    @ws path /ws/logs*
+    reverse_proxy @ws omnicode:6789
+
+    # Block /admin from the public internet by default. Replace
+    # ``trusted_proxies`` and ``client_ip`` with your office / VPN
+    # CIDR before uncommenting.
+    # @admin path /admin/*
+    # handle @admin {
+    #     @internal client_ip 203.0.113.0/24
+    #     handle @internal {
+    #         reverse_proxy omnicode:6789
+    #     }
+    #     respond "Forbidden" 403
+    # }
+}

@@ -14,6 +14,14 @@ def run():
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
+    # TOML config file (optional). See ``omnicode_core/config/toml_loader.py``.
+    try:
+        from omnicode_core.config.toml_loader import load_toml_config
+
+        load_toml_config(start=os.getcwd())
+    except Exception as exc:
+        print(f"[mcp] TOML loader skipped: {exc}")
+
     # Import and run the existing mcp_server
     project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
     sys.path.insert(0, project_root)

@@ -1,0 +1,60 @@
+# OmniCode-MCP configuration file (sample).
+#
+# Copy this to ``omnicode.toml`` next to where you launch the server,
+# or point the loader at any path via ``OMNICODE_CONFIG=/path/to.toml``.
+#
+# Precedence (highest wins):
+#   1. CLI flags (e.g. ``omnicode serve --mode cloud``).
+#   2. Pre-existing process env vars.
+#   3. Values in this file.
+#   4. Pydantic defaults.
+#
+# Every key is optional — leave a section out and OmniCode falls back to
+# its built-in defaults.
+
+[server]
+mode = "local"            # "local" | "cloud" | "hybrid"
+host = "127.0.0.1"
+port = 6789
+auth = false              # set true to refuse anonymous MCP-over-HTTP
+
+[workspace]
+# Absolute path to the codebase. Leave commented out to use ``$PWD``.
+# root = "/srv/omnicode/workspaces/project-a"
+read_only = false
+
+[features]
+web_console = true
+mcp_http = false          # set true to expose MCP over SSE/HTTP
+llm_router = false        # opt-in; install with ``pip install omnicode-mcp[llm]``
+lsp = true
+memory = true
+safe_edit = true
+
+[index]
+incremental = true
+embedding_device = "cpu"  # "cpu" | "cuda" (advanced)
+embedding_model = "sentence-transformers/all-MiniLM-L6-v2"
+
+[security]
+# Easiest single-key auth: set the legacy header. Anyone presenting
+# ``X-API-Key: <value>`` is treated as authenticated. For multi-user
+# deployments use the RBAC endpoints under /admin instead.
+# api_key = "sk-replace-me"
+
+# When true the /patch/apply and /patch/rollback endpoints return 403.
+# Combine with ``server.read_only`` for a "look but don't touch" cloud.
+allow_apply_patch = true
+allow_shell = false       # reserved for the future ``execute_tool`` gate
+
+# MCP tool surface — "all" | "core" | "legacy".
+#   * core    only exposes the 6+1 high-level omni_* tools (~half the
+#             startup token cost).
+#   * legacy  hides the high-level tools, exposes the 16 lower-level ones.
+#   * all     register everything (default).
+mcp_tools = "all"
+
+# Verbatim env-var passthrough for anything we don't model above.
+[env]
+TRANSFORMERS_OFFLINE = "1"
+HF_HUB_OFFLINE = "1"
