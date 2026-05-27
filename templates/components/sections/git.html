@@ -33,12 +33,30 @@
     </div>
 
     <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
-        <!-- Session Management -->
-        <div class="bg-white shadow-lg rounded-lg overflow-hidden">
+        <!--
+            Session Management — disabled by default.
+
+            Reason: this panel creates per-AI-edit git branches like
+            `ai-session-20260522-132457`. In practice that duplicates
+            session management already done by the calling AI editor
+            (Cursor / Claude Code / Kiro), and the branches are not
+            visible to those tools. The REST endpoints (`/session/*`)
+            stay live for back-compat scripts and the test suite, but
+            the panel is hidden unless the user explicitly opts in
+            via `?feature=ai-session` in the URL or sets
+            `localStorage["omnicode.feature.aiSession"] = "true"`.
+
+            Toggle from the browser console:
+              localStorage.setItem("omnicode.feature.aiSession", "true");
+              location.reload();
+        -->
+        <div class="bg-white shadow-lg rounded-lg overflow-hidden hidden"
+             data-feature="ai-session">
             <div class="px-6 py-4 bg-gradient-to-r from-green-50 to-emerald-50 border-b border-gray-200">
                 <h3 class="text-lg font-semibold text-gray-900 flex items-center">
                     <i class="fas fa-play-circle text-green-500 mr-2"></i>
                     AI Session Management
+                    <span class="ml-2 text-xs px-2 py-0.5 rounded bg-amber-100 text-amber-800">legacy</span>
                 </h3>
             </div>
             <div class="p-6 space-y-4">

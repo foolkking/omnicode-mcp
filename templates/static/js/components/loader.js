@@ -138,7 +138,14 @@ class ComponentLoader {
                 
                 // Update state
                 window.appState.set('currentSection', sectionName);
-                
+
+                // Re-apply feature flags so panels marked
+                // ``data-feature="..."`` get hidden / revealed for the
+                // newly mounted section.
+                if (window.omnicodeFeatures && typeof window.omnicodeFeatures.applyAll === 'function') {
+                    window.omnicodeFeatures.applyAll(container);
+                }
+
                 // Emit event
                 this.emitEvent('sectionLoaded', { section: sectionName });
             }

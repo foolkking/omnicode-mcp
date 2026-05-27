@@ -1,5 +1,25 @@
+# =============================================================================
+# OmniCode-MCP — .gitignore
+#
+# Strategy:
+#   * Default to "ignore aggressively" — caches, snapshots, env files, all
+#     scratchpads.
+#   * When you intentionally need to commit something for a debugging /
+#     diagnostic story, drop it under ``_keep_/`` (or one of the explicit
+#     exception blocks below). Never edit this file just to whitelist
+#     a one-off — copy it into ``_keep_/`` instead.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Secrets & env
+# ---------------------------------------------------------------------------
 .env
 .env.local
+.env.*.local
+
+# ---------------------------------------------------------------------------
+# Python build / venv / cache
+# ---------------------------------------------------------------------------
 __pycache__/
 *.py[cod]
 *$py.class
@@ -24,32 +44,83 @@ wheels/
 .coverage
 htmlcov/
 .tox/
+.mypy_cache/
+.ruff_cache/
 .venv
 venv/
 ENV/
 env/
+
+# ---------------------------------------------------------------------------
+# Editors / OS
+# ---------------------------------------------------------------------------
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 .DS_Store
+Thumbs.db
+
+# ---------------------------------------------------------------------------
+# Project data — vector store, snapshots, edit sessions, user DB.
+# These hold per-machine state and may contain provider keys, code
+# snapshots, or secrets — always ignored.
+# ---------------------------------------------------------------------------
+.data/
 data/embeddings.npy
 data/metadata.db
 data/vector_index/
 .codebase/
+.kiro/
+
+# ---------------------------------------------------------------------------
+# Front-end deps
+# ---------------------------------------------------------------------------
 node_modules/
 package-lock.json
 yarn.lock
-.data
 
-# Scratch / smoke / commit-message scratchpads (Kiro session conventions)
-_commit_msg.txt
-_smoke*.py
-_smoke*.txt
-_repro*.py
-_repro*.txt
-_audit*.py
-_audit*.txt
-_pytest_out.txt
-_fail_out.txt
+# ---------------------------------------------------------------------------
+# AI/IDE conversation scratchpads (Kiro / Cursor / Claude Code conventions).
+# Anything starting with an underscore is treated as a session-local
+# artefact. The few exceptions are listed below.
+# ---------------------------------------------------------------------------
+_*.py
+_*.txt
+_*.md
+_*.log
+_*.json
+
+# ---------------------------------------------------------------------------
+# Logs — ignored by default, but ``logs/`` and per-pattern carve-outs are
+# allowed via the explicit allow-list at the bottom of this file.
+# ---------------------------------------------------------------------------
+*.log
+*.log.*
+
+# ---------------------------------------------------------------------------
+# === Allow-list (always wins over the rules above) ===========================
+#
+# When you NEED to share a debug artefact in the repo (e.g. a CI failure
+# output, a pinned regression sample, a reproducer script), drop it
+# under ``_keep_/`` and it'll bypass every ignore rule above.
+#
+# Examples:
+#   _keep_/regressions/2026-05-28-faiss-segfault.log
+#   _keep_/samples/cve-2024-xxxxx.py
+#   _keep_/perf/baseline-2026-05.json
+#
+# Anything else under the allow-list block below is also kept.
+# ---------------------------------------------------------------------------
+!_keep_/
+!_keep_/**
+
+# Persistent project documentation that happens to start with `_` is
+# allowed too:
+!_README*
+
+# CI / GitHub Actions output we explicitly version (currently nothing —
+# but leave the slot here so future ``ci-baseline.json`` etc. can be
+# whitelisted with a single line).
+# !ci-baseline.json
