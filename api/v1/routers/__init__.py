@@ -11,6 +11,7 @@ from api.v1.routers.git import router1 as git_router
 from api.v1.routers.git import router2 as session_router
 from api.v1.routers.guard import router as guard_router
 from api.v1.routers.health import router as health_router
+from api.v1.routers.intelligence import router as intelligence_router
 from api.v1.routers.logs import router as logs_router
 from api.v1.routers.lsp import router as lsp_router
 from api.v1.routers.memory import router as memory_router
@@ -42,6 +43,7 @@ all_routers = [
     lsp_router,
     workspaces_router,
     admin_router,
+    intelligence_router,
 ]
 
 __all__ = [
@@ -61,4 +63,5 @@ __all__ = [
     "fs_browser_router",
     "workspaces_router",
     "admin_router",
+    "intelligence_router",
 ]

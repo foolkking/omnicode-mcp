@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     # API Information
     API_TITLE: str = Field(default="OmniCode-MCP")
     API_DESCRIPTION: str = Field(default="Next-gen Codebase MCP Server")
-    API_VERSION: str = Field(default="1.0.0-beta")
+    API_VERSION: str = Field(default="1.0.0-rc1")
 
     # Working Directory
     WORKING_DIR: str = Field(default=os.getcwd())

@@ -492,6 +492,68 @@ def register_high_level_tools(mcp, make_request):
             return f"❌ Edit operation failed: {e}"
 
     @mcp.tool()
+    async def omni_intelligence(
+        task: Optional[str] = None,
+        file: Optional[str] = None,
+        symbol: Optional[str] = None,
+        query: Optional[str] = None,
+        token_budget: int = 4096,
+        impact_depth: int = 2,
+        max_search_results: int = 5,
+    ) -> str:
+        """Single-call multi-capability composer (Intelligence Layer).
+
+        Combines code understanding + search + impact + memory + git
+        history into one structured payload that fits the requested
+        token budget. Use when the editor needs broad context for an
+        unfamiliar file or symbol — far cheaper than chaining the six
+        single-purpose tools by hand.
+
+        Returns JSON-formatted IntelligenceContext with capability
+        status, results from each capability that ran, and a flat
+        ``advisories`` list summarising what to watch out for.
+        """
+        try:
+            payload = {
+                "task": task,
+                "file_path": file,
+                "symbol": symbol,
+                "query": query,
+                "token_budget": token_budget,
+                "impact_depth": impact_depth,
+                "max_search_results": max_search_results,
+            }
+            res = await make_request(
+                "POST", "/intelligence/context", json=payload
+            )
+            if not res.get("success"):
+                return f"❌ Intelligence call failed: {res.get('error')}"
+            ctx = res.get("result", {})
+            # Compact rendering for the LLM caller — preserves structure
+            # but trims keys that don't help the editor decide what to do.
+            import json as _json
+
+            return _json.dumps(
+                {
+                    "elapsed_ms": ctx.get("elapsed_ms"),
+                    "token_estimate": ctx.get("token_estimate"),
+                    "token_budget": ctx.get("token_budget"),
+                    "advisories": ctx.get("advisories", []),
+                    "capability_status": ctx.get("capability_status", []),
+                    "code_understanding": ctx.get("code_understanding", {}),
+                    "search": ctx.get("search", {}),
+                    "impact": ctx.get("impact", {}),
+                    "memory": ctx.get("memory", {}),
+                    "git_history": ctx.get("git_history", {}),
+                    "errors": ctx.get("errors", {}),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        except Exception as exc:
+            return f"❌ omni_intelligence failed: {exc}"
+
+    @mcp.tool()
     async def discover_tools(query: str = "") -> str:
         """Discover available OmniCode tools and their capabilities.
 
@@ -520,6 +582,7 @@ def register_high_level_tools(mcp, make_request):
             "omni_analyze": "Impact analysis: callers/callees/graph/impact",
             "omni_memory": "Project memory: search/store/context/advisory",
             "omni_context": "Full context for file+symbol in one call",
+            "omni_intelligence": "Eight-capability composer — single call, structured payload, token-budgeted",
             "discover_tools": "This tool — find what's available",
         }
 

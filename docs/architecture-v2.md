@@ -728,8 +728,18 @@ volumes:
 **不是**"又一个 AI 代码编辑器"。
 **而是**"让所有 AI 代码编辑器更懂代码库、更省 token、更安全改代码的底层服务"。
 
+> **状态:** 1.0.0-rc1 已实现全部 8 项能力,且通过 `IntelligenceComposer` 单点编排:
+>
+> * REST: `POST /intelligence/context` — 单次调用拿到结构化、token 预算内的多能力聚合上下文
+> * MCP: `omni_intelligence` 高级工具,内部代理同一组合器
+> * 部署指纹: `GET /capabilities` 声明哪些能力在线、用了什么后端
+> * 任何单一能力失败都被记入 `errors[<capability>]`,不影响其它能力
+>
+> 实现:`omnicode_core/intelligence/composer.py`,集成测试:`tests/integration/test_intelligence_endpoint.py`。
+
 ---
 
 ## 变更日志
 
-- 2026-05-24：创建 v2 架构规划文档
+- 2026-05-24:创建 v2 架构规划文档
+- 2026-05-27:**P0 + P1 + P2 完成** — Intelligence Layer 已组装,版本 1.0.0-rc1。所有八项核心能力既可单独通过专项路由访问,也可通过 `IntelligenceComposer` 单次调用按 token 预算编排聚合输出。
