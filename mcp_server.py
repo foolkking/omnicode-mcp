@@ -140,13 +140,13 @@ async def auto_commit_if_enabled(file_path: str, operation: str, purpose: Option
 # These 6+1 tools replace the need for AI clients to pick from 25+ options.
 #
 # Gating with OMNICODE_MCP_TOOLS:
-#   * "all"    (default) — register both sets (current behaviour).
-#   * "core"   — only the high-level set (legacy ones become no-ops below).
-#   * "legacy" — skip these; expose the 16 lower-level tools only.
+#   * "core"   (default) — only the high-level set; legacy ones become no-ops.
+#   * "all"    — register both sets (the old behaviour, ~24 tools, ~10k tok).
+#   * "legacy" — skip the high-level set; expose only the 16 lower-level tools.
 # =============================================================================
 import os as _os_init
 
-_mcp_tools_mode = _os_init.environ.get("OMNICODE_MCP_TOOLS", "all").lower().strip()
+_mcp_tools_mode = _os_init.environ.get("OMNICODE_MCP_TOOLS", "core").lower().strip()
 if _mcp_tools_mode != "legacy":
     from omnicode_adapters.mcp_server.high_level_tools import register_high_level_tools
     register_high_level_tools(mcp, make_request)
@@ -160,10 +160,10 @@ if _mcp_tools_mode != "legacy":
 # clients should use the 6+1 omni_* tools registered above and toggle
 # the legacy set off via ``OMNICODE_MCP_TOOLS``:
 #
-#   * ``all``    (default) — register everything (current behaviour).
+#   * ``core``   (default) — register only the 6+1 high-level tools, ~50%
+#                  of the startup token cost. Recommended for fresh setups.
+#   * ``all``    — register both sets (24 tools, the pre-Wave-1 behaviour).
 #   * ``legacy`` — register only the legacy 16, useful for old configs.
-#   * ``core``   — register only the 6+1 high-level tools, halving the
-#                  startup token cost. Recommended for fresh setups.
 #
 # We replace ``@mcp.tool()`` with ``@_legacy_tool()`` so a single env
 # variable flips them off without touching the dozens of decorators.
@@ -173,8 +173,8 @@ import os as _os
 
 def _legacy_tool():
     """Conditional wrapper around ``@mcp.tool()`` for the legacy set."""
-    mode = _os.environ.get("OMNICODE_MCP_TOOLS", "all").lower().strip()
-    if mode == "core":
+    mode = _os.environ.get("OMNICODE_MCP_TOOLS", "core").lower().strip()
+    if mode in ("core", ""):
         # Return a no-op decorator so the function is defined but never
         # registered with FastMCP — saves ~6k tokens of schema in the
         # startup handshake.

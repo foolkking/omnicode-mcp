@@ -155,15 +155,32 @@ shipped and all reachable through three converging entry points
 
 ## 5 · MCP tools (stdio + SSE + streamable-http)
 
-`mcp_server.py` registers **23 tools** when `OMNICODE_MCP_TOOLS=all`
-(default). The set splits into:
+`mcp_server.py` exposes a tunable tool surface controlled by
+`OMNICODE_MCP_TOOLS`:
 
-| Tier | Tools | When to register |
-|---|---|---|
-| **High-level** (6 + 1 + 1) | `omni_search`, `omni_read`, `omni_edit`, `omni_analyze`, `omni_memory`, `omni_context`, `omni_intelligence`, `discover_tools` | always for `all`, only set for `core` |
-| **Legacy** (16) | `search_tool`, `read_code_tool`, `edit_file`, `write_tool`, `file_tool`, `git_tool`, `session_tool`, `memory_tool`, `project_context_tool`, `list_file_symbols_tool`, `read_symbol_from_database`, `project_structure_tool`, `list_directory_tool`, `show_directory_tree`, `code_analysis_tool`, `execute_tool` | always for `all`, only set for `legacy` |
+| Value | Tools registered | Total | Use case |
+|---|---|---|---|
+| **`core`** (default) | 6 + 1 + 1 high-level only | **8** | Fresh setups; ~50% smaller MCP handshake |
+| `all` | high-level + 16 legacy | 24 | Pre-Wave-1 behaviour, back-compat |
+| `legacy` | 16 legacy only | 16 | Old configs that hard-code legacy names |
 
-Toggle at startup with `OMNICODE_MCP_TOOLS=core|legacy|all` (Wave 1).
+High-level set (always present unless `legacy`):
+* `omni_search` — semantic / symbol / text in one call.
+* `omni_read` — multi-mode read.
+* `omni_edit` — preview / validate / apply / rollback.
+* `omni_analyze` — call-graph + impact.
+* `omni_memory` — store / search / advisory.
+* `omni_context` — full context for file + symbol.
+* `omni_intelligence` — eight-capability composer.
+* `discover_tools` — runtime tool catalogue.
+
+Legacy set (only with `all` or `legacy`):
+`search_tool`, `read_code_tool`, `edit_file`, `write_tool`,
+`file_tool`, `git_tool`, `session_tool`, `memory_tool`,
+`project_context_tool`, `list_file_symbols_tool`,
+`read_symbol_from_database`, `project_structure_tool`,
+`list_directory_tool`, `show_directory_tree`, `code_analysis_tool`,
+`execute_tool`.
 
 Transports:
 * `python mcp_server.py` (stdio, default — what AI editors spawn).

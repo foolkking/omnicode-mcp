@@ -49,10 +49,10 @@ allow_shell = false       # reserved for the future ``execute_tool`` gate
 
 # MCP tool surface — "all" | "core" | "legacy".
 #   * core    only exposes the 6+1 high-level omni_* tools (~half the
-#             startup token cost).
+#             startup token cost). DEFAULT.
 #   * legacy  hides the high-level tools, exposes the 16 lower-level ones.
-#   * all     register everything (default).
-mcp_tools = "all"
+#   * all     register both sets (the old pre-Wave-1 behaviour, 24 tools).
+mcp_tools = "core"
 
 # -------- Local-agent file-sync (Wave 2 W2-2 — hybrid mode) ----------
 # Only used by ``omnicode agent``, not by the server itself. The agent
