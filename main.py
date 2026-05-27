@@ -58,6 +58,12 @@ def create_app() -> FastAPI:
     from core.auth_middleware import install as install_auth
     install_auth(app, settings.OMNICODE_API_KEY)
 
+    # Multi-user RBAC (no-op when the user store is empty).
+    # Layered AFTER the single-key gate so the simpler env-driven flow keeps
+    # working for solo deployments. When users exist, RBAC takes precedence.
+    from core.rbac_middleware import install as install_rbac
+    install_rbac(app)
+
     # Register routers — skip static file / web console routers in headless mode
     for router in all_routers:
         # In headless mode, skip the static file router (serves templates/*)

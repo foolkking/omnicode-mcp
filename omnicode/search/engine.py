@@ -108,16 +108,15 @@ class SemanticSearchEngine:
         logger.info("Initializing Semantic Search Engine...")
         if self.embedding_model is None:
             try:
-                from sentence_transformers import SentenceTransformer
-
                 from omnicode.config.settings import get_settings
+                from omnicode_core.embeddings import get_default_backend
 
                 model_name = get_settings().EMBEDDING_MODEL
-                # Allow short names ("all-MiniLM-L6-v2") or full HF refs
-                # ("sentence-transformers/all-MiniLM-L6-v2"). SentenceTransformer
-                # handles both, but log the effective choice.
-                self.embedding_model = SentenceTransformer(model_name)
-                logger.info(f"✅ sentence-transformers {model_name} loaded successfully")
+                # ``get_default_backend`` honours OMNICODE_EMBEDDING_BACKEND
+                # (local | remote | hybrid). Local mode keeps the offline
+                # SentenceTransformer behaviour the engine has always had.
+                self.embedding_model = get_default_backend(model_name)
+                logger.info(f"✅ embedding backend ready: {self.embedding_model.name} ({model_name})")
             except Exception as e:
                 logger.error(f"❌ Failed to load sentence-transformers: {e}")
                 raise

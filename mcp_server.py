@@ -24,8 +24,12 @@ logger = logging.getLogger(__name__)
 FASTAPI_BASE_URL = "http://127.0.0.1:6789"
 HTTP_TIMEOUT = 30.0
 
-# Initialize MCP server
-mcp = FastMCP("Codebase Manager MCP Server",port=6789)
+# Initialize MCP server.
+# Use a *different* port from the FastAPI backend (6789) so the two can run
+# side-by-side: FastAPI serves the REST/MCP-tool backend, FastMCP exposes the
+# stdio/SSE/streamable-http transport. The port only matters when the user
+# launches with --transport=sse or --transport=streamable-http.
+mcp = FastMCP("Codebase Manager MCP Server", port=6790)
 
 # HTTP client for making requests to FastAPI
 http_client: Optional[httpx.AsyncClient] = None
@@ -2325,16 +2329,61 @@ async def cleanup():
 
 
 def main():
-    """Main entry point"""
+    """Main entry point.
+
+    Transport selection:
+    * ``--transport stdio`` (default) — single-client, used by Kiro / Cursor.
+    * ``--transport sse``  — SSE transport, MCP clients connect over HTTP/SSE.
+    * ``--transport streamable-http`` — newer streamable HTTP transport.
+
+    Examples:
+        python mcp_server.py --transport sse --port 6790
+        python mcp_server.py --transport streamable-http
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(description="OmniCode MCP server")
+    parser.add_argument(
+        "--transport",
+        choices=("stdio", "sse", "streamable-http"),
+        default="stdio",
+        help="Transport to expose the MCP server on (default: stdio).",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Port for sse/streamable-http transports. Default 6790 to avoid "
+        "clashing with the FastAPI server on 6789.",
+    )
+    parser.add_argument(
+        "--mount-path",
+        type=str,
+        default=None,
+        help="URL prefix for sse/streamable-http transports (default: /).",
+    )
+    args = parser.parse_args()
+
+    # FastMCP reads its host/port from the constructor; rebuild if user
+    # changed them so users can pick a different port without touching code.
+    if args.transport != "stdio" and args.port is not None and args.port != 6789:
+        # FastMCP exposes settings.port we can mutate before run()
+        try:
+            mcp.settings.port = args.port  # type: ignore[attr-defined]
+        except Exception:
+            logger.warning("Could not set FastMCP port; ignoring --port flag.")
+
     try:
-        # Run the MCP server with stdio transport
-        mcp.run(transport="stdio")
+        if args.mount_path:
+            mcp.run(transport=args.transport, mount_path=args.mount_path)
+        else:
+            mcp.run(transport=args.transport)
     except KeyboardInterrupt:
         pass
-    except Exception:
+    except Exception as exc:
+        logger.error("MCP server failed: %s", exc)
         sys.exit(1)
     finally:
-        # Cleanup
         try:
             asyncio.run(cleanup())
         except Exception:

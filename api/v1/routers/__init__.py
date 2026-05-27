@@ -3,6 +3,7 @@ API v1 Routers
 Exports all router instances for registration in main app
 """
 
+from api.v1.routers.admin import router as admin_router
 from api.v1.routers.directory import router as directory_router
 from api.v1.routers.files import router as files_router
 from api.v1.routers.fs_browser import router as fs_browser_router
@@ -40,6 +41,7 @@ all_routers = [
     patch_router,
     lsp_router,
     workspaces_router,
+    admin_router,
 ]
 
 __all__ = [
@@ -58,4 +60,5 @@ __all__ = [
     "guard_router",
     "fs_browser_router",
     "workspaces_router",
+    "admin_router",
 ]

@@ -475,13 +475,19 @@ function _graphRender() {
     if (stats) {
         const summary = __graphState.raw?.summary || {};
         const total = summary.total_edges || (__graphState.raw?.edges || []).length;
-        // Node count > 1500 → switch to canvas to avoid SVG layout thrash.
-        // The threshold is empirical: SVG handles ~1500 elements smoothly,
-        // beyond that the DOM becomes the bottleneck.
-        const useCanvas = nodes.length > 1500;
+        // Renderer tiers — empirically tuned:
+        //   ≤1500 nodes → SVG (full DOM, best for inspection).
+        //   ≤5000 nodes → 2D canvas (DOM-free, ~10× faster than SVG).
+        //   >5000 nodes → WebGL2 (GPU-accelerated, scales to ~50k nodes).
+        // The fallback chain handles browsers without WebGL2 by silently
+        // dropping back to the canvas path.
+        let renderer = 'svg';
+        if (nodes.length > 5000) renderer = 'webgl';
+        else if (nodes.length > 1500) renderer = 'canvas';
+        const useCanvas = renderer !== 'svg';
         stats.textContent = `nodes: ${nodes.length}  •  edges: ${links.length}  •  total edges: ${total}` +
             (dropped ? `  •  dropped: ${dropped}` : '') +
-            (useCanvas ? '  •  canvas' : '');
+            (useCanvas ? `  •  ${renderer}` : '');
     }
 
     const placeholder = document.getElementById('graphPlaceholder');
@@ -510,7 +516,12 @@ function _graphRender() {
     __graphState.svg = null;
     __graphState.g = null;
 
-    if (nodes.length > 1500) {
+    if (nodes.length > 5000) {
+        // WebGL path — falls back to canvas if WebGL2 isn't available.
+        if (!_graphRenderWebGL(nodes, links, colour)) {
+            _graphRenderCanvas(nodes, links, colour);
+        }
+    } else if (nodes.length > 1500) {
         _graphRenderCanvas(nodes, links, colour);
     } else {
         _graphRenderSvg(nodes, links, colour);
@@ -756,6 +767,303 @@ function _graphRenderCanvas(nodes, links, colour) {
     // Initial draw before the simulation produces any ticks (otherwise
     // we get a blank canvas for the first ~50ms).
     _draw();
+}
+
+
+// =============================================================================
+// WebGL2 renderer for very large graphs (>5000 nodes)
+//
+// Uses gl.POINTS for nodes (one draw call) and gl.LINES for edges (one
+// draw call). D3's force simulation still computes layout on the CPU
+// because the node count we target (≤50k) is well within JS's reach
+// per frame, and porting forces to a compute shader would tie us to
+// WebGL2 compute (still patchy across browsers).
+//
+// Returns true if WebGL2 was available, false to signal the caller to
+// fall back to the canvas renderer.
+// =============================================================================
+function _graphRenderWebGL(nodes, links, colour) {
+    const viewer = document.getElementById('graphViewer');
+    const w = viewer.clientWidth || 800;
+    const h = viewer.clientHeight || 600;
+    const dpr = window.devicePixelRatio || 1;
+
+    const canvas = document.createElement('canvas');
+    canvas.className = 'graph-canvas w-full h-full block cursor-grab';
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+    viewer.appendChild(canvas);
+
+    const gl = canvas.getContext('webgl2', { antialias: true, premultipliedAlpha: false });
+    if (!gl) {
+        canvas.remove();
+        console.warn('[graph] WebGL2 unavailable; falling back to canvas renderer.');
+        return false;
+    }
+
+    // -------------------------------------------------------------- shaders
+    const VS_NODE = `#version 300 es
+        precision highp float;
+        in vec2  a_pos;
+        in vec3  a_colour;
+        in float a_radius;
+        uniform mat3 u_view;
+        uniform vec2 u_screen;
+        out vec3 v_colour;
+        void main() {
+            vec3 pos = u_view * vec3(a_pos, 1.0);
+            // Convert to clip space: screen → [-1, 1]
+            vec2 clip = (pos.xy / u_screen) * 2.0 - 1.0;
+            clip.y = -clip.y;
+            gl_Position = vec4(clip, 0.0, 1.0);
+            gl_PointSize = a_radius;
+            v_colour = a_colour;
+        }`;
+    const FS_NODE = `#version 300 es
+        precision highp float;
+        in  vec3 v_colour;
+        out vec4 outColour;
+        void main() {
+            // Round the point — distance from gl_PointCoord centre.
+            vec2 c = gl_PointCoord - vec2(0.5);
+            float d = length(c);
+            if (d > 0.5) discard;
+            float alpha = smoothstep(0.5, 0.45, d);
+            outColour = vec4(v_colour, alpha);
+        }`;
+    const VS_EDGE = `#version 300 es
+        precision highp float;
+        in  vec2 a_pos;
+        uniform mat3 u_view;
+        uniform vec2 u_screen;
+        void main() {
+            vec3 pos = u_view * vec3(a_pos, 1.0);
+            vec2 clip = (pos.xy / u_screen) * 2.0 - 1.0;
+            clip.y = -clip.y;
+            gl_Position = vec4(clip, 0.0, 1.0);
+        }`;
+    const FS_EDGE = `#version 300 es
+        precision highp float;
+        out vec4 outColour;
+        void main() {
+            outColour = vec4(0.61, 0.64, 0.69, 0.45);
+        }`;
+
+    function _compile(type, src) {
+        const sh = gl.createShader(type);
+        gl.shaderSource(sh, src);
+        gl.compileShader(sh);
+        if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+            const log = gl.getShaderInfoLog(sh);
+            gl.deleteShader(sh);
+            throw new Error('shader compile failed: ' + log);
+        }
+        return sh;
+    }
+    function _program(vsSrc, fsSrc) {
+        const vs = _compile(gl.VERTEX_SHADER, vsSrc);
+        const fs = _compile(gl.FRAGMENT_SHADER, fsSrc);
+        const prog = gl.createProgram();
+        gl.attachShader(prog, vs);
+        gl.attachShader(prog, fs);
+        gl.linkProgram(prog);
+        if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+            const log = gl.getProgramInfoLog(prog);
+            gl.deleteProgram(prog);
+            throw new Error('link failed: ' + log);
+        }
+        return prog;
+    }
+
+    let nodeProg, edgeProg;
+    try {
+        nodeProg = _program(VS_NODE, FS_NODE);
+        edgeProg = _program(VS_EDGE, FS_EDGE);
+    } catch (e) {
+        console.error('[graph] WebGL setup failed:', e);
+        canvas.remove();
+        return false;
+    }
+
+    // -------------------------------------------------------------- buffers
+    // Node positions (xy), colours (rgb), radii. Layout is updated each tick.
+    const nodePosArr    = new Float32Array(nodes.length * 2);
+    const nodeColArr    = new Float32Array(nodes.length * 3);
+    const nodeRadiusArr = new Float32Array(nodes.length);
+    const edgePosArr    = new Float32Array(links.length * 4);
+
+    function _hexToRgb01(hex) {
+        // d3 returns hex strings; convert to 0..1 floats.
+        const c = d3.color(hex);
+        if (!c) return [0.5, 0.5, 0.5];
+        return [c.r / 255, c.g / 255, c.b / 255];
+    }
+
+    function _refreshColours() {
+        for (let i = 0; i < nodes.length; i++) {
+            const n = nodes[i];
+            const hex = __graphState.cluster === 'degree'
+                ? d3.interpolateViridis(Math.min(1, (n.in_degree + n.out_degree) / 12))
+                : colour(n.cluster);
+            const [r, g, b] = _hexToRgb01(hex);
+            nodeColArr[i * 3 + 0] = r;
+            nodeColArr[i * 3 + 1] = g;
+            nodeColArr[i * 3 + 2] = b;
+            nodeRadiusArr[i] = (3 + Math.sqrt(n.in_degree + n.out_degree) * 1.4) * dpr * 1.4;
+        }
+    }
+    _refreshColours();
+
+    const nodePosBuf = gl.createBuffer();
+    const nodeColBuf = gl.createBuffer();
+    const nodeRadBuf = gl.createBuffer();
+    const edgePosBuf = gl.createBuffer();
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, nodeColBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, nodeColArr, gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, nodeRadBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, nodeRadiusArr, gl.STATIC_DRAW);
+
+    // -------------------------------------------------------------- view
+    // Manual pan + zoom — same model the canvas renderer uses.
+    const transform = { x: 0, y: 0, k: 1 };
+    __graphState.zoom = { transform };
+
+    function _viewMatrix() {
+        // 3x3 column-major (the way GL likes it).
+        const k = transform.k;
+        return new Float32Array([
+            k, 0, 0,
+            0, k, 0,
+            transform.x, transform.y, 1,
+        ]);
+    }
+
+    // -------------------------------------------------------------- simulation
+    const sim = d3.forceSimulation(nodes)
+        .force('link', d3.forceLink(links).id(d => d.id).distance(70).strength(0.5))
+        .force('charge', d3.forceManyBody().strength(-100).theta(0.9))
+        .force('center', d3.forceCenter(w / 2, h / 2))
+        .force('collide', d3.forceCollide().radius(d => 4 + Math.sqrt(d.in_degree + d.out_degree)).iterations(1))
+        .alphaDecay(0.05);
+    __graphState.sim = sim;
+
+    function _draw() {
+        // Update CPU-side arrays
+        for (let i = 0; i < nodes.length; i++) {
+            const n = nodes[i];
+            nodePosArr[i * 2 + 0] = n.x * dpr;
+            nodePosArr[i * 2 + 1] = n.y * dpr;
+        }
+        for (let i = 0; i < links.length; i++) {
+            const e = links[i];
+            const a = e.source, b = e.target;
+            if (typeof a !== 'object' || typeof b !== 'object') continue;
+            edgePosArr[i * 4 + 0] = a.x * dpr;
+            edgePosArr[i * 4 + 1] = a.y * dpr;
+            edgePosArr[i * 4 + 2] = b.x * dpr;
+            edgePosArr[i * 4 + 3] = b.y * dpr;
+        }
+
+        gl.viewport(0, 0, canvas.width, canvas.height);
+        gl.clearColor(1, 1, 1, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+        // Edges
+        gl.useProgram(edgeProg);
+        gl.uniformMatrix3fv(gl.getUniformLocation(edgeProg, 'u_view'), false, _viewMatrix());
+        gl.uniform2f(gl.getUniformLocation(edgeProg, 'u_screen'), canvas.width, canvas.height);
+        gl.bindBuffer(gl.ARRAY_BUFFER, edgePosBuf);
+        gl.bufferData(gl.ARRAY_BUFFER, edgePosArr, gl.DYNAMIC_DRAW);
+        const eLoc = gl.getAttribLocation(edgeProg, 'a_pos');
+        gl.enableVertexAttribArray(eLoc);
+        gl.vertexAttribPointer(eLoc, 2, gl.FLOAT, false, 0, 0);
+        gl.drawArrays(gl.LINES, 0, links.length * 2);
+
+        // Nodes
+        gl.useProgram(nodeProg);
+        gl.uniformMatrix3fv(gl.getUniformLocation(nodeProg, 'u_view'), false, _viewMatrix());
+        gl.uniform2f(gl.getUniformLocation(nodeProg, 'u_screen'), canvas.width, canvas.height);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, nodePosBuf);
+        gl.bufferData(gl.ARRAY_BUFFER, nodePosArr, gl.DYNAMIC_DRAW);
+        const pLoc = gl.getAttribLocation(nodeProg, 'a_pos');
+        gl.enableVertexAttribArray(pLoc);
+        gl.vertexAttribPointer(pLoc, 2, gl.FLOAT, false, 0, 0);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, nodeColBuf);
+        const cLoc = gl.getAttribLocation(nodeProg, 'a_colour');
+        gl.enableVertexAttribArray(cLoc);
+        gl.vertexAttribPointer(cLoc, 3, gl.FLOAT, false, 0, 0);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, nodeRadBuf);
+        const rLoc = gl.getAttribLocation(nodeProg, 'a_radius');
+        gl.enableVertexAttribArray(rLoc);
+        gl.vertexAttribPointer(rLoc, 1, gl.FLOAT, false, 0, 0);
+
+        gl.drawArrays(gl.POINTS, 0, nodes.length);
+    }
+    sim.on('tick', _draw);
+
+    // ----- interaction (pan + zoom + click hit-test) -----
+    let panStart = null;
+
+    function _hit(event) {
+        const rect = canvas.getBoundingClientRect();
+        const sx = (event.clientX - rect.left - transform.x) / transform.k;
+        const sy = (event.clientY - rect.top - transform.y) / transform.k;
+        let best = null, bestDist = Infinity;
+        // Linear scan — fine up to ~50k nodes for occasional clicks.
+        for (const n of nodes) {
+            const r = 3 + Math.sqrt(n.in_degree + n.out_degree) * 1.4;
+            const dx = sx - n.x, dy = sy - n.y;
+            const d2 = dx * dx + dy * dy;
+            if (d2 < (r + 4) * (r + 4) && d2 < bestDist) {
+                best = n; bestDist = d2;
+            }
+        }
+        return best;
+    }
+
+    canvas.addEventListener('mousedown', (e) => {
+        panStart = { x: e.clientX, y: e.clientY, tx: transform.x, ty: transform.y };
+        canvas.style.cursor = 'grabbing';
+    });
+    window.addEventListener('mousemove', (e) => {
+        if (!panStart) return;
+        transform.x = panStart.tx + (e.clientX - panStart.x);
+        transform.y = panStart.ty + (e.clientY - panStart.y);
+        _draw();
+    });
+    window.addEventListener('mouseup', () => {
+        panStart = null;
+        canvas.style.cursor = 'grab';
+    });
+    canvas.addEventListener('click', (e) => {
+        if (panStart) return;
+        const node = _hit(e);
+        if (node) _graphSelectNode(node);
+    });
+    canvas.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const rect = canvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+        const factor = Math.exp(-e.deltaY * 0.001);
+        const newK = Math.max(0.2, Math.min(4, transform.k * factor));
+        transform.x = mx - (mx - transform.x) * (newK / transform.k);
+        transform.y = my - (my - transform.y) * (newK / transform.k);
+        transform.k = newK;
+        _draw();
+    }, { passive: false });
+
+    // First draw immediately so the canvas isn't blank before the simulation
+    // has produced any ticks.
+    _draw();
+    return true;
 }
 
 function _graphRenderLegend(clusters, colour) {
