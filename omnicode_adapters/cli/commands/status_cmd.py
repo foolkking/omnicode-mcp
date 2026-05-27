@@ -21,7 +21,7 @@ def run():
             components = health.get("components", {})
             wd = health.get("working_directory", "?")
 
-            print(f"✅ OmniCode-MCP is running")
+            print("✅ OmniCode-MCP is running")
             print(f"   Working directory: {wd}")
             print()
 

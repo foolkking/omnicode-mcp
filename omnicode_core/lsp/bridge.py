@@ -32,8 +32,7 @@ import json
 import logging
 import os
 import shutil
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -264,7 +263,7 @@ class LSPBridge:
         """Search for symbols across the workspace."""
         # Try each running server
         all_symbols = []
-        for lang, conn in self._servers.items():
+        for _lang, conn in self._servers.items():
             if conn.is_alive():
                 try:
                     result = await conn.request("workspace/symbol", {"query": query})
@@ -331,7 +330,7 @@ class LSPBridge:
 
     async def shutdown(self):
         """Shutdown all running language servers."""
-        for lang, conn in list(self._servers.items()):
+        for _lang, conn in list(self._servers.items()):
             try:
                 await conn.shutdown()
             except Exception:
@@ -518,9 +517,9 @@ class _LSPConnection:
 
         try:
             return await asyncio.wait_for(future, timeout=30.0)
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as exc:
             self._pending.pop(msg_id, None)
-            raise TimeoutError(f"LSP request {method} timed out")
+            raise TimeoutError(f"LSP request {method} timed out") from exc
 
     async def notify(self, method: str, params: Dict):
         """Send a notification (no response expected)."""

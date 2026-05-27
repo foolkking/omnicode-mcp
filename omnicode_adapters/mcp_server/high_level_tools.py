@@ -181,7 +181,7 @@ def register_high_level_tools(mcp, make_request):
                     doc = s.get("doc", "")
                     parent = s.get("parent", "")
 
-                    prefix = f"  └─ " if parent else ""
+                    prefix = "  └─ " if parent else ""
                     lines.append(f"{prefix}{kind} {name}  [L{sl}-{el}]")
                     if sig and mode == "outline":
                         lines.append(f"     {sig[:150]}")

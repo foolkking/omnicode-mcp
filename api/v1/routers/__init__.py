@@ -19,6 +19,7 @@ from api.v1.routers.project import router as project_router
 from api.v1.routers.search import router as search_router
 from api.v1.routers.static_files import router as static_files_router
 from api.v1.routers.working_directory import router as working_directory_router
+from api.v1.routers.workspaces import router as workspaces_router
 
 # List of all routers to register
 all_routers = [
@@ -38,6 +39,7 @@ all_routers = [
     fs_browser_router,
     patch_router,
     lsp_router,
+    workspaces_router,
 ]
 
 __all__ = [
@@ -55,4 +57,5 @@ __all__ = [
     "model_router",
     "guard_router",
     "fs_browser_router",
+    "workspaces_router",
 ]

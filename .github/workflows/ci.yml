@@ -40,7 +40,7 @@ jobs:
 
       - name: Lint with ruff
         run: |
-          ruff check omnicode api core tests --output-format=github
+          ruff check omnicode omnicode_core omnicode_adapters api core tests --output-format=github
 
       - name: Run tests
         env:

@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     CORS_METHODS: List[str] = Field(default=["*"])
     CORS_HEADERS: List[str] = Field(default=["*"])
 
+    # Optional API key authentication (P1).
+    # If set, every request (except `/health`, `/docs`, `/redoc`,
+    # `/openapi.json`, and OPTIONS preflights) must carry it as either
+    # the `X-API-Key` header or a `Bearer <token>` `Authorization` header.
+    # Empty string means auth is disabled (default).
+    OMNICODE_API_KEY: str = Field(default="")
+
     # LLM Provider Configuration
     DEFAULT_LLM_PROVIDER: str = Field(default="gemini")
     DEFAULT_LLM_MODEL: str = Field(default="gemini-2.5-flash")

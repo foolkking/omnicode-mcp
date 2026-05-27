@@ -1,6 +1,5 @@
 """omnicode init — initialize .data/ directory for the current project."""
 
-import os
 from pathlib import Path
 
 

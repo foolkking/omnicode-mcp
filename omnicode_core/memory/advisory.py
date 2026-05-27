@@ -17,7 +17,7 @@ Output: a concise advisory (300-800 tokens) injected into the edit context.
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 

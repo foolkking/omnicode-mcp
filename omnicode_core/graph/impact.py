@@ -15,7 +15,7 @@ the /patch/validate endpoint to give AI editors pre-edit context.
 
 import logging
 import os
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -253,8 +253,8 @@ class ImpactAnalyzer:
     ) -> Optional[Dict[str, Any]]:
         """Build call graph using existing AST infrastructure."""
         try:
-            from omnicode.ast_engine.parser import UnifiedASTParser
             from omnicode.ast_engine.graph import CallGraphBuilder
+            from omnicode.ast_engine.parser import UnifiedASTParser
 
             parser = UnifiedASTParser()
             builder = CallGraphBuilder(parser)

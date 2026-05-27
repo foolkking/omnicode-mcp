@@ -21,7 +21,6 @@ import hashlib
 import json
 import logging
 import os
-import shutil
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -389,8 +388,8 @@ class PatchManager:
 
     @staticmethod
     def _count_changes(diff: str) -> tuple:
-        added = sum(1 for l in diff.splitlines() if l.startswith("+") and not l.startswith("+++"))
-        removed = sum(1 for l in diff.splitlines() if l.startswith("-") and not l.startswith("---"))
+        added = sum(1 for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++"))
+        removed = sum(1 for line in diff.splitlines() if line.startswith("-") and not line.startswith("---"))
         return added, removed
 
     async def _run_checks(self, file_path: str, ext: str) -> List[Dict[str, Any]]:

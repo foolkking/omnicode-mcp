@@ -54,6 +54,10 @@ def create_app() -> FastAPI:
         allow_headers=settings.CORS_HEADERS,
     )
 
+    # Optional API key auth (no-op when OMNICODE_API_KEY is empty)
+    from core.auth_middleware import install as install_auth
+    install_auth(app, settings.OMNICODE_API_KEY)
+
     # Register routers — skip static file / web console routers in headless mode
     for router in all_routers:
         # In headless mode, skip the static file router (serves templates/*)
