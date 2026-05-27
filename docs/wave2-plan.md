@@ -33,23 +33,34 @@ Pydantic default. Document this clearly.
 
 ---
 
-## W2-2 · Local-Agent file-sync (hybrid mode glue)
+## W2-2 · Local-Agent file-sync (hybrid mode glue) ✅ DONE
+
+> Shipped in commit `<wave2-w22>`. See `omnicode_adapters/agent/` and
+> `api/v1/routers/agent.py`.
 
 **Why.** The hybrid mode currently runs the *same* server in either
 local or cloud posture; what's missing is the actual *bridge* between a
 remote index and a local apply. The architecture prompt called this
 "omnicode-agent watch ." (Section 9-B).
 
-**Scope.**
-* New CLI subcommand `omnicode agent` (local-side).
-* Watches the working directory with `watchfiles` (already in deps).
-* Pushes changed files to a remote OmniCode server's
-  `/index/upsert-file` endpoint (does not exist yet).
-* Pulls patch suggestions from the remote `/patch/preview` endpoint
-  and applies them locally via the existing PatchManager.
+**What landed.**
+* Server-side: ``api/v1/routers/agent.py`` adds
+  ``POST /index/upsert-file``, ``POST /index/upsert-batch``,
+  ``DELETE /index/file``, ``GET /index/sync-status``,
+  ``GET /index/stats``. All sandbox-checked.
+* Client-side: ``omnicode_adapters/agent/`` ships ``AgentClient`` (pure
+  HTTP, retry, exclude/binary filter) and ``Watcher`` (debounced
+  watchfiles loop, polling fallback when watchfiles isn't installed).
+* CLI: ``omnicode agent --remote URL --token TOKEN --workspace .``.
+* TOML: ``[agent]`` section maps to ``OMNICODE_REMOTE``,
+  ``OMNICODE_AGENT_TOKEN``, ``OMNICODE_AGENT_DEBOUNCE_MS``.
+* Hybrid preset reworked: cloud index but writes-via-agent allowed
+  (``OMNICODE_READ_ONLY=false``), patch-apply still blocked on the
+  wire so the local editor stays the source of truth for actual writes.
 
-**Out of scope for W2.** Conflict resolution between concurrent
-editors, large-file streaming, end-to-end encryption.
+**Out of scope (explicit).** Conflict resolution between concurrent
+editors; large-file streaming; end-to-end encryption; pull-mode patch
+suggestions.
 
 ---
 

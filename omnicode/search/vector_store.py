@@ -138,14 +138,19 @@ class VectorStore:
         self.conn.commit()
         self._persist_index()
 
-    async def delete_by_file(self, file_path: str):
-        """Properly delete chunks associated with a file from both SQLite and FAISS"""
+    async def delete_by_file(self, file_path: str) -> int:
+        """Delete every chunk associated with ``file_path``.
+
+        Returns the number of chunks removed, so callers (most usefully
+        the local-agent ``/index/delete-file`` endpoint) can detect a
+        no-op and avoid persisting an empty FAISS write.
+        """
         cursor = self.conn.cursor()
         cursor.execute('SELECT faiss_id FROM chunks WHERE file_path = ?', (file_path,))
         rows = cursor.fetchall()
 
         if not rows:
-            return
+            return 0
 
         ids_to_remove = [row[0] for row in rows]
 
@@ -157,6 +162,7 @@ class VectorStore:
         cursor.execute('DELETE FROM chunks WHERE file_path = ?', (file_path,))
         self.conn.commit()
         self._persist_index()
+        return len(ids_to_remove)
 
     async def search(self, query_embedding: np.ndarray, top_k: int = 10, metadata_filter: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         """Search with post-filtering"""

@@ -10,6 +10,7 @@ Usage:
     omnicode serve --headless  Start HTTP API only (no Web UI)
     omnicode serve --console   Start HTTP API + Web Console (explicit)
     omnicode dev               Start in development mode (console + reload)
+    omnicode agent             Local-side file-sync agent (hybrid mode)
     omnicode doctor            Check environment (Python, LSP, models, ports)
 """
 
@@ -61,6 +62,45 @@ def main():
     dev_parser.add_argument("--host", default="127.0.0.1")
     dev_parser.add_argument("--port", type=int, default=6789)
 
+    # --- agent (Wave 2, W2-2) ---
+    agent_parser = subparsers.add_parser(
+        "agent", help="Local file-sync agent — pushes changes to a remote OmniCode"
+    )
+    agent_parser.add_argument(
+        "--remote",
+        default=None,
+        help="Remote OmniCode URL (e.g. https://omnicode.example.com). "
+        "Defaults to OMNICODE_REMOTE env var.",
+    )
+    agent_parser.add_argument(
+        "--token",
+        default=None,
+        help="API key / RBAC token for the remote. Defaults to OMNICODE_API_KEY "
+        "or OMNICODE_AGENT_TOKEN env vars.",
+    )
+    agent_parser.add_argument(
+        "--workspace",
+        default=".",
+        help="Local working tree to watch (default: cwd).",
+    )
+    agent_parser.add_argument(
+        "--no-initial-sync",
+        action="store_true",
+        help="Skip the one-shot startup walk; only react to live changes.",
+    )
+    agent_parser.add_argument(
+        "--debounce-ms",
+        type=int,
+        default=800,
+        help="Debounce window for filesystem events (default: 800 ms).",
+    )
+    agent_parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        help="Extra path prefix to skip (repeatable).",
+    )
+
     # --- doctor ---
     subparsers.add_parser("doctor", help="Check environment health")
 
@@ -95,6 +135,16 @@ def main():
     elif args.command == "dev":
         from omnicode_adapters.cli.commands.serve_cmd import run
         run(headless=False, host=args.host, port=args.port, reload=True)
+    elif args.command == "agent":
+        from omnicode_adapters.cli.commands.agent_cmd import run as run_agent_cmd
+        run_agent_cmd(
+            remote=args.remote,
+            token=args.token,
+            workspace=args.workspace,
+            initial_sync=not args.no_initial_sync,
+            debounce_ms=args.debounce_ms,
+            exclude=tuple(args.exclude or ()),
+        )
     elif args.command == "doctor":
         from omnicode_adapters.cli.commands.doctor_cmd import run
         run()

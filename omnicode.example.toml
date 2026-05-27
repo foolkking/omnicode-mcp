@@ -54,6 +54,14 @@ allow_shell = false       # reserved for the future ``execute_tool`` gate
 #   * all     register everything (default).
 mcp_tools = "all"
 
+# -------- Local-agent file-sync (Wave 2 W2-2 — hybrid mode) ----------
+# Only used by ``omnicode agent``, not by the server itself. The agent
+# watches a local working tree and pushes changed files to ``remote``.
+[agent]
+# remote = "https://omnicode.example.com"
+# token = "sk-replace-me"        # Bearer / X-API-Key
+debounce_ms = 800                # coalesce bursts of file events
+
 # Verbatim env-var passthrough for anything we don't model above.
 [env]
 TRANSFORMERS_OFFLINE = "1"

@@ -192,38 +192,53 @@ class SemanticSearchEngine:
             logger.warning(f"Could not read {file_path}: {e}")
             return
 
+        await self.upsert_content(file_path, content)
+
+    async def upsert_content(self, file_path: str, content: str) -> int:
+        """Index ``content`` for ``file_path`` without reading from disk.
+
+        Used by the local-agent hybrid mode (Wave 2, W2-2): the agent
+        watches a real working tree on the user's machine and pushes
+        file bodies up to a remote OmniCode instance that has no
+        access to the original tree. Returns the number of chunks
+        produced so the agent can log progress / detect no-ops.
+        """
         # 1. Delete old chunks for this file
         await self.vector_store.delete_by_file(file_path)
 
-        # 2. Extract AST Chunks
+        # 2. Extract AST chunks
         language = os.path.splitext(file_path)[1].lstrip(".") or "python"
         chunks = self.chunker.chunk_file(content, file_path, language)
 
         # 3. Generate embeddings and add to store
         for chunk in chunks:
-            # Generate embedding
             emb = self.embedding_model.encode(chunk.content)
-
-            # Map chunk metadata
             metadata = {
                 "start_line": chunk.start_line,
                 "end_line": chunk.end_line,
                 "symbol_name": chunk.symbol_name or "",
                 "signature": chunk.signature or "",
-                "docstring": chunk.docstring or ""
+                "docstring": chunk.docstring or "",
             }
-
             await self.vector_store.add(
                 chunk_id=chunk.chunk_id,
                 embedding=emb,
                 file_path=file_path,
                 chunk_type=chunk.chunk_type,
                 content=chunk.content,
-                metadata=metadata
+                metadata=metadata,
             )
 
-        # Recalculate stats
+        # Refresh stats lazily — caller can request /index/stats afterwards.
         await self.initialize()
+        return len(chunks)
+
+    async def delete_file_index(self, file_path: str) -> bool:
+        """Remove ``file_path`` from the vector store. Returns whether
+        anything was actually deleted."""
+        existed = await self.vector_store.delete_by_file(file_path)
+        await self.initialize()
+        return bool(existed)
 
     async def index_codebase(self) -> None:
         """Scan working directory, parse all source files, and index them.

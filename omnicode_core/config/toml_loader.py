@@ -86,6 +86,10 @@ _SECTION_KEY_MAP: Dict[tuple[str, str], str] = {
     ("security", "allow_shell"): "OMNICODE_ALLOW_SHELL",
     ("security", "api_key"): "OMNICODE_API_KEY",
     ("security", "mcp_tools"): "OMNICODE_MCP_TOOLS",
+    # Agent (W2-2)
+    ("agent", "remote"): "OMNICODE_REMOTE",
+    ("agent", "token"): "OMNICODE_AGENT_TOKEN",
+    ("agent", "debounce_ms"): "OMNICODE_AGENT_DEBOUNCE_MS",
 }
 
 

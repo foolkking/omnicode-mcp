@@ -20,10 +20,12 @@ _MODE_PRESETS: dict[str, dict[str, str]] = {
         "OMNICODE_ALLOW_APPLY_PATCH": "false",
     },
     "hybrid": {
-        # Cloud index + local apply: callers run apply on a *local*
-        # process, so this remote one stays read-only by default.
+        # Cloud index + local apply. The remote process accepts writes
+        # ONLY through the agent endpoints (the local agent is the
+        # source of truth for the codebase) and blocks /patch/apply on
+        # the wire — the editor applies patches locally instead.
         "OMNICODE_MODE": "hybrid",
-        "OMNICODE_READ_ONLY": "true",
+        "OMNICODE_READ_ONLY": "false",
         "OMNICODE_ALLOW_APPLY_PATCH": "false",
     },
 }
