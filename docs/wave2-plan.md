@@ -80,19 +80,21 @@ suggestions.
 
 ---
 
-## W2-4 · Master-key & token rotation
+## W2-4 · Master-key & token rotation ✅ DONE
 
-**Why.** Provider keys are encrypted at rest with Fernet (good), but the
-master key is read from `OMNICODE_MASTER_KEY` once at startup. There is
-no rotation path. Cloud deployments need:
-* A `rotate-master-key` CLI command that re-encrypts every row.
-* Token expiry on RBAC tokens (`expires_at` column added to
-  `tokens`).
-* A revoke-by-username operation (currently you must list tokens and
-  revoke each by hash).
+> Shipped in commit `6dcb81c`. See `omnicode_core/auth/migrations.py`,
+> `omnicode_core/auth/rotation.py`, `omnicode_adapters/cli/commands/rotate_cmd.py`.
 
-**Schema migration.** First real `users.db` migration; a chance to put a
-basic migration helper into `omnicode_core/auth/migrations.py`.
+* SQLite migration runner uses `PRAGMA user_version`. First migration
+  adds `tokens.expires_at`.
+* `issue_token(..., expires_in_days=N)` writes the column; auth
+  auto-revokes on first use after expiry.
+* `revoke_user_tokens(username)` + `DELETE /admin/users/{u}/tokens`
+  REST endpoint for the "departing employee" scenario.
+* `omnicode rotate-master-key [--db ...] [--key ...] [--new-key BASE64]`
+  re-encrypts every provider row under a fresh Fernet key, with a
+  timestamped backup of the old key file and rollback on any failure.
+* 15 new unit tests (8 expiry + 7 rotation).
 
 ---
 
@@ -112,31 +114,36 @@ call any tool.
 
 ---
 
-## W2-6 · Web Console: edit-session + impact viewer
+## W2-6 · Web Console: edit-session + impact viewer ✅ DONE
 
-**Why.** The composer surfaces impact + edit-sessions, but the
-console still only shows the existing graph viewer + provider page. We
-need:
-* Edit-Session list page (drives `GET /patch/sessions`).
-* Impact viewer (drives `GET /graph/impact`, `/graph/risk`).
-* Memory advisory drawer in the search results page.
+> Shipped in commit `9cb2de9`. See `templates/components/sections/edit-sessions.html`,
+> `templates/components/sections/impact-viewer.html`, and the new
+> sidebar entries.
 
-**Why W2.** Wave 1 already exposed all four endpoints; the front-end
-work is independent and can ship separately.
+* **Edit Sessions** — list (left) + detail (right) with diff render,
+  checks_before/after panels, and one-click rollback.
+* **Impact Viewer** — type a symbol, parallel-fire `/graph/impact`,
+  `/graph/risk`, `/graph/related-tests`. Returns blast radius, callers,
+  callees, files, suggested tests + commands, and a low/medium/high
+  risk badge.
+* **Memory Advisory drawer** in search results — every result row now
+  shows `why_matched` chips and a "Memory advisory" button that
+  inline-loads `/memory/advisory` for that file/symbol.
+* `apiRoutes.patch.*`, `apiRoutes.graph.*`, `apiRoutes.advisory.*`
+  added so future panels can call the same endpoints without
+  reinventing.
 
 ---
 
-## W2-7 · LSP fleet expansion
+## W2-7 · LSP fleet expansion ✅ DONE
 
-**Why.** Wave 1 added rename across the existing 5-server fleet
-(pyright / tsserver / gopls / rust-analyzer / clangd). Long tail:
-* Ruby (solargraph)
-* PHP (intelephense)
-* Java (jdtls — heavy, maybe via Eclipse JDT LS Docker image)
-* Kotlin (kotlin-language-server)
-* C# (omnisharp / roslyn-language-server)
+> Shipped in commit `ec5c0d2`. See `omnicode_core/lsp/bridge.py`
+> ``LSP_SERVERS`` table.
 
-Each addition is an entry in `LSP_SERVERS` plus a smoke test.
+Added `ruby` (solargraph), `php` (intelephense), `java` (jdtls),
+`kotlin` (kotlin-language-server), `csharp` (omnisharp). Doctor
+checks all 10 servers now. 19 unit tests + 10 binary-resolution
+probes that auto-skip when the server isn't installed locally.
 
 ---
 
@@ -154,17 +161,18 @@ ecosystem's job.**
 
 ---
 
-## W2-9 · Reranker (cross-encoder) for hybrid search
+## W2-9 · Reranker (cross-encoder) for hybrid search ✅ DONE
 
-**Why.** Wave 1's search now reports *why* a result matched; Wave 2's
-reranker should make the order itself better. Plan:
-* Optional cross-encoder model (`bge-reranker-v2-m3`) loaded only when
-  `OMNICODE_RERANKER=true`.
-* Scores top-50 candidates and picks the top-K.
-* Adds another `why_matched` tag (`reranked`) for transparency.
+> Shipped in commit `6d76ca7`. See `omnicode_core/search/reranker.py`.
 
-Out of scope: training a custom reranker on the project's own
-edit-session data (interesting but premature).
+Three-tier abstraction: `Reranker` (base), `NoOpReranker` (default
+zero-cost passthrough), `BGEReranker` (lazy-loaded
+`BAAI/bge-reranker-v2-m3` cross-encoder). Toggle with
+``OMNICODE_RERANKER=true``; failure to load the model falls back to
+NoOp without exceptions. Promoted items get `"reranked"` appended to
+their `why_matched` tag list and the bi-encoder score preserved on
+`bi_encoder_score`. 10 unit tests covering enable/disable, predict
+failure, empty input, and identity ordering.
 
 ---
 
@@ -181,17 +189,20 @@ shard cache keyed by workspace id.
 
 ## Priority ordering
 
-1. **W2-3** HTTPS reverse-proxy & systemd — biggest blocker for any
-   real cloud deployment; all code, docs, and presets.
-2. **W2-5** MCP-over-HTTP auth — security hole if W2-3 ships first.
-3. **W2-1** TOML config — quality-of-life.
-4. **W2-2** Local agent — needed once two people actually try hybrid.
-5. **W2-4** Rotation — important once real users exist.
-6. **W2-9** Reranker — biggest quality jump for search.
-7. **W2-6** Web Console pages.
-8. **W2-7** LSP fleet expansion (incrementally as users ask).
-9. **W2-10** FAISS sharding (only after W2-1 + W2-2 land).
-10. **W2-8** VS Code extension (last, polish).
+Done so far (in chronological order):
+1. **W2-3** HTTPS reverse-proxy & systemd ✅
+2. **W2-5** MCP-over-HTTP auth ✅
+3. **W2-1** TOML config ✅
+4. **W2-2** Local agent ✅
+5. **W2-7** LSP fleet expansion ✅
+6. **W2-9** Reranker ✅
+7. **W2-4** Master-key + token rotation ✅
+8. **W2-6** Web Console new pages ✅
+
+Still parked:
+9. **W2-10** FAISS sharding (per-workspace shards) — needed before
+   real multi-tenant cloud.
+10. **W2-8** VS Code extension — polish, do last.
 
 ## Out of scope for the foreseeable future
 

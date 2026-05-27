@@ -418,11 +418,11 @@ adapters call core, never the reverse.
 | Wave 1 audit | ✅ done | sandbox, read-only, why_matched, REST exposure for impact + advisory, LSP rename, modes flag, MCP slim |
 | Wave 2 W2-1 / W2-3 / W2-5 | ✅ done | TOML config, HTTPS+systemd, MCP auth |
 | Wave 2 W2-2 | ✅ done | local agent file-sync |
-| Wave 2 W2-4 | ⏳ planned | master-key & token rotation |
-| Wave 2 W2-6 | ⏳ planned | Web Console edit-session + impact pages |
-| Wave 2 W2-7 | ⏳ planned | LSP fleet expansion (ruby / php / java / kotlin / c#) |
+| Wave 2 W2-4 | ✅ done | master-key rotation + token expiry + revoke-by-user |
+| Wave 2 W2-6 | ✅ done | Web Console: edit-sessions / impact viewer / advisory drawer |
+| Wave 2 W2-7 | ✅ done | LSP fleet expansion (ruby / php / java / kotlin / c#) |
+| Wave 2 W2-9 | ✅ done | cross-encoder reranker (opt-in) |
 | Wave 2 W2-8 | ⏳ planned | thin VS Code extension |
-| Wave 2 W2-9 | ⏳ planned | cross-encoder reranker |
 | Wave 2 W2-10 | ⏳ planned | per-workspace FAISS sharding |
 | Out of scope | ❌ never | full AI editor, self-built Agent framework, SaaS billing |
 
