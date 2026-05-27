@@ -42,3 +42,14 @@ node_modules/
 package-lock.json
 yarn.lock
 .data
+
+# Scratch / smoke / commit-message scratchpads (Kiro session conventions)
+_commit_msg.txt
+_smoke*.py
+_smoke*.txt
+_repro*.py
+_repro*.txt
+_audit*.py
+_audit*.txt
+_pytest_out.txt
+_fail_out.txt
