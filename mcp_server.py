@@ -16,7 +16,12 @@ from prompts.general_dev_prompt import GENERAL_DEV_PROMPT
 logger = logging.getLogger(__name__)
 
 # FastAPI server configuration
-FASTAPI_BASE_URL = "http://localhost:6789"
+# Use 127.0.0.1 explicitly instead of "localhost" — on some Windows systems
+# (notably with system-level HTTPS proxies, VPN clients, or Docker Desktop's
+# vEthernet adapter) "localhost" gets intercepted and returns a spurious
+# 502 with an empty body, even when the FastAPI server is healthy on the
+# IPv4 loopback. ``127.0.0.1`` bypasses the proxy/DNS lookup entirely.
+FASTAPI_BASE_URL = "http://127.0.0.1:6789"
 HTTP_TIMEOUT = 30.0
 
 # Initialize MCP server
