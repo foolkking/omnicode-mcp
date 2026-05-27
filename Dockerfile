@@ -7,15 +7,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc g++ git curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python deps
-COPY pyproject.toml .
-RUN pip install --no-cache-dir -e ".[dev]" 2>/dev/null || pip install --no-cache-dir -e .
-
-# Pre-download the embedding model so startup is instant
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
-
-# Copy source
+# Copy source first — hatchling needs the package directories
+# (omnicode, omnicode_core, omnicode_adapters, omnicode_llm) to be present
+# before it can build an editable wheel from pyproject.toml.
 COPY . .
+
+# Install Python deps in editable mode with dev extras
+RUN pip install --no-cache-dir -e ".[dev]"
+
+# Pre-download the embedding model so first startup is instant.
+# Cached as its own layer so re-running with code-only changes is fast.
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
 
 # Environment
 ENV TRANSFORMERS_OFFLINE=1
