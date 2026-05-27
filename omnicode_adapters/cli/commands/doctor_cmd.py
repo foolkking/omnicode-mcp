@@ -51,6 +51,11 @@ def run():
         ("gopls", "gopls (Go)"),
         ("rust-analyzer", "rust-analyzer (Rust)"),
         ("clangd", "clangd (C/C++)"),
+        ("solargraph", "solargraph (Ruby)"),
+        ("intelephense", "intelephense (PHP)"),
+        ("jdtls", "jdtls (Java)"),
+        ("kotlin-language-server", "kotlin-language-server (Kotlin)"),
+        ("omnisharp", "OmniSharp (C#)"),
     ]
     for cmd, name in lsp_servers:
         found = shutil.which(cmd)

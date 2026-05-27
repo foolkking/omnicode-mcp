@@ -64,6 +64,43 @@ LSP_SERVERS: Dict[str, Dict[str, Any]] = {
         "install_hint": "apt install clangd / brew install llvm",
         "extensions": [".c", ".cpp", ".cc", ".cxx", ".h", ".hpp"],
     },
+    # ----- W2-7 fleet expansion ------------------------------------------------
+    # Each new language follows the same lazy-spawn rules as the existing 5:
+    # the server is only started on the first request that touches its
+    # extension list. Heavy JVM-based servers (jdtls, kotlin-language-server)
+    # don't add startup cost when the project doesn't include those files.
+    "ruby": {
+        "command": ["solargraph", "stdio"],
+        "install_hint": "gem install solargraph",
+        "extensions": [".rb"],
+    },
+    "php": {
+        "command": ["intelephense", "--stdio"],
+        "install_hint": "npm i -g intelephense",
+        "extensions": [".php"],
+    },
+    "java": {
+        # Eclipse JDT LS — distributed as a `jdtls` wrapper script on
+        # PATH (homebrew, apt) or via the official Eclipse downloads.
+        "command": ["jdtls"],
+        "install_hint": "brew install jdtls / npm i -g jdtls",
+        "extensions": [".java"],
+    },
+    "kotlin": {
+        "command": ["kotlin-language-server"],
+        "install_hint": "brew install kotlin-language-server / "
+        "https://github.com/fwcd/kotlin-language-server/releases",
+        "extensions": [".kt", ".kts"],
+    },
+    "csharp": {
+        # OmniSharp ships a `OmniSharp` script when installed via dotnet
+        # tool; the new official Roslyn LS is `Microsoft.CodeAnalysis.LanguageServer`.
+        # We try OmniSharp first because it has a well-known stdio mode.
+        "command": ["omnisharp", "-lsp"],
+        "install_hint": "dotnet tool install -g omnisharp / "
+        "or use the Roslyn LS via dotnet workload",
+        "extensions": [".cs"],
+    },
 }
 
 
