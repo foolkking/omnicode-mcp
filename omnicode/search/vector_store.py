@@ -175,7 +175,7 @@ class VectorStore:
         results = []
         cursor = self.conn.cursor()
 
-        for dist, faiss_id in zip(distances[0], indices[0]):
+        for dist, faiss_id in zip(distances[0], indices[0], strict=False):
             if faiss_id == -1:
                 continue
 

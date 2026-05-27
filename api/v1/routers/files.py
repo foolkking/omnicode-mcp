@@ -916,9 +916,9 @@ async def _read_mode_dispatch(file_path: str, mode: str, with_line_numbers: bool
     """
     import os
 
+    from core import get_search_engine
     from core.config import get_settings
-    from core import get_search_engine, get_ast_parser
-    from utils import create_success_response, create_error_response, validate_file_path
+    from utils import create_error_response, create_success_response, validate_file_path
 
     settings = get_settings()
 

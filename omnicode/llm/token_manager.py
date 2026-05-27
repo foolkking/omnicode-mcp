@@ -690,7 +690,7 @@ class TokenManager:
         reserved = self.count_tokens(query)
         kept, _report = self.pruner.prune(ctx_items, reserved_tokens=reserved)
         out: List[Dict[str, str]] = []
-        for item, src in zip(kept, items[: len(kept)]):
+        for item, src in zip(kept, items[: len(kept)], strict=False):
             new = dict(src)
             new["content"] = item.content
             out.append(new)

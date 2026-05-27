@@ -81,6 +81,7 @@ async def index_codebase(
         if force:
             # Clear the file tracker so everything looks "new"
             import os
+
             from omnicode_core.index.file_tracker import FileTracker
             tracker_db = os.path.join(search_engine.db_dir, "file_tracker.db")
             FileTracker(tracker_db).clear()

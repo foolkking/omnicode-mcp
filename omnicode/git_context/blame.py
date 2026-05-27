@@ -52,12 +52,6 @@ class GitBlameAnalyzer:
             # Format: commit author date content
             blame_out = self.repo.git.blame("-L", f"{start_line},{end_line}", "--line-porcelain", file_path)
 
-            current_commit = None
-            current_author = None
-            current_date = None
-            current_msg = None
-            line_idx = start_line
-
             lines = blame_out.splitlines()
             for line in lines:
                 if len(line) == 40 and " " not in line: # Commit hash

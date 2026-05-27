@@ -72,6 +72,11 @@ select = [
 ]
 ignore = [
     "E501",  # line too long, handled by black
+    "C901",  # function too complex — legacy code, full refactor out of scope
+    "B008",  # Query()/Depends() in defaults are the canonical FastAPI pattern
+    "B023",  # late-binding closures inside loops; existing usages call immediately
+    "E722",  # bare except — pre-existing defensive try/except blocks
+    "E701",  # multiple statements on one line — used for short guard returns
 ]
 
 [tool.mypy]

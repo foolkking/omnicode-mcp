@@ -6,7 +6,6 @@ via the LSP bridge.  If the required server is not installed, endpoints
 return a helpful error with install instructions.
 """
 
-from typing import Optional
 
 from fastapi import APIRouter, Query
 

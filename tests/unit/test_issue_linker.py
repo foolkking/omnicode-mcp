@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from omnicode.git_context.issue_linker import IssueLinker, IssueReference
 
 

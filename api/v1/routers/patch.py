@@ -5,7 +5,6 @@ These endpoints provide the safe-edit layer that does NOT require an LLM.
 External AI editors generate patches; OmniCode validates and applies them.
 """
 
-from typing import Optional
 
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field

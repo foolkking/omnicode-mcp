@@ -138,7 +138,7 @@ class TestEncryptedRegistry:
     def test_legacy_plain_text_migrated_on_open(self, tmp_path: Path):
         # First, create a registry but inject a plain-text api_key directly
         # via raw SQL — simulates a database from before STAGE 2.13.
-        registry = ProviderRegistry(tmp_path / "providers.db")
+        ProviderRegistry(tmp_path / "providers.db")  # initialise schema
         with sqlite3.connect(str(tmp_path / "providers.db")) as conn:
             conn.execute(
                 "INSERT INTO providers (name, model, api_key) VALUES (?, ?, ?)",

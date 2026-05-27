@@ -33,7 +33,7 @@ class TestProviderRegistry:
         assert all_providers[0].api_key == "sk-test-1234567890"
 
     def test_redacted_dict(self, tmp_db_path):
-        registry = ProviderRegistry(tmp_db_path)
+        ProviderRegistry(tmp_db_path)  # ensure registry init does not corrupt config
         cfg = ProviderConfig(name="x", model="m", api_key="sk-abcdefghij1234")
         d = cfg.to_dict(redact_secret=True)
         assert d["api_key_set"] is True

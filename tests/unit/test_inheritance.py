@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
 
 from omnicode.ast_engine.inheritance import (
-    InheritanceGraph,
     InheritanceGraphBuilder,
 )
 from omnicode.ast_engine.parser import UnifiedASTParser
@@ -170,7 +168,7 @@ class TestIncrementalInheritance:
         f1 = tmp_path / "x.py"
         f1.write_text("class A: pass\nclass B(A): pass\n")
         graph = builder.build_for_paths([str(tmp_path)])
-        before = graph.stats()["total_edges"]
+        assert graph.stats()["total_edges"] >= 1
         graph.remove_file(str(f1))
         assert graph.stats()["total_edges"] == 0
         # Adding a different file again should work

@@ -64,8 +64,11 @@ async def initialize_services() -> None:
 
     try:
         # Initialize LLM Router (Model Gateway)
-        from omnicode.config.settings import resolve_provider_db_path, _user_data_dir
-        from omnicode.llm.provider_registry import get_provider_registry, reset_provider_registry
+        from omnicode.config.settings import _user_data_dir, resolve_provider_db_path
+        from omnicode.llm.provider_registry import (
+            get_provider_registry,
+            reset_provider_registry,
+        )
         from omnicode.llm.provider_selection import (
             get_provider_selection_store,
             reset_provider_selection_store,
@@ -81,8 +84,8 @@ async def initialize_services() -> None:
         # their existing API keys are immediately available across all
         # projects.  Subsequent edits go through the user-level DB.
         try:
-            from pathlib import Path as _P
             import shutil as _shutil
+            from pathlib import Path as _P
             user_db = _user_data_dir() / "providers.db"
             project_db = _P(working_dir) / ".data" / "providers.db"
             if project_db.exists() and not user_db.exists():
@@ -143,7 +146,7 @@ async def initialize_services() -> None:
         try:
             logger.info(f"🔍 Initializing GitManager with WORKING_DIR: {working_dir}")
             git_manager = GitManager(working_dir)
-            result = await git_manager.initialize_codebase_repo()
+            await git_manager.initialize_codebase_repo()
             set_git_manager(git_manager)
             logger.info("✅ Git manager initialized")
         except Exception as e:
