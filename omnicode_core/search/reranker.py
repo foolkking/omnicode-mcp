@@ -124,7 +124,7 @@ class BGEReranker(Reranker):
             return list(candidates)
 
         # Annotate why_matched + relevance_score with the new ordering.
-        scored = list(zip(scores, kept))
+        scored = list(zip(scores, kept, strict=False))
         scored.sort(key=lambda x: float(x[0]), reverse=True)
 
         out: list = []

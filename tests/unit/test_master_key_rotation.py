@@ -11,6 +11,9 @@ import pytest
 # the codebase already pins it, but tests should be portable).
 cryptography = pytest.importorskip("cryptography")
 
+# ruff: noqa: E402 — these imports must follow the importorskip guard
+# above so the whole file is cleanly skipped when cryptography is
+# missing.
 from omnicode.llm.provider_registry import ProviderConfig, ProviderRegistry
 from omnicode.llm.secret_box import ENCRYPTED_PREFIX, SecretBox
 from omnicode_core.auth.rotation import rotate_master_key

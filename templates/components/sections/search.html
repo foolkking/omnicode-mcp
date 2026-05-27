@@ -338,6 +338,76 @@ function displaySearchResults(results, searchType) {
         return;
     }
     
+    // Helper for the new Wave 2 W2-6 surfacing — render `why_matched`
+    // tags and a "Memory advisory" link for any result.
+    function _renderWhyMatched(tags) {
+        if (!Array.isArray(tags) || tags.length === 0) return '';
+        const map = {
+            'symbol:exact': 'bg-emerald-100 text-emerald-800',
+            'symbol:prefix': 'bg-emerald-50 text-emerald-700',
+            'symbol:contains': 'bg-emerald-50 text-emerald-700',
+            'symbol:fuzzy': 'bg-emerald-50 text-emerald-700',
+            'semantic': 'bg-blue-50 text-blue-700',
+            'text': 'bg-gray-100 text-gray-700',
+            'reranked': 'bg-purple-100 text-purple-800',
+        };
+        return tags.map((t) => {
+            const cls = map[t] || 'bg-gray-100 text-gray-700';
+            return `<span class="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium mr-1 ${cls}">${t}</span>`;
+        }).join('');
+    }
+
+    function _advisoryButton(result, idx) {
+        const file = result.file_path || '';
+        const symbol = result.symbol_name || '';
+        return `<button onclick="searchOpenAdvisory(${idx})"
+                       class="text-xs bg-pink-500 hover:bg-pink-600 text-white px-3 py-1 rounded">
+            <i class="fas fa-brain mr-1"></i> Memory advisory
+        </button>
+        <div id="advisory-${idx}" class="mt-2 hidden bg-pink-50 border border-pink-200 rounded p-3 text-xs text-gray-800"></div>`;
+    }
+
+    window._renderWhyMatched = _renderWhyMatched;
+    window._advisoryButton = _advisoryButton;
+
+    async function searchOpenAdvisory(idx) {
+        const drawer = document.getElementById(`advisory-${idx}`);
+        const r = (window.currentSearchResults || [])[idx];
+        if (!drawer || !r) return;
+        if (!drawer.classList.contains('hidden') && drawer.dataset.loaded === '1') {
+            drawer.classList.add('hidden');
+            return;
+        }
+        drawer.classList.remove('hidden');
+        drawer.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Recalling memories…';
+
+        const res = await window.apiRoutes.advisory.generate({
+            file_path: r.file_path || null,
+            symbol: r.symbol_name || null,
+            task: document.getElementById('searchQuery')?.value || null,
+        });
+        if (!res.success) {
+            drawer.textContent = `Advisory failed: ${res.error}`;
+            return;
+        }
+        const advisory = res.data?.result || {};
+        if (!advisory.advisory) {
+            drawer.innerHTML = '<em class="text-gray-500">No relevant memories yet.</em>';
+            drawer.dataset.loaded = '1';
+            return;
+        }
+        const tags = (advisory.signals_matched || []).map((s) =>
+            `<span class="inline-block bg-pink-200 text-pink-900 text-xs px-1.5 py-0.5 rounded mr-1">${s}</span>`
+        ).join('');
+        drawer.innerHTML = `
+            <div class="mb-1">${tags}</div>
+            <pre class="whitespace-pre-wrap text-gray-800">${advisory.advisory.replace(/</g, '&lt;')}</pre>
+            <div class="text-gray-500 mt-1">memories used: ${advisory.memory_count ?? 0} • confidence: ${(advisory.confidence ?? 0).toFixed(2)}</div>
+        `;
+        drawer.dataset.loaded = '1';
+    }
+    window.searchOpenAdvisory = searchOpenAdvisory;
+
     // Format results based on search type
     let resultsHtml = '';
     
@@ -357,6 +427,7 @@ function displaySearchResults(results, searchType) {
                     <span class="bg-gray-100 px-2 py-0.5 rounded text-xs">${result.chunk_type}</span>
                     <span class="text-gray-400 ml-2">Lines ${result.line_start}-${result.line_end}</span>
                 </div>
+                ${_renderWhyMatched(result.why_matched) ? `<div class="mb-2">${_renderWhyMatched(result.why_matched)}</div>` : ''}
                 ${result.signature ? `<div class="font-mono text-xs text-gray-700 bg-gray-50 p-2 rounded mt-2">${result.signature}</div>` : ''}
                 ${result.docstring ? `<div class="text-xs text-gray-600 mt-2 italic">${formatUtils.truncate(result.docstring, 150)}</div>` : ''}
                 <div class="mt-3 flex space-x-2">
@@ -364,6 +435,7 @@ function displaySearchResults(results, searchType) {
                             class="text-xs bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded">
                         <i class="fas fa-eye mr-1"></i> View Code
                     </button>
+                    ${_advisoryButton(result, idx)}
                 </div>
             </div>
         `).join('');
@@ -372,11 +444,15 @@ function displaySearchResults(results, searchType) {
             <div class="border border-gray-200 rounded-lg p-4 hover:shadow-md transition-shadow">
                 <div class="font-mono text-sm font-semibold text-blue-600 mb-2">${result.file_path}</div>
                 <div class="text-sm text-gray-600 mb-2">Line ${result.line_number}</div>
+                ${_renderWhyMatched(result.why_matched) ? `<div class="mb-2">${_renderWhyMatched(result.why_matched)}</div>` : ''}
                 <pre class="bg-gray-50 p-3 rounded text-xs overflow-x-auto">${result.content}</pre>
-                <button onclick="viewCodeByIndex(${idx})" 
-                        class="mt-3 text-xs bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded">
-                    <i class="fas fa-eye mr-1"></i> View in Context
-                </button>
+                <div class="mt-3 flex space-x-2">
+                    <button onclick="viewCodeByIndex(${idx})" 
+                            class="text-xs bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded">
+                        <i class="fas fa-eye mr-1"></i> View in Context
+                    </button>
+                    ${_advisoryButton(result, idx)}
+                </div>
             </div>
         `).join('');
     } else if (searchType === 'symbols') {
@@ -390,12 +466,16 @@ function displaySearchResults(results, searchType) {
                     <span class="px-2 py-1 bg-indigo-100 text-indigo-800 text-xs rounded-full">${result.symbol_type}</span>
                 </div>
                 <div class="text-sm text-gray-600 mb-2">Lines ${result.line_start}-${result.line_end}</div>
+                ${_renderWhyMatched(result.why_matched) ? `<div class="mb-2">${_renderWhyMatched(result.why_matched)}</div>` : ''}
                 ${result.signature ? `<div class="font-mono text-xs text-gray-700 bg-gray-50 p-2 rounded">${result.signature}</div>` : ''}
                 ${result.relevance_score ? `<div class="text-xs text-gray-500 mt-2">Match Score: ${(result.relevance_score * 100).toFixed(1)}%</div>` : ''}
-                <button onclick="viewCodeByIndex(${idx})" 
-                        class="mt-3 text-xs bg-indigo-500 hover:bg-indigo-600 text-white px-3 py-1 rounded">
-                    <i class="fas fa-eye mr-1"></i> View Code
-                </button>
+                <div class="mt-3 flex space-x-2">
+                    <button onclick="viewCodeByIndex(${idx})" 
+                            class="text-xs bg-indigo-500 hover:bg-indigo-600 text-white px-3 py-1 rounded">
+                        <i class="fas fa-eye mr-1"></i> View Code
+                    </button>
+                    ${_advisoryButton(result, idx)}
+                </div>
             </div>
         `).join('');
     }

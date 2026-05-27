@@ -445,6 +445,84 @@ const API_ROUTES = {
             { userAction: 'Get Performance Metrics' }
         ),
     },
+
+    // ============================================================================
+    // PATCH / EDIT SESSIONS (Wave 2 W2-6)
+    // ============================================================================
+    patch: {
+        listSessions: (limit = 20) =>
+            api.get('/patch/sessions', {
+                params: { limit },
+                userAction: 'List Edit Sessions',
+            }),
+
+        getSession: (sessionId) =>
+            api.get(`/patch/sessions/${sessionId}`, {
+                userAction: 'Get Edit Session',
+            }),
+
+        rollback: (sessionId) =>
+            api.post('/patch/rollback',
+                {},
+                {
+                    params: { session_id: sessionId },
+                    userAction: 'Rollback Patch',
+                }
+            ),
+
+        preview: (filePath, content) =>
+            api.post('/patch/preview',
+                { file_path: filePath, content },
+                { userAction: 'Preview Patch' }
+            ),
+    },
+
+    // ============================================================================
+    // CALL-GRAPH IMPACT (Wave 2 W2-6 — drives the Impact Viewer page)
+    // ============================================================================
+    graph: {
+        impact: (symbol, depth = 2, scopePath = null) =>
+            api.get('/graph/impact', {
+                params: scopePath
+                    ? { symbol, depth, scope_path: scopePath }
+                    : { symbol, depth },
+                userAction: 'Graph Impact',
+            }),
+
+        risk: (symbol) =>
+            api.get('/graph/risk', {
+                params: { symbol },
+                userAction: 'Graph Risk',
+            }),
+
+        relatedTests: (symbol) =>
+            api.get('/graph/related-tests', {
+                params: { symbol },
+                userAction: 'Graph Related Tests',
+            }),
+
+        entrypoints: (symbol) =>
+            api.get('/graph/entrypoints', {
+                params: { symbol },
+                userAction: 'Graph Entry Points',
+            }),
+
+        dead: (maxFiles = 200) =>
+            api.get('/graph/dead', {
+                params: { max_files: maxFiles },
+                userAction: 'Graph Dead Symbols',
+            }),
+    },
+
+    // ============================================================================
+    // MEMORY ADVISORY (Wave 2 W2-6 — feeds the search-results drawer)
+    // ============================================================================
+    advisory: {
+        generate: (signals = {}) =>
+            api.post('/memory/advisory', signals, {
+                userAction: 'Generate Memory Advisory',
+            }),
+    },
 };
 
 // Export for global access

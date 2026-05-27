@@ -1,0 +1,202 @@
+<!--
+  Edit Sessions viewer (Wave 2, W2-6).
+
+  Drives the existing GET /patch/sessions and /patch/sessions/{id}
+  endpoints. List on the left, full diff + checks on the right.
+-->
+<div class="space-y-4">
+    <div class="bg-white shadow-lg rounded-lg overflow-hidden">
+        <div class="px-6 py-4 bg-gradient-to-r from-indigo-50 to-purple-50 border-b border-gray-200 flex items-center justify-between">
+            <h2 class="text-2xl font-bold flex items-center text-gray-900">
+                <i class="fas fa-history mr-3 text-indigo-500"></i>
+                Edit Sessions
+            </h2>
+            <div class="flex items-center space-x-3">
+                <select id="esLimit" class="border border-gray-300 rounded-md px-3 py-1.5 text-sm">
+                    <option value="20">20</option>
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                </select>
+                <button onclick="esRefresh()" class="bg-indigo-500 hover:bg-indigo-600 text-white px-4 py-1.5 rounded-md text-sm font-medium">
+                    <i class="fas fa-sync mr-1"></i> Refresh
+                </button>
+            </div>
+        </div>
+        <p class="px-6 py-3 text-sm text-gray-600 bg-gray-50 border-b border-gray-200">
+            Every applied patch is stored as a session with snapshot + checks_before / checks_after diff.
+            Click a row on the left to inspect; rollback restores the pre-edit file.
+        </p>
+
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-0">
+            <!-- Session list -->
+            <div class="lg:col-span-4 border-r border-gray-200 max-h-[70vh] overflow-y-auto">
+                <ul id="esList" class="divide-y divide-gray-200">
+                    <li class="p-4 text-center text-gray-500 text-sm">
+                        Loading sessions…
+                    </li>
+                </ul>
+            </div>
+
+            <!-- Session detail -->
+            <div class="lg:col-span-8 p-6 bg-gray-50 max-h-[70vh] overflow-y-auto">
+                <div id="esDetail" class="text-sm text-gray-500">
+                    Select a session on the left to inspect.
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+(function () {
+    'use strict';
+
+    let _sessions = [];
+    let _activeId = null;
+
+    function _escape(s) {
+        return String(s == null ? '' : s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+    }
+
+    function _renderDiff(diff) {
+        if (!diff) return '<em class="text-gray-400">no diff recorded</em>';
+        const lines = String(diff).split('\n').map((line) => {
+            let cls = 'text-gray-700';
+            if (line.startsWith('+++') || line.startsWith('---')) cls = 'text-gray-500';
+            else if (line.startsWith('+')) cls = 'text-green-700 bg-green-50';
+            else if (line.startsWith('-')) cls = 'text-red-700 bg-red-50';
+            else if (line.startsWith('@@')) cls = 'text-purple-700 bg-purple-50';
+            return `<div class="px-2 ${cls}">${_escape(line) || '&nbsp;'}</div>`;
+        });
+        return `<div class="font-mono text-xs leading-snug rounded border border-gray-200 bg-white max-h-96 overflow-y-auto">${lines.join('')}</div>`;
+    }
+
+    function _renderChecks(checks, label) {
+        if (!Array.isArray(checks) || checks.length === 0) {
+            return `<div class="text-xs text-gray-400">${label}: no diagnostics</div>`;
+        }
+        const rows = checks.slice(0, 30).map((c) => {
+            const sev = (c.severity || 'info').toLowerCase();
+            const colour = sev === 'error' ? 'red' : sev === 'warning' ? 'amber' : 'gray';
+            return `<li class="text-xs px-2 py-1 border-l-2 border-${colour}-300 bg-${colour}-50/50">
+                <span class="font-mono text-${colour}-700">${_escape(c.code || sev)}</span>
+                <span class="text-gray-700 ml-2">${_escape(c.message || '')}</span>
+                <span class="text-gray-400 ml-2">${_escape(c.file || '')}${c.line ? ':' + c.line : ''}</span>
+            </li>`;
+        });
+        return `<div class="mt-1"><div class="text-xs font-semibold text-gray-700">${label} (${checks.length})</div>
+            <ul class="space-y-0.5 mt-1">${rows.join('')}</ul></div>`;
+    }
+
+    async function esRefresh() {
+        const limit = parseInt(document.getElementById('esLimit').value || '20', 10);
+        const res = await window.apiRoutes.patch.listSessions(limit);
+        const list = document.getElementById('esList');
+        if (!res.success) {
+            list.innerHTML = `<li class="p-4 text-red-600 text-sm">Failed to load sessions: ${_escape(res.error || 'unknown')}</li>`;
+            return;
+        }
+        _sessions = res.data?.result?.sessions || [];
+        if (_sessions.length === 0) {
+            list.innerHTML = `<li class="p-6 text-center text-gray-400 text-sm">
+                <i class="fas fa-folder-open text-2xl mb-2"></i><br>
+                No edit sessions yet. They'll appear after the first /patch/apply.
+            </li>`;
+            return;
+        }
+
+        list.innerHTML = _sessions.map((s) => {
+            const ts = s.applied_at ? new Date(s.applied_at).toLocaleString() : '—';
+            const active = s.session_id === _activeId
+                ? 'bg-indigo-50 border-l-4 border-indigo-500'
+                : 'hover:bg-gray-50';
+            return `<li class="p-3 cursor-pointer ${active}" onclick="esLoad('${_escape(s.session_id)}')">
+                <div class="flex items-center justify-between">
+                    <span class="font-mono text-xs text-gray-700">${_escape((s.session_id || '').slice(0, 12))}</span>
+                    <span class="text-xs text-gray-400">${_escape(ts)}</span>
+                </div>
+                <div class="mt-1 text-sm text-gray-900 truncate">${_escape(s.file_path || '?')}</div>
+                <div class="text-xs text-gray-500 mt-0.5">
+                    +${s.lines_added || 0} / -${s.lines_removed || 0}
+                    ${s.rollback_available ? '<span class="text-green-600 ml-2">↩ rollback</span>' : ''}
+                </div>
+            </li>`;
+        }).join('');
+    }
+
+    async function esLoad(sessionId) {
+        _activeId = sessionId;
+        await esRefresh();  // reflect highlight
+        const detail = document.getElementById('esDetail');
+        detail.innerHTML = '<div class="text-gray-500"><i class="fas fa-spinner fa-spin mr-2"></i>Loading…</div>';
+        const res = await window.apiRoutes.patch.getSession(sessionId);
+        if (!res.success) {
+            detail.innerHTML = `<div class="text-red-600">Load failed: ${_escape(res.error || '')}</div>`;
+            return;
+        }
+        const session = res.data?.result || {};
+        detail.innerHTML = `
+            <div class="space-y-4">
+                <div class="flex items-start justify-between">
+                    <div>
+                        <h3 class="text-lg font-semibold text-gray-900">${_escape(session.file_path || '?')}</h3>
+                        <p class="text-xs text-gray-500 font-mono">${_escape(session.session_id || '')}</p>
+                    </div>
+                    <button onclick="esRollback('${_escape(sessionId)}')"
+                            class="bg-amber-500 hover:bg-amber-600 text-white px-3 py-1.5 text-xs rounded-md font-medium ${session.rollback_available ? '' : 'opacity-40 cursor-not-allowed'}"
+                            ${session.rollback_available ? '' : 'disabled'}>
+                        <i class="fas fa-undo mr-1"></i> Rollback
+                    </button>
+                </div>
+
+                <div class="grid grid-cols-2 gap-3 text-xs text-gray-700">
+                    <div><span class="text-gray-500">applied_at:</span> ${_escape(session.applied_at || '—')}</div>
+                    <div><span class="text-gray-500">model:</span> ${_escape(session.model || 'manual')}</div>
+                    <div><span class="text-gray-500">lines:</span> +${session.lines_added || 0} / -${session.lines_removed || 0}</div>
+                    <div><span class="text-gray-500">rollback:</span> ${session.rollback_available ? 'available' : 'no'}</div>
+                </div>
+
+                ${session.prompt ? `
+                    <details class="bg-white border border-gray-200 rounded-md">
+                        <summary class="px-3 py-2 cursor-pointer text-sm font-medium">Prompt</summary>
+                        <pre class="px-3 py-2 text-xs whitespace-pre-wrap text-gray-700">${_escape(session.prompt)}</pre>
+                    </details>` : ''}
+
+                <div>
+                    <div class="text-sm font-medium text-gray-800 mb-1">Diff</div>
+                    ${_renderDiff(session.diff)}
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    ${_renderChecks(session.checks_before, 'Checks before')}
+                    ${_renderChecks(session.checks_after, 'Checks after')}
+                </div>
+            </div>
+        `;
+    }
+
+    async function esRollback(sessionId) {
+        if (!confirm(`Rollback session ${sessionId.slice(0, 12)}?\n\nThis restores the file from its pre-edit snapshot.`)) return;
+        const res = await window.apiRoutes.patch.rollback(sessionId);
+        if (res.success) {
+            window.notifications?.success('Rolled back successfully');
+            await esRefresh();
+            _activeId = null;
+            document.getElementById('esDetail').innerHTML = 'Select a session on the left to inspect.';
+        } else {
+            window.notifications?.error(`Rollback failed: ${res.error}`);
+        }
+    }
+
+    // Expose for onclick handlers
+    window.esRefresh = esRefresh;
+    window.esLoad = esLoad;
+    window.esRollback = esRollback;
+
+    // Auto-refresh on first load
+    esRefresh();
+})();
+</script>
