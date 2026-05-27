@@ -372,7 +372,7 @@ async def git_history(
             settings.WORKING_DIR, max_commits_scanned=max_commits
         )
         report = analyzer.analyze_file(file_path)
-        return create_success_response(report.dict())
+        return create_success_response(report.model_dump())
     except Exception as e:
         return create_error_response(f"History analysis failed: {e}", 500)
 

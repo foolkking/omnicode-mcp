@@ -28,7 +28,7 @@ import subprocess
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
 
@@ -117,7 +117,7 @@ class HistoryReport(BaseModel):
     hardening_commit_count: int = 0
     defensive_patches: List[CommitInfo] = Field(default_factory=list)
 
-    co_changed_files: List[Dict[str, int]] = Field(default_factory=list)
+    co_changed_files: List[Dict[str, Any]] = Field(default_factory=list)
     risk_score: float = 0.0
     risk_level: str = "low"  # 'low' | 'medium' | 'high'
     advisory: str = ""
@@ -165,12 +165,21 @@ class GitHistoryAnalyzer:
         We ask git for: hash, ISO date, author name, then subject + body
         terminated by a unique sentinel so multi-line bodies are captured
         cleanly.  ``--name-only`` lists every file changed in that commit.
+
+        Layout (per commit):
+            START<hash>SEP<date>SEP<author>SEP<body>END
+            <file 1>
+            <file 2>
+            ...
+        Splitting on START isolates each commit; splitting on END inside the
+        chunk separates metadata+body from the file list.
         """
         if not self._git_available:
             return []
+        START = "<<<KIRO_COMMIT_START>>>"
         SEP = "<<<KIRO_COMMIT_SEP>>>"
         END = "<<<KIRO_COMMIT_END>>>"
-        fmt = f"%H{SEP}%aI{SEP}%an{SEP}%B{END}"
+        fmt = f"{START}%H{SEP}%aI{SEP}%an{SEP}%B{END}"
         try:
             cmd = [
                 "git",
@@ -197,15 +206,15 @@ class GitHistoryAnalyzer:
             return []
 
         commits: List[_RawCommit] = []
-        for raw in res.stdout.split(END):
-            raw = raw.strip("\n")
-            if not raw:
-                continue
-            head, _, files_part = raw.partition("\n")
-            parts = head.split(SEP)
+        # Drop the prefix before the first START (empty in normal output)
+        chunks = res.stdout.split(START)
+        for raw in chunks[1:]:
+            meta_part, _, files_part = raw.partition(END)
+            parts = meta_part.split(SEP)
             if len(parts) < 4:
                 continue
-            commit_hash, date_str, author, message = parts[0], parts[1], parts[2], parts[3]
+            commit_hash, date_str, author = parts[0].strip(), parts[1].strip(), parts[2].strip()
+            message = parts[3].strip()
             try:
                 dt = datetime.fromisoformat(date_str)
             except ValueError:
@@ -217,10 +226,10 @@ class GitHistoryAnalyzer:
             files = [ln.strip() for ln in files_part.splitlines() if ln.strip()]
             commits.append(
                 _RawCommit(
-                    hash=commit_hash.strip(),
-                    author=author.strip(),
+                    hash=commit_hash,
+                    author=author,
                     date=dt,
-                    message=message.strip(),
+                    message=message,
                     files=files,
                 )
             )
