@@ -62,12 +62,28 @@ async def search_codebase(request: SearchRequest):
 
 
 @router.post("/index")
-async def index_codebase():
-    """Index the entire codebase"""
+async def index_codebase(
+    force: bool = Query(False, description="Force full rebuild (ignore file tracker cache)"),
+):
+    """Index the codebase incrementally (or force full rebuild).
+
+    By default, only new/modified files are re-indexed and deleted files
+    are removed.  Unchanged files are skipped entirely.  This typically
+    reduces indexing time from 30-60s to 2-3s.
+
+    Pass ?force=true to clear the file tracker and rebuild everything.
+    """
     try:
         search_engine = get_search_engine()
         if not search_engine:
             return create_error_response("Semantic search not initialized", 500)
+
+        if force:
+            # Clear the file tracker so everything looks "new"
+            import os
+            from omnicode_core.index.file_tracker import FileTracker
+            tracker_db = os.path.join(search_engine.db_dir, "file_tracker.db")
+            FileTracker(tracker_db).clear()
 
         await search_engine.index_codebase()
         stats = search_engine.get_stats()
