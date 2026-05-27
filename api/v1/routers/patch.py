@@ -72,10 +72,28 @@ async def apply_patch(request: PatchRequest):
 
     Creates a snapshot before overwriting so rollback is always possible.
     Returns a session_id for tracking and rollback.
+
+    Gated by ``OMNICODE_READ_ONLY`` and ``OMNICODE_ALLOW_APPLY_PATCH`` —
+    cloud deployments typically turn ``allow_apply_patch`` off so remote
+    callers can only preview/validate/explain.
     """
     from omnicode_core.edit.patch import PatchManager
 
     settings = get_settings()
+    if settings.OMNICODE_READ_ONLY:
+        return create_error_response(
+            "Server is in read-only mode (OMNICODE_READ_ONLY=true).",
+            status_code=403,
+        )
+    if not settings.OMNICODE_ALLOW_APPLY_PATCH:
+        return create_error_response(
+            "Patch apply is disabled on this deployment "
+            "(OMNICODE_ALLOW_APPLY_PATCH=false). Use /patch/preview + "
+            "/patch/validate + /patch/explain to inspect changes; apply "
+            "them with the editor or a local tool.",
+            status_code=403,
+        )
+
     pm = PatchManager(settings.WORKING_DIR)
     result = pm.apply_patch(
         request.file_path,
@@ -102,11 +120,24 @@ async def rollback_patch(
 ):
     """Rollback a previously applied patch using its snapshot.
 
-    Restores the file to its pre-edit state.
+    Restores the file to its pre-edit state. Gated by the same
+    read-only / allow-apply flags as ``/patch/apply``.
     """
     from omnicode_core.edit.patch import PatchManager
 
     settings = get_settings()
+    if settings.OMNICODE_READ_ONLY:
+        return create_error_response(
+            "Server is in read-only mode (OMNICODE_READ_ONLY=true).",
+            status_code=403,
+        )
+    if not settings.OMNICODE_ALLOW_APPLY_PATCH:
+        return create_error_response(
+            "Rollback is disabled on this deployment "
+            "(OMNICODE_ALLOW_APPLY_PATCH=false).",
+            status_code=403,
+        )
+
     pm = PatchManager(settings.WORKING_DIR)
     result = pm.rollback_patch(session_id)
 

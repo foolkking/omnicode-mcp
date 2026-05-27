@@ -44,6 +44,17 @@ def main():
     serve_parser.add_argument("--host", default="127.0.0.1", help="Bind host")
     serve_parser.add_argument("--port", type=int, default=6789, help="Bind port")
     serve_parser.add_argument("--reload", action="store_true", help="Auto-reload on file changes")
+    serve_parser.add_argument(
+        "--mode",
+        choices=("local", "cloud", "hybrid"),
+        default="local",
+        help=(
+            "Deployment mode (Wave 1, gap §13). "
+            "local: single-user dev (defaults). "
+            "cloud: shared/remote — turns on read-only + blocks /patch/apply by default. "
+            "hybrid: cloud index + local apply — read-only off, apply still gated."
+        ),
+    )
 
     # --- dev ---
     dev_parser = subparsers.add_parser("dev", help="Development mode (console + reload)")
@@ -79,6 +90,7 @@ def main():
             host=args.host,
             port=args.port,
             reload=args.reload,
+            mode=args.mode,
         )
     elif args.command == "dev":
         from omnicode_adapters.cli.commands.serve_cmd import run

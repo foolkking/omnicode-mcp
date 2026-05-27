@@ -45,6 +45,7 @@ async def search_codebase(request: SearchRequest):
                     "signature": result.signature,
                     "docstring": result.docstring,
                     "relevance_score": result.relevance_score,
+                    "why_matched": getattr(result, "why_matched", []),
                 }
             )
 
@@ -214,6 +215,7 @@ async def symbol_search(
                     "line_end": result.line_end,
                     "signature": result.signature,
                     "relevance_score": result.relevance_score,
+                    "why_matched": getattr(result, "why_matched", []),
                 }
             )
 

@@ -469,8 +469,15 @@ async def read_code_content(
         "full",
         description=(
             "Read mode: full (entire file), outline (signatures + first docstring line), "
-            "symbols (symbol list only), diagnostics (lint issues only), imports (import lines only)"
+            "symbols (symbol list only), diagnostics (lint issues only), imports (import lines only), "
+            "relevant_chunks (top-K semantic chunks of this file vs `query`), "
+            "tests (test files that likely cover this file)"
         ),
+    ),
+    query: Optional[str] = Query(
+        None,
+        description="Required when mode=relevant_chunks. Free-text search query "
+        "scoped to this file's chunks.",
     ),
 ):
     """Read code content with multiple modes for token efficiency.
@@ -481,6 +488,8 @@ async def read_code_content(
       - symbols: structured symbol list (name, kind, lines) — no code content
       - diagnostics: only ruff/eslint diagnostics for this file
       - imports: only import/require statements
+      - relevant_chunks: semantic top-K chunks of this file vs `query`
+      - tests: candidate test files for this file
     """
     # Defensive coercion: some clients (URLSearchParams in older JS code,
     # MCP wrappers) serialize Python None as the literal string "null" or
@@ -489,9 +498,19 @@ async def read_code_content(
     if isinstance(symbol_name, str) and symbol_name.lower() in {"null", "undefined", ""}:
         symbol_name = None
 
+    # Sandbox check happens BEFORE mode dispatch so a hostile path can't
+    # exercise any of the read modes (each of which would then call into
+    # the workspace itself).  Wave 1, gap §13.
+    from core.config import get_settings as _gs
+
+    try:
+        await validate_file_path(file_path, _gs().WORKING_DIR)
+    except HTTPException as exc:
+        return create_error_response(str(exc.detail), exc.status_code)
+
     # Handle non-full modes early — they don't need line range / symbol resolution
     if mode and mode.lower() not in ("full", ""):
-        return await _read_mode_dispatch(file_path, mode.lower(), with_line_numbers)
+        return await _read_mode_dispatch(file_path, mode.lower(), with_line_numbers, query)
 
     def _coerce_int(v: Optional[str], field: str):
         if v is None:
@@ -908,7 +927,7 @@ async def file_operations(request: FileRequest):
 # Multi-mode read dispatch (outline / symbols / diagnostics / imports)
 # =============================================================================
 
-async def _read_mode_dispatch(file_path: str, mode: str, with_line_numbers: bool):
+async def _read_mode_dispatch(file_path: str, mode: str, with_line_numbers: bool, query: Optional[str] = None):
     """Handle non-full read modes that return structured, token-efficient output.
 
     These modes are designed to give AI agents the minimum context they need
@@ -1076,9 +1095,147 @@ async def _read_mode_dispatch(file_path: str, mode: str, with_line_numbers: bool
             })
 
     # -------------------------------------------------------------------------
+    # MODE: relevant_chunks — semantic top-K chunks of THIS file vs a query.
+    # Useful when the editor cares about a specific aspect of a long file
+    # without reading the whole thing. Implemented by:
+    #   1. running the indexed semantic search restricted to this file
+    #   2. returning the matching chunks ranked by score
+    #
+    # Falls back to a clear error when ``query`` is empty (we don't try to
+    # guess intent — the caller must opt in).
+    # -------------------------------------------------------------------------
+    if mode == "relevant_chunks":
+        if not query or not query.strip():
+            return create_error_response(
+                "mode=relevant_chunks requires a `query` parameter.",
+                400,
+            )
+
+        from omnicode.search.models import SearchRequest
+
+        engine = get_search_engine()
+        if engine is None:
+            return create_error_response("Search engine not initialized", 500)
+
+        req = SearchRequest(
+            query=query.strip(),
+            search_type="semantic",
+            max_results=20,
+            file_pattern=file_path,
+        )
+        results = await engine.search(req)
+
+        # Filter strictly to this file (file_pattern is a hint, not a hard
+        # filter inside the engine for all backends).
+        normalised = file_path.replace("\\", "/")
+        filtered = []
+        for r in results:
+            rp = (getattr(r, "file_path", "") or "").replace("\\", "/")
+            if rp == normalised or rp.endswith("/" + normalised):
+                filtered.append(r)
+
+        return create_success_response(
+            {
+                "file": file_path,
+                "mode": "relevant_chunks",
+                "query": query.strip(),
+                "total_lines": total_lines,
+                "result_count": len(filtered),
+                "chunks": [
+                    {
+                        "symbol_name": getattr(r, "symbol_name", ""),
+                        "chunk_type": getattr(r, "chunk_type", ""),
+                        "line_start": getattr(r, "line_start", None),
+                        "line_end": getattr(r, "line_end", None),
+                        "signature": getattr(r, "signature", ""),
+                        "docstring": getattr(r, "docstring", ""),
+                        "score": getattr(r, "relevance_score", 0.0),
+                        "why_matched": getattr(r, "why_matched", []),
+                    }
+                    for r in filtered
+                ],
+            }
+        )
+
+    # -------------------------------------------------------------------------
+    # MODE: tests — list test files that cover this file's symbols.
+    # Quick heuristic: filename + tree-walk; combined with the symbol
+    # index from list_symbols_in_file. Falls back to filename-only when
+    # the symbol index is empty.
+    # -------------------------------------------------------------------------
+    if mode == "tests":
+        from omnicode.config.settings import get_settings as _gs
+
+        wd = _gs().WORKING_DIR
+        # Filename-based candidates: tests/test_<basename>.py + co-located
+        # *.test.ts / *.spec.ts.
+        import os as _os
+
+        base = _os.path.splitext(_os.path.basename(file_path))[0]
+        candidates: list[str] = []
+        for root, dirs, files in _os.walk(wd):
+            dirs[:] = [d for d in dirs if d not in {".git", "__pycache__", "node_modules", ".data", ".venv"}]
+            for f in files:
+                fl = f.lower()
+                if (
+                    (fl.startswith("test_") and base.lower() in fl)
+                    or fl == f"test_{base.lower()}.py"
+                    or fl == f"{base.lower()}.test.ts"
+                    or fl == f"{base.lower()}.test.js"
+                    or fl == f"{base.lower()}.spec.ts"
+                ):
+                    rel = _os.path.relpath(_os.path.join(root, f), wd).replace("\\", "/")
+                    candidates.append(rel)
+
+        # Plus call-graph based suggestions for each top-level symbol.
+        graph_suggestions: list[dict] = []
+        try:
+            from omnicode_core.graph.impact import ImpactAnalyzer
+
+            analyser = ImpactAnalyzer(wd)
+            search_engine = get_search_engine()
+            if search_engine is not None:
+                symbols_data = await search_engine.list_symbols_in_file(file_path)
+                top_symbols = [
+                    s.get("name") for s in (symbols_data.get("symbols") or [])[:5] if s.get("name")
+                ]
+                for sym in top_symbols:
+                    sug = await analyser.suggest_related_tests(symbol=sym)
+                    if "error" not in sug:
+                        graph_suggestions.append(
+                            {
+                                "symbol": sym,
+                                "test_files": sug.get("test_files", []),
+                                "suggested_commands": sug.get("suggested_commands", []),
+                            }
+                        )
+        except Exception:
+            # Best-effort — if the graph isn't built yet we still return
+            # the filename-based suggestions.
+            pass
+
+        # Deduplicate the flat candidate list.
+        candidates = sorted(set(candidates))
+        return create_success_response(
+            {
+                "file": file_path,
+                "mode": "tests",
+                "total_lines": total_lines,
+                "candidate_test_files": candidates,
+                "graph_suggestions": graph_suggestions,
+                "suggested_commands": [f"pytest {t}" for t in candidates[:5]],
+                "note": (
+                    "Combines filename heuristics with call-graph "
+                    "reachability when the graph is available."
+                ),
+            }
+        )
+
+    # -------------------------------------------------------------------------
     # Unknown mode — fall back to full
     # -------------------------------------------------------------------------
     return create_error_response(
-        f"Unknown read mode: '{mode}'. Valid modes: full, outline, symbols, imports, diagnostics",
+        f"Unknown read mode: '{mode}'. Valid modes: full, outline, symbols, "
+        "imports, diagnostics, relevant_chunks, tests",
         400,
     )

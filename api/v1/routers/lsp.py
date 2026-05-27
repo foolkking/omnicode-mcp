@@ -98,6 +98,27 @@ async def workspace_symbols(
     return create_success_response(result)
 
 
+@router.post("/rename")
+async def lsp_rename(
+    file: str = Query(..., description="File path (relative)"),
+    line: int = Query(..., description="Line number (0-indexed)"),
+    col: int = Query(..., description="Column (0-indexed)"),
+    new_name: str = Query(..., description="New symbol name"),
+):
+    """Rename the symbol at ``(line, col)`` across the workspace.
+
+    Returns a structured WorkspaceEdit. The server does **not** write
+    to disk — callers should review the edits and feed them through
+    ``/patch/preview`` + ``/patch/apply`` to keep the snapshot /
+    rollback story intact.
+    """
+    bridge = _get_bridge()
+    result = await bridge.rename_symbol(file, line, col, new_name)
+    if "error" in result:
+        return create_error_response(result["error"], 400)
+    return create_success_response(result)
+
+
 @router.get("/diagnostics/{file_path:path}")
 async def get_diagnostics(file_path: str):
     """Get LSP diagnostics for a file.

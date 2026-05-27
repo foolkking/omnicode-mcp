@@ -15,6 +15,11 @@ logger = logging.getLogger(__name__)
 class LegacySearchResult:
     """
     Adapter class representing a search result in the legacy API schema.
+
+    The ``why_matched`` field (Wave 1, gap §7) explains *why* a result
+    appears: a list of compact tags such as ``["semantic", "symbol"]``
+    or ``["text:exact", "recent_git_change"]`` so AI editors and humans
+    can decide which signal to trust.
     """
     def __init__(
         self,
@@ -25,7 +30,8 @@ class LegacySearchResult:
         line_end: int,
         signature: str,
         docstring: str,
-        relevance_score: float
+        relevance_score: float,
+        why_matched: Optional[List[str]] = None,
     ):
         self.file_path = file_path
         self.symbol_name = symbol_name
@@ -35,6 +41,7 @@ class LegacySearchResult:
         self.signature = signature
         self.docstring = docstring
         self.relevance_score = relevance_score
+        self.why_matched = list(why_matched) if why_matched else []
 
 class SqliteKeywordSearcher:
     """
@@ -476,7 +483,8 @@ class SemanticSearchEngine:
                     line_end=1,
                     signature="",
                     docstring="",
-                    relevance_score=1.0
+                    relevance_score=1.0,
+                    why_matched=["text"],
                 ))
                 if len(results) >= request.max_results:
                     break
@@ -546,6 +554,13 @@ class SemanticSearchEngine:
             # Highest scoring matches first
             scored.sort(key=lambda x: x[0], reverse=True)
             for score, row, meta, name in scored[: request.max_results]:
+                # Tag *why* this row matched so AI editors can decide which
+                # signal to trust. Exact symbol hits are the strongest;
+                # prefix/contains matches get more conservative tags.
+                why = ["symbol:exact"] if score >= 1.0 else (
+                    ["symbol:prefix"] if score >= 0.9 else
+                    (["symbol:contains"] if score >= 0.7 else ["symbol:fuzzy"])
+                )
                 results.append(LegacySearchResult(
                     file_path=row["file_path"],
                     symbol_name=name,
@@ -555,6 +570,7 @@ class SemanticSearchEngine:
                     signature=meta.get("signature", ""),
                     docstring=meta.get("docstring", ""),
                     relevance_score=score,
+                    why_matched=why,
                 ))
         else:
             # Semantic / Hybrid search using RRF
@@ -567,6 +583,16 @@ class SemanticSearchEngine:
 
             for item in hybrid_results:
                 meta = item.get("metadata", {})
+                # Hybrid RRF can be entered via several recall paths; we
+                # keep ``semantic`` as the base tag and append a stronger
+                # signal whenever the symbol_name (when present) actually
+                # matches the query verbatim.
+                why = ["semantic"]
+                sym = (meta.get("symbol_name") or "").lower()
+                if sym and request.query.lower() in sym:
+                    why.append("symbol:contains")
+                if sym and sym == request.query.lower():
+                    why.append("symbol:exact")
                 results.append(LegacySearchResult(
                     file_path=item["file_path"],
                     symbol_name=meta.get("symbol_name", ""),
@@ -575,7 +601,8 @@ class SemanticSearchEngine:
                     line_end=meta.get("end_line", 1),
                     signature=meta.get("signature", ""),
                     docstring=meta.get("docstring", ""),
-                    relevance_score=item["score"]
+                    relevance_score=item["score"],
+                    why_matched=why,
                 ))
 
         return results

@@ -39,6 +39,21 @@ class Settings(BaseSettings):
     # Empty string means auth is disabled (default).
     OMNICODE_API_KEY: str = Field(default="")
 
+    # Deployment mode — affects defaults for write-protection and auth.
+    # local  : single-user dev box (default).
+    # cloud  : remote shared deployment — turns on read-only + apply-patch
+    #          gate by default.
+    # hybrid : cloud index + local apply (caller decides which side runs
+    #          this process).
+    OMNICODE_MODE: str = Field(default="local")
+
+    # Write-protection knobs. Read-only blocks every mutating endpoint
+    # (POST/PUT/PATCH/DELETE on /files, /patch, /memory write, /admin
+    # writes, etc.). `allow_apply_patch=False` keeps the patch *preview /
+    # validate / explain* endpoints open while blocking the actual apply.
+    OMNICODE_READ_ONLY: bool = Field(default=False)
+    OMNICODE_ALLOW_APPLY_PATCH: bool = Field(default=True)
+
     # LLM Provider Configuration
     DEFAULT_LLM_PROVIDER: str = Field(default="gemini")
     DEFAULT_LLM_MODEL: str = Field(default="gemini-2.5-flash")

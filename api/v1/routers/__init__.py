@@ -9,6 +9,7 @@ from api.v1.routers.files import router as files_router
 from api.v1.routers.fs_browser import router as fs_browser_router
 from api.v1.routers.git import router1 as git_router
 from api.v1.routers.git import router2 as session_router
+from api.v1.routers.graph import router as graph_router
 from api.v1.routers.guard import router as guard_router
 from api.v1.routers.health import router as health_router
 from api.v1.routers.intelligence import router as intelligence_router
@@ -44,6 +45,7 @@ all_routers = [
     workspaces_router,
     admin_router,
     intelligence_router,
+    graph_router,
 ]
 
 __all__ = [
@@ -64,4 +66,5 @@ __all__ = [
     "workspaces_router",
     "admin_router",
     "intelligence_router",
+    "graph_router",
 ]

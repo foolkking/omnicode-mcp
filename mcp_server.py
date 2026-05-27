@@ -138,16 +138,58 @@ async def auto_commit_if_enabled(file_path: str, operation: str, purpose: Option
 # =============================================================================
 # HIGH-LEVEL AGGREGATED TOOLS (v2 architecture)
 # These 6+1 tools replace the need for AI clients to pick from 25+ options.
+#
+# Gating with OMNICODE_MCP_TOOLS:
+#   * "all"    (default) — register both sets (current behaviour).
+#   * "core"   — only the high-level set (legacy ones become no-ops below).
+#   * "legacy" — skip these; expose the 16 lower-level tools only.
 # =============================================================================
-from omnicode_adapters.mcp_server.high_level_tools import register_high_level_tools
-register_high_level_tools(mcp, make_request)
+import os as _os_init
+
+_mcp_tools_mode = _os_init.environ.get("OMNICODE_MCP_TOOLS", "all").lower().strip()
+if _mcp_tools_mode != "legacy":
+    from omnicode_adapters.mcp_server.high_level_tools import register_high_level_tools
+    register_high_level_tools(mcp, make_request)
 
 
 # =============================================================================
-# MCP TOOLS - 8 main tools that proxy to FastAPI
+# Legacy tool gating (Wave 1, gap §8 — MCP tools slim).
+#
+# The 16 lower-level tools below are kept for callers that need raw
+# access (file ops, project structure, execute, etc.). New high-level
+# clients should use the 6+1 omni_* tools registered above and toggle
+# the legacy set off via ``OMNICODE_MCP_TOOLS``:
+#
+#   * ``all``    (default) — register everything (current behaviour).
+#   * ``legacy`` — register only the legacy 16, useful for old configs.
+#   * ``core``   — register only the 6+1 high-level tools, halving the
+#                  startup token cost. Recommended for fresh setups.
+#
+# We replace ``@mcp.tool()`` with ``@_legacy_tool()`` so a single env
+# variable flips them off without touching the dozens of decorators.
+# =============================================================================
+import os as _os
+
+
+def _legacy_tool():
+    """Conditional wrapper around ``@mcp.tool()`` for the legacy set."""
+    mode = _os.environ.get("OMNICODE_MCP_TOOLS", "all").lower().strip()
+    if mode == "core":
+        # Return a no-op decorator so the function is defined but never
+        # registered with FastMCP — saves ~6k tokens of schema in the
+        # startup handshake.
+        def _noop(fn):
+            return fn
+
+        return _noop
+    return mcp.tool()
+
+
+# =============================================================================
+# MCP TOOLS - 16 lower-level tools (legacy compatibility)
 # =============================================================================
 
-@mcp.tool()
+@_legacy_tool()
 async def session_tool(
     operation: str, 
     session_name: Optional[str] = None,
@@ -290,7 +332,7 @@ async def session_tool(
         return f"🚨 Session tool error: {str(e)}\n💡 Check if FastAPI server and git manager are properly initialized."
 
 
-@mcp.tool()
+@_legacy_tool()
 async def memory_tool(
     operation: str,
     content: Optional[str] = None,
@@ -729,7 +771,7 @@ async def memory_tool(
         return f"❌ Memory tool error: {str(e)}"
 
 
-@mcp.tool()
+@_legacy_tool()
 async def git_tool(
     operation: str, 
     file_path: Optional[str] = None, 
@@ -833,7 +875,7 @@ async def git_tool(
         return f"🚨 Git Tool Error: Unexpected error in git_tool: {str(e)}\n💡 Check if FastAPI server is running and accessible."
 
 
-@mcp.tool()
+@_legacy_tool()
 async def file_tool(
     operation: str,
     file_path: str,
@@ -871,7 +913,7 @@ async def file_tool(
         return f"❌ File tool error: {str(e)}"
 
 
-@mcp.tool()
+@_legacy_tool()
 async def write_tool(
     file_path: str,
     content: str,
@@ -1082,7 +1124,7 @@ async def write_tool(
         return f"❌ Write tool error: {str(e)}"
 
 
-@mcp.tool()
+@_legacy_tool()
 async def edit_file(
     target_file: str,
     instructions: str,
@@ -1329,7 +1371,7 @@ async def edit_file(
         return f"❌ Write tool error: {str(e)}"
 
 
-@mcp.tool()
+@_legacy_tool()
 async def project_context_tool(
     operation: str, max_depth: Optional[int] = 5, include_hidden: Optional[bool] = False
 ) -> str:
@@ -1363,7 +1405,7 @@ def system_prompt()->str:
     return GENERAL_DEV_PROMPT
 
 
-@mcp.tool()
+@_legacy_tool()
 async def search_tool(
     query: str,
     search_type: str = "semantic",
@@ -1496,7 +1538,7 @@ async def search_tool(
         return f"❌ Search tool error: {str(e)}"
 
 
-@mcp.tool()
+@_legacy_tool()
 async def code_analysis_tool(
     operation: str, file_path: str, analysis_type: Optional[str] = "basic"
 ) -> str:
@@ -1526,7 +1568,7 @@ async def code_analysis_tool(
         return f"❌ Code analysis tool error: {str(e)}"
 
 
-@mcp.tool()
+@_legacy_tool()
 async def execute_tool(
     command: str,
     args: Optional[List[str]] = None,
@@ -1562,7 +1604,7 @@ async def execute_tool(
 
 
 
-@mcp.tool()
+@_legacy_tool()
 async def list_file_symbols_tool(file_path: str) -> str:
     """
     List all symbols (functions, classes, interfaces) in a specific file
@@ -1616,7 +1658,7 @@ async def list_file_symbols_tool(file_path: str) -> str:
         return f"❌ List symbols error: {str(e)}"
 
 
-@mcp.tool()
+@_legacy_tool()
 async def read_code_tool(
     file_path: str,
     symbol_name: Optional[str] = None,
@@ -1754,7 +1796,7 @@ async def read_code_tool(
     except Exception as e:
         return f"❌ Read tool error: {str(e)}"
 
-@mcp.tool() 
+@_legacy_tool() 
 async def read_symbol_from_database(symbol_name: str, file_path: Optional[str] = None) -> str:
     """
     Find and read a symbol from the codebase database
@@ -1829,7 +1871,7 @@ async def read_symbol_from_database(symbol_name: str, file_path: Optional[str] =
     except Exception as e:
         return f"❌ Symbol database read error: {str(e)}"
 
-@mcp.tool()
+@_legacy_tool()
 async def project_structure_tool(
     operation: str = "structure",
     max_depth: int = 5,
@@ -1915,7 +1957,7 @@ async def project_structure_tool(
     except Exception as e:
         return f"❌ Project structure tool error: {str(e)}"
 
-@mcp.tool()
+@_legacy_tool()
 async def list_directory_tool(
     directory_path: str = ".",
     max_depth: int = 2,
@@ -2069,7 +2111,7 @@ async def list_directory_tool(
         return f"❌ Directory tool error: {str(e)}"
 
 
-@mcp.tool()
+@_legacy_tool()
 async def show_directory_tree(directory_path: str = ".", max_depth: int = 3) -> str:
     """
     Show directory structure as a clean tree (optimized for LLM context)

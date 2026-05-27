@@ -241,6 +241,100 @@ class LSPBridge:
             return {"content": "\n".join(parts), "language": None}
         return {"content": str(contents), "language": None}
 
+    async def rename_symbol(
+        self, file_path: str, line: int, col: int, new_name: str
+    ) -> Dict[str, Any]:
+        """Rename the symbol at ``(line, col)`` to ``new_name`` via LSP.
+
+        Returns a normalised ``WorkspaceEdit`` with one entry per touched
+        file: ``{file_path: [{start_line, start_col, end_line, end_col,
+        new_text}, ...]}``. Callers (the REST router or
+        :class:`PatchManager`) can apply the changes themselves rather
+        than letting the language server write to disk — keeps the
+        existing snapshot/rollback story intact.
+        """
+        if not new_name or not new_name.strip():
+            return {"error": "new_name is required and must be non-empty."}
+
+        language = self._detect_language(file_path)
+        if not language:
+            return {"error": f"Unsupported language for {file_path}"}
+
+        server = await self._get_server(language)
+        if not server:
+            hint = LSP_SERVERS[language]["install_hint"]
+            return {"error": f"LSP server not available for {language}. Install: {hint}"}
+
+        uri = self._file_uri(file_path)
+        result = await server.request(
+            "textDocument/rename",
+            {
+                "textDocument": {"uri": uri},
+                "position": {"line": line, "character": col},
+                "newName": new_name.strip(),
+            },
+        )
+
+        if not result:
+            return {
+                "edits": {},
+                "files_touched": 0,
+                "note": "Language server returned no rename edits.",
+            }
+
+        # The server can answer with either ``changes`` (legacy) or
+        # ``documentChanges`` (modern). Normalise both into a flat dict
+        # keyed by file path.
+        edits: Dict[str, List[Dict[str, Any]]] = {}
+
+        def _add(target_uri: str, text_edits: List[Dict[str, Any]]) -> None:
+            # ``file:///c%3A/...`` on Windows — strip the scheme and
+            # percent-decode just enough to get a usable path. We don't
+            # try to re-encode for cross-platform symlinks; this is
+            # best-effort and the REST router validates afterwards.
+            from urllib.parse import unquote, urlparse
+
+            parsed = urlparse(target_uri)
+            path = unquote(parsed.path)
+            if path.startswith("/") and len(path) > 3 and path[2] == ":":
+                # ``/c:/Users/...`` on Windows — drop leading slash.
+                path = path[1:]
+            normalised: List[Dict[str, Any]] = []
+            for te in text_edits:
+                rng = te.get("range", {})
+                start = rng.get("start", {})
+                end = rng.get("end", {})
+                normalised.append(
+                    {
+                        "start_line": start.get("line", 0),
+                        "start_col": start.get("character", 0),
+                        "end_line": end.get("line", 0),
+                        "end_col": end.get("character", 0),
+                        "new_text": te.get("newText", ""),
+                    }
+                )
+            if normalised:
+                edits.setdefault(path, []).extend(normalised)
+
+        if "changes" in result:
+            for target_uri, text_edits in (result.get("changes") or {}).items():
+                _add(target_uri, text_edits or [])
+
+        for doc_change in result.get("documentChanges") or []:
+            target_uri = (
+                doc_change.get("textDocument", {}).get("uri")
+                or doc_change.get("uri", "")
+            )
+            text_edits = doc_change.get("edits") or []
+            if target_uri:
+                _add(target_uri, text_edits)
+
+        return {
+            "edits": edits,
+            "files_touched": len(edits),
+            "new_name": new_name.strip(),
+        }
+
     async def document_symbols(self, file_path: str) -> Dict[str, Any]:
         """Get all symbols in a document."""
         language = self._detect_language(file_path)

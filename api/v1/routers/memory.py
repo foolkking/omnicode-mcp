@@ -6,6 +6,7 @@ Handles memory storage, search, context, and statistics
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
 
 from core import get_memory_manager
 from core.config import get_settings
@@ -274,3 +275,46 @@ async def dedupe_memories():
         })
     except Exception as e:
         return create_error_response(f"Memory dedupe failed: {str(e)}", 500)
+
+
+# ---------------------------------------------------------------------------
+# Memory advisory (Wave 1, gap §10) — proactive recall for code-edit tasks.
+# ---------------------------------------------------------------------------
+class _AdvisoryRequest(BaseModel):
+    """Inputs for :class:`MemoryAdvisor.generate_advisory`."""
+
+    file_path: Optional[str] = None
+    symbol: Optional[str] = None
+    task: Optional[str] = None
+    error_message: Optional[str] = None
+    git_diff: Optional[str] = None
+    max_memories: int = 5
+    max_tokens: int = 800
+
+
+@router.post("/advisory")
+async def generate_memory_advisory(req: _AdvisoryRequest):
+    """Build a concise, multi-angle advisory from past memories.
+
+    Searches by file path, symbol, task description, error message, and
+    git diff (when supplied), deduplicates, and returns a 300–800-token
+    text block plus the IDs of the memories that were referenced. Use
+    this to seed an LLM prompt when the editor is about to modify code
+    that the project has touched before.
+    """
+    from omnicode_core.memory.advisory import MemoryAdvisor
+
+    memory_manager = get_memory_manager()
+    if not memory_manager:
+        return create_error_response("Memory system not initialized", 500)
+    advisor = MemoryAdvisor(memory_manager)
+    result = await advisor.generate_advisory(
+        file_path=req.file_path,
+        symbol=req.symbol,
+        task=req.task,
+        error_message=req.error_message,
+        git_diff=req.git_diff,
+        max_memories=req.max_memories,
+        max_tokens=req.max_tokens,
+    )
+    return create_success_response(result)

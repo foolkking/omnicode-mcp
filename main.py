@@ -64,6 +64,12 @@ def create_app() -> FastAPI:
     from core.rbac_middleware import install as install_rbac
     install_rbac(app)
 
+    # Read-only mode (OMNICODE_READ_ONLY=true). Cheap when off — just a
+    # method check on every request — and complements RBAC's viewer role
+    # for deployments that want EVERY caller treated as read-only.
+    from core.read_only_middleware import install as install_read_only
+    install_read_only(app)
+
     # Register routers — skip static file / web console routers in headless mode
     for router in all_routers:
         # In headless mode, skip the static file router (serves templates/*)
