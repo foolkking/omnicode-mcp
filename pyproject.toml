@@ -45,9 +45,16 @@ dev = [
     "pytest",
     "pytest-asyncio",
 ]
+llm = [
+    "litellm>=1.40.0",
+    "google-generativeai>=0.3.0",
+]
+
+[project.scripts]
+omnicode = "omnicode_adapters.cli.main:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["omnicode"]
+packages = ["omnicode", "omnicode_core", "omnicode_adapters", "omnicode_llm"]
 
 [tool.ruff]
 line-length = 88

@@ -1,0 +1,94 @@
+"""
+OmniCode CLI — unified entry point.
+
+Usage:
+    omnicode init              Initialize .data/ in the current directory
+    omnicode index             Run incremental index
+    omnicode status            Show index and service status
+    omnicode mcp               Start MCP stdio server (for AI editors)
+    omnicode serve             Start HTTP API + Web Console (default)
+    omnicode serve --headless  Start HTTP API only (no Web UI)
+    omnicode serve --console   Start HTTP API + Web Console (explicit)
+    omnicode dev               Start in development mode (console + reload)
+    omnicode doctor            Check environment (Python, LSP, models, ports)
+"""
+
+import argparse
+import sys
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="omnicode",
+        description="OmniCode-MCP — Codebase Intelligence Layer",
+    )
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # --- init ---
+    subparsers.add_parser("init", help="Initialize .data/ directory")
+
+    # --- index ---
+    idx_parser = subparsers.add_parser("index", help="Run incremental index")
+    idx_parser.add_argument("--force", action="store_true", help="Force full rebuild")
+
+    # --- status ---
+    subparsers.add_parser("status", help="Show index and service status")
+
+    # --- mcp ---
+    subparsers.add_parser("mcp", help="Start MCP stdio server")
+
+    # --- serve ---
+    serve_parser = subparsers.add_parser("serve", help="Start HTTP API server")
+    serve_parser.add_argument("--headless", action="store_true", help="No Web UI")
+    serve_parser.add_argument("--console", action="store_true", help="With Web Console (default)")
+    serve_parser.add_argument("--host", default="127.0.0.1", help="Bind host")
+    serve_parser.add_argument("--port", type=int, default=6789, help="Bind port")
+    serve_parser.add_argument("--reload", action="store_true", help="Auto-reload on file changes")
+
+    # --- dev ---
+    dev_parser = subparsers.add_parser("dev", help="Development mode (console + reload)")
+    dev_parser.add_argument("--host", default="127.0.0.1")
+    dev_parser.add_argument("--port", type=int, default=6789)
+
+    # --- doctor ---
+    subparsers.add_parser("doctor", help="Check environment health")
+
+    args = parser.parse_args()
+
+    if args.command is None:
+        parser.print_help()
+        sys.exit(0)
+
+    # Dispatch to command handlers
+    if args.command == "init":
+        from omnicode_adapters.cli.commands.init_cmd import run
+        run()
+    elif args.command == "index":
+        from omnicode_adapters.cli.commands.index_cmd import run
+        run(force=args.force)
+    elif args.command == "status":
+        from omnicode_adapters.cli.commands.status_cmd import run
+        run()
+    elif args.command == "mcp":
+        from omnicode_adapters.cli.commands.mcp_cmd import run
+        run()
+    elif args.command == "serve":
+        from omnicode_adapters.cli.commands.serve_cmd import run
+        run(
+            headless=args.headless,
+            host=args.host,
+            port=args.port,
+            reload=args.reload,
+        )
+    elif args.command == "dev":
+        from omnicode_adapters.cli.commands.serve_cmd import run
+        run(headless=False, host=args.host, port=args.port, reload=True)
+    elif args.command == "doctor":
+        from omnicode_adapters.cli.commands.doctor_cmd import run
+        run()
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()
