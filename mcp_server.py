@@ -131,6 +131,13 @@ async def auto_commit_if_enabled(file_path: str, operation: str, purpose: Option
         return None
 
 
+# =============================================================================
+# HIGH-LEVEL AGGREGATED TOOLS (v2 architecture)
+# These 6+1 tools replace the need for AI clients to pick from 25+ options.
+# =============================================================================
+from omnicode_adapters.mcp_server.high_level_tools import register_high_level_tools
+register_high_level_tools(mcp, make_request)
+
 
 # =============================================================================
 # MCP TOOLS - 8 main tools that proxy to FastAPI
