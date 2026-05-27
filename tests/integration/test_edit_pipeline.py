@@ -18,7 +18,7 @@ What we verify
 from __future__ import annotations
 
 from pathlib import Path
-from typing import AsyncIterator, Dict, List, Optional
+from typing import AsyncIterator, List, Optional
 
 import pytest
 

@@ -9,12 +9,11 @@ labels, url) flow through correctly.
 
 from __future__ import annotations
 
-import io
 import json
 import threading
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import pytest
 

@@ -9,12 +9,6 @@ Covers:
 
 from __future__ import annotations
 
-import asyncio
-import os
-import sys
-from pathlib import Path
-from unittest.mock import patch
-
 import pytest
 
 from omnicode.guard.analyzer import ProactiveGuard
@@ -238,7 +232,6 @@ class TestCppGuardParsing:
         """
         # cppcheck emits relative paths in `file=`, so we run from the file's
         # parent directory. Mimic that here.
-        cwd_target = str(tmp_path / target.name)
         # Patch xml.file to absolute so the filter accepts it
         xml_text = xml_text.replace(
             f'file="{target.name}"', f'file="{str(target).replace(chr(92), "/")}"'

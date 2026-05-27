@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "omnicode": {
+      "command": "E:\\anaconda\\envs\\omnicode-env\\python.exe",
+      "args": [
+        "C:\\Users\\86182\\Documents\\antigravity\\dazzling-heisenberg\\codebase-mcp\\mcp_server.py"
+      ],
+      "env": {
+        "ENV_FILE": "C:\\Users\\86182\\Documents\\antigravity\\dazzling-heisenberg\\codebase-mcp\\.env"
+      }
+    }
+  }
+}
