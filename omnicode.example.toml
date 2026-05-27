@@ -36,6 +36,13 @@ incremental = true
 embedding_device = "cpu"  # "cpu" | "cuda" (advanced)
 embedding_model = "sentence-transformers/all-MiniLM-L6-v2"
 
+[search]
+# Cross-encoder reranker (W2-9). Off by default — adds ~50-200 ms
+# per search call but materially improves top-3 ordering on complex
+# queries. Default model: BAAI/bge-reranker-v2-m3 (~560 MB on first run).
+reranker = false
+# reranker_model = "BAAI/bge-reranker-v2-m3"
+
 [security]
 # Easiest single-key auth: set the legacy header. Anyone presenting
 # ``X-API-Key: <value>`` is treated as authenticated. For multi-user

@@ -90,6 +90,9 @@ _SECTION_KEY_MAP: Dict[tuple[str, str], str] = {
     ("agent", "remote"): "OMNICODE_REMOTE",
     ("agent", "token"): "OMNICODE_AGENT_TOKEN",
     ("agent", "debounce_ms"): "OMNICODE_AGENT_DEBOUNCE_MS",
+    # Reranker (W2-9)
+    ("search", "reranker"): "OMNICODE_RERANKER",
+    ("search", "reranker_model"): "OMNICODE_RERANKER_MODEL",
 }
 
 

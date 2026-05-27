@@ -620,6 +620,16 @@ class SemanticSearchEngine:
                     why_matched=why,
                 ))
 
+            # Optional cross-encoder reranker (Wave 2 W2-9). Toggle via
+            # ``OMNICODE_RERANKER=true``. The reranker is responsible for
+            # tagging promoted items with ``"reranked"`` itself.
+            try:
+                from omnicode_core.search.reranker import get_reranker
+
+                results = get_reranker().rerank(request.query, results)
+            except Exception as exc:
+                logger.debug("Reranker pass skipped: %s", exc)
+
         return results
 
 
