@@ -126,6 +126,13 @@ class UserStore:
                 CREATE INDEX IF NOT EXISTS tokens_by_user ON tokens(username);
                 """
             )
+            # Apply incremental migrations on top (Wave 2 W2-4).
+            from omnicode_core.auth.migrations import (
+                MIGRATIONS_USERS,
+                run_migrations,
+            )
+
+            run_migrations(conn, MIGRATIONS_USERS)
 
     # ------------------------------------------------------------ users
     def list_users(self) -> List[User]:
@@ -178,16 +185,30 @@ class UserStore:
             return cur.rowcount > 0
 
     # ------------------------------------------------------------ tokens
-    def issue_token(self, username: str, label: Optional[str] = None) -> TokenIssued:
+    def issue_token(
+        self,
+        username: str,
+        label: Optional[str] = None,
+        *,
+        expires_in_days: Optional[int] = None,
+    ) -> TokenIssued:
         user = self.get_user(username)
         if user is None:
             raise ValueError(f"unknown user: {username}")
         token = "omn_" + secrets.token_urlsafe(32)
         digest = _hash(token)
+        expires_at: Optional[str] = None
+        if expires_in_days is not None and expires_in_days > 0:
+            from datetime import timedelta
+
+            expires_at = (
+                datetime.now(timezone.utc) + timedelta(days=expires_in_days)
+            ).isoformat()
         with _LOCK, self._connect() as conn:
             conn.execute(
-                "INSERT INTO tokens (token_hash, username, label, created_at) VALUES (?, ?, ?, ?)",
-                (digest, username, label, _now()),
+                "INSERT INTO tokens (token_hash, username, label, created_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (digest, username, label, _now(), expires_at),
             )
             conn.commit()
         return TokenIssued(
@@ -206,17 +227,28 @@ class UserStore:
             conn.commit()
             return cur.rowcount > 0
 
+    def revoke_user_tokens(self, username: str) -> int:
+        """Revoke EVERY token belonging to ``username``. Returns the
+        count. Used for one-click "revoke this departing user"
+        scenarios."""
+        with _LOCK, self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM tokens WHERE username = ?", (username,)
+            )
+            conn.commit()
+            return cur.rowcount
+
     def list_tokens(self, username: Optional[str] = None) -> List[dict]:
         with _LOCK, self._connect() as conn:
             if username:
                 rows = conn.execute(
-                    "SELECT token_hash, username, label, created_at, last_used_at "
+                    "SELECT token_hash, username, label, created_at, last_used_at, expires_at "
                     "FROM tokens WHERE username = ? ORDER BY created_at",
                     (username,),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT token_hash, username, label, created_at, last_used_at "
+                    "SELECT token_hash, username, label, created_at, last_used_at, expires_at "
                     "FROM tokens ORDER BY created_at"
                 ).fetchall()
         return [
@@ -226,6 +258,7 @@ class UserStore:
                 "label": r[2],
                 "created_at": r[3],
                 "last_used_at": r[4],
+                "expires_at": r[5],
             }
             for r in rows
         ]
@@ -233,21 +266,38 @@ class UserStore:
     def authenticate(self, token: str) -> Optional[User]:
         """Return the user associated with ``token`` or None.
 
-        Updates ``last_used_at`` as a side effect (best-effort; failures
-        are swallowed since auth must remain fast).
+        Honours the ``expires_at`` column when present — expired tokens
+        are auto-revoked on first use to avoid stale rows lingering.
+        Updates ``last_used_at`` as a side effect (best-effort).
         """
         if not token:
             return None
         digest = _hash(token)
         with _LOCK, self._connect() as conn:
             row = conn.execute(
-                "SELECT u.username, u.role, u.created_at "
+                "SELECT u.username, u.role, u.created_at, t.expires_at "
                 "FROM tokens t JOIN users u ON t.username = u.username "
                 "WHERE t.token_hash = ?",
                 (digest,),
             ).fetchone()
             if row is None:
                 return None
+            expires_at = row[3]
+            if expires_at:
+                try:
+                    if datetime.fromisoformat(expires_at) < datetime.now(timezone.utc):
+                        # Auto-revoke so the table doesn't accumulate
+                        # zombies; report as if the token never existed.
+                        conn.execute(
+                            "DELETE FROM tokens WHERE token_hash = ?",
+                            (digest,),
+                        )
+                        conn.commit()
+                        return None
+                except ValueError:
+                    # malformed expires_at — treat as if no expiry (don't
+                    # accidentally lock someone out of a fixable bug).
+                    pass
             try:
                 conn.execute(
                     "UPDATE tokens SET last_used_at = ? WHERE token_hash = ?",

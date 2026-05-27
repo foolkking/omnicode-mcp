@@ -11,6 +11,7 @@ Usage:
     omnicode serve --console   Start HTTP API + Web Console (explicit)
     omnicode dev               Start in development mode (console + reload)
     omnicode agent             Local-side file-sync agent (hybrid mode)
+    omnicode rotate-master-key Rotate provider-DB encryption master key
     omnicode doctor            Check environment (Python, LSP, models, ports)
 """
 
@@ -104,6 +105,28 @@ def main():
     # --- doctor ---
     subparsers.add_parser("doctor", help="Check environment health")
 
+    # --- rotate-master-key (Wave 2 W2-4) ---
+    rotate_parser = subparsers.add_parser(
+        "rotate-master-key",
+        help="Rotate the master encryption key for providers.db",
+    )
+    rotate_parser.add_argument(
+        "--db",
+        default=None,
+        help="Path to providers.db (default: ~/.kiro/codebase-mcp/providers.db).",
+    )
+    rotate_parser.add_argument(
+        "--key",
+        default=None,
+        help="Path to providers.key (default: ~/.kiro/codebase-mcp/providers.key).",
+    )
+    rotate_parser.add_argument(
+        "--new-key",
+        default=None,
+        help="Optional Fernet-shaped key bytes (base64). When omitted a "
+        "fresh key is generated.",
+    )
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -148,6 +171,9 @@ def main():
     elif args.command == "doctor":
         from omnicode_adapters.cli.commands.doctor_cmd import run
         run()
+    elif args.command == "rotate-master-key":
+        from omnicode_adapters.cli.commands.rotate_cmd import run as run_rotate
+        run_rotate(db_path=args.db, key_path=args.key, new_key=args.new_key)
     else:
         parser.print_help()
 

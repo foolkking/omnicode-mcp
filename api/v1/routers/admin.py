@@ -35,6 +35,7 @@ class _UpdateRoleBody(BaseModel):
 class _IssueTokenBody(BaseModel):
     username: str
     label: str | None = None
+    expires_in_days: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +107,11 @@ async def list_tokens(username: str | None = None):
 @router.post("/tokens")
 async def issue_token(body: _IssueTokenBody):
     try:
-        issued = get_user_store().issue_token(body.username, body.label)
+        issued = get_user_store().issue_token(
+            body.username,
+            body.label,
+            expires_in_days=body.expires_in_days,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return _ok(
@@ -126,6 +131,20 @@ async def revoke_token(token_hash: str):
     if not get_user_store().revoke_token(token_hash):
         raise HTTPException(status_code=404, detail="token not found")
     return _ok({"revoked": token_hash})
+
+
+@router.delete("/users/{username}/tokens")
+async def revoke_all_user_tokens(username: str):
+    """Revoke every token belonging to ``username`` in one call.
+
+    Use case: an employee left or a laptop was lost — kill the whole
+    user's session set without manually iterating ``/admin/tokens``.
+    """
+    store = get_user_store()
+    if store.get_user(username) is None:
+        raise HTTPException(status_code=404, detail="user not found")
+    count = store.revoke_user_tokens(username)
+    return _ok({"username": username, "revoked": count})
 
 
 __all__ = ["router"]
