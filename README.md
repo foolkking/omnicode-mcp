@@ -217,7 +217,7 @@ hardening checklist.
 
 ## 🔧 MCP tools
 
-Eight core tools registered by default (`OMNICODE_MCP_TOOLS=core`):
+Nine core tools registered by default (`OMNICODE_MCP_TOOLS=core`):
 
 | Tool | What to ask for |
 |---|---|
@@ -228,6 +228,7 @@ Eight core tools registered by default (`OMNICODE_MCP_TOOLS=core`):
 | `omni_context` | "Give me everything I need to explain `create_app`" — composer in one call |
 | `omni_memory` | "Has anyone solved this before in this repo?" — manually-stored memories with multi-angle recall |
 | `omni_patch` | "Apply this patch safely" — preview → validate → apply → rollback, with EditSession id for undo |
+| `omni_skill` | "What's the recommended workflow for a refactor?" — packaged recipes (impact-review, safe-refactor, test-coverage) |
 | `discover_tools` | List the surface and pick the right tool |
 
 Backwards-compatible aliases (still work for older MCP configs):
@@ -342,6 +343,24 @@ code.
 
 Full security model and threat model in
 [`docs/deployment.md`](docs/deployment.md).
+
+---
+
+## 📈 Observability
+
+- **Audit log** — append-only CSV at `~/.kiro/codebase-mcp/audit.log`
+  (override via `OMNICODE_AUDIT_LOG`). Every `/admin/*` mutation and
+  every `/patch/apply` is recorded with `(ts, actor, action, target,
+  ip, outcome, extra)`.
+- **Prometheus metrics** — `GET /monitoring/metrics?format=prometheus`
+  for the standard text format, or `format=json` for a structured
+  shape. No external dependency.
+- **Per-IP rate limit on `/admin/*`** — token bucket, default 30
+  req/min/IP, tune via `OMNICODE_ADMIN_RATE_LIMIT`. Returns 429 with
+  `Retry-After` header.
+- **Idempotency-Key on `/patch/apply`** — pass any stable string;
+  same key + same payload returns the cached response, different
+  payload returns 409. SQLite-backed cache with 24 h TTL.
 
 ---
 

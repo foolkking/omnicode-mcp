@@ -73,35 +73,23 @@ quantisation.
 matryoshka-truncated to 512) and run the A/B harness. Document
 the trade-off in [`usage.md`](usage.md).
 
-### 2 · Skills framework alignment
+### 2 · Skills framework alignment ✅ shipped (P2-B)
 
-**User need.** Anthropic's "Agent Skills" pattern packages a
-*workflow* (prompts + tools + steering files) that the agent
-auto-loads when it sees relevant keywords. Today, AI editors load
-the entire OmniCode tool surface up front; skills could let them
-load only the patch-edit subset for refactor tasks, only the
-search-impact subset for code-review tasks, etc.
+**User need (still relevant).** Anthropic's "Agent Skills" pattern
+packages a *workflow* (prompts + tools + steering files) that the
+agent auto-loads when it sees relevant keywords.
 
-**Approach.**
+**What landed.** ``omnicode_core/skills/`` registers a
+documentation-only skills framework with three first-party
+recipes (``omni-impact-review``, ``omni-safe-refactor``,
+``omni-test-coverage``). The MCP tool ``omni_skill`` lists / shows
+the recipes; the AI editor follows them itself. OmniCode never
+auto-executes a skill, which keeps the trust model simple.
 
-- Define a `skills/` directory schema mirroring Kiro's existing
-  `~/.kiro/skills/`.
-- Ship three first-party skills:
-  - `omni-impact-review` — pulls the impact + risk + advisory
-    bundle for a symbol.
-  - `omni-safe-refactor` — preview / validate / apply / rollback
-    loop with built-in confirmations.
-  - `omni-test-coverage` — runs `/graph/related-tests` and
-    suggests pytest commands.
-- Surface them through MCP via the `discover_tools` tool already
-  present.
-
-**Unknowns.** Cross-client portability — Cursor's MCP currently
-lacks a "skills" concept. May need a vendored manifest format.
-
-**First experiment.** Define the skill manifest and ship one
-example skill plus a smoke test that verifies Kiro auto-activates
-it on keyword match.
+**Open work.** Cross-client portability. Cursor's MCP currently
+lacks a "skills" concept — for now AI editors that want to use
+OmniCode skills call ``omni_skill(action='show', name=…)`` and
+follow the steps manually.
 
 ### 3 · Code-execution sandbox
 
@@ -129,49 +117,46 @@ gated by `OMNICODE_ALLOW_SHELL=true` AND an explicit
 `X-Allow-Sandboxed-Exec` header. Refuse the call on macOS /
 Windows with a clear "platform not supported" error.
 
-### 4 · Telemetry-driven prompt feedback
+### 4 · Telemetry-driven prompt feedback ⚙️ partially shipped (P1-4)
 
-**User need.** Edit sessions are stored locally
-(`<wd>/.data/shards/<id>/edit_sessions/`) but no aggregate
-intelligence is mined from them. We could surface "this prompt
-failed 3 / 5 times in this codebase last week" via the memory
-advisory endpoint.
+**What landed.** Failure ingest — when an LLM-driven `/edit` fails
+and ``OMNICODE_TELEMETRY_INGEST=true``, a ``MISTAKE``-category
+memory is recorded with the instructions excerpt + first 3 failure
+reasons. The Memory Advisor then surfaces it on the next similar
+prompt. Default off for privacy.
 
-**Approach.**
+**Still open.**
 
-- Ingest edit sessions into the existing memory store with
-  category `failed_attempt` / `successful_pattern`.
-- Expose a `/memory/patterns?file=...` endpoint that returns
-  prompt templates that have worked vs failed for similar files.
-- The composer already has the hook (`MemoryAdvisor`); just feed
-  it more.
-
-**Unknowns.** Privacy. A user may not want their prompts mined.
-This must be opt-in per-deployment.
-
-**First experiment.** Prototype the ingestion script, gate behind
-`OMNICODE_TELEMETRY_INGEST=true`, write tests that confirm zero
-ingestion when the flag is unset.
+- ``/memory/patterns?file=...`` endpoint that returns prompt
+  templates that have worked vs failed for similar files.
+- Aggregation across edit-session shards (currently one-row-per-
+  failure, no rollup).
+- Successful-pattern ingest (the success branch already writes a
+  `SOLUTION` memory but doesn't categorise prompt patterns).
 
 ---
 
 ## Known limitations to fix in 1.1
 
-These are smaller polish items that didn't make 1.0 but should
-land before a "ready for production" release:
+All shipped — see commit history `5df92ab` (P2-batch-A), `aa46595`
+(LSP envelopes), `edcd5cf` (failure-memory + no-LLM CI), `681e5d7`
+(skills framework).
 
-- [ ] Per-call rate limit on `/admin/*` (currently unbounded).
-- [ ] Audit log for every admin action (CSV append-only file
-      under `~/.kiro/codebase-mcp/audit.log`).
-- [ ] Better error envelopes from the LSP bridge — today a hung
-      server times out at 30 s with a generic message.
-- [ ] Idempotency keys on `/patch/apply` so a network retry
-      doesn't double-apply.
-- [ ] Gauge metrics endpoint
-      (`/monitoring/metrics?format=prometheus`).
-- [ ] First-class `--mode local-readonly` preset for "demo to a
-      colleague but don't let them write" (today requires manual
-      env vars).
+- [x] Per-call rate limit on `/admin/*` — token-bucket per IP, default
+      30 req/min, tune via `OMNICODE_ADMIN_RATE_LIMIT`.
+- [x] Audit log for admin + patch actions — CSV append-only at
+      `~/.kiro/codebase-mcp/audit.log`, override via
+      `OMNICODE_AUDIT_LOG`.
+- [x] Better error envelopes from the LSP bridge — `LSPTimeout`
+      structured 504 with method / elapsed / hint.
+- [x] Idempotency-Key on `/patch/apply` — SQLite-backed cache, same
+      key + payload → cached response, conflict → 409.
+- [x] Prometheus metrics endpoint — `GET /monitoring/metrics?format=prometheus`
+      (or `format=json`). Counters + histograms, no extra deps.
+- [x] First-class `--mode local-readonly` preset.
+- [x] Auto failure-memory ingest — opt-in via `OMNICODE_TELEMETRY_INGEST`.
+- [x] Skills framework alignment — three first-party skills shipped,
+      drop user manifests under `~/.kiro/skills/`.
 
 ---
 

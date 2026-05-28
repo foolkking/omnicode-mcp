@@ -206,7 +206,7 @@ curl -X POST http://127.0.0.1:6789/intelligence/context \
 
 ## 🔧 MCP 工具
 
-默认 8 个核心工具 (`OMNICODE_MCP_TOOLS=core`):
+默认 9 个核心工具 (`OMNICODE_MCP_TOOLS=core`):
 
 | 工具 | 适合问什么 |
 |---|---|
@@ -217,6 +217,7 @@ curl -X POST http://127.0.0.1:6789/intelligence/context \
 | `omni_context` | "把解释 `create_app` 需要的所有上下文给我" — composer 一次调完 |
 | `omni_memory` | "这个仓库以前有人解决过类似问题吗?" — 用户存入的记忆 + 多角度自动召回 |
 | `omni_patch` | "把这段补丁安全应用上去" — preview → validate → apply → rollback,带 EditSession id 可撤销 |
+| `omni_skill` | "做一次 refactor 推荐的工作流是什么?" — 打包好的 recipe(impact-review / safe-refactor / test-coverage) |
 | `discover_tools` | 列出工具表面,挑一个最合适的 |
 
 向后兼容别名(老 MCP 配置仍能工作):
@@ -316,6 +317,21 @@ ai_edit = true            # LLM 驱动的 /edit 端点;依赖 llm_router
 
 完整安全模型与威胁模型见
 [`docs/deployment.md`](docs/deployment.md)。
+
+---
+
+## 📈 可观测性
+
+- **审计日志** — `~/.kiro/codebase-mcp/audit.log` 上的 append-only CSV
+  (通过 `OMNICODE_AUDIT_LOG` 覆盖)。每个 `/admin/*` 写入和每次
+  `/patch/apply` 都会记录 `(ts, actor, action, target, ip, outcome, extra)`。
+- **Prometheus 指标** — `GET /monitoring/metrics?format=prometheus`
+  返回标准文本格式,或 `format=json` 返回结构化 JSON。零外部依赖。
+- **`/admin/*` 按 IP 限流** — token bucket,默认 30 req/min/IP,通过
+  `OMNICODE_ADMIN_RATE_LIMIT` 调,超限返回 429 + `Retry-After` 头。
+- **`/patch/apply` 支持 Idempotency-Key** — 传任意稳定字符串;相同 key
+  + 相同 payload 返回缓存响应,payload 不同返回 409。SQLite 缓存 24
+  小时 TTL。
 
 ---
 
