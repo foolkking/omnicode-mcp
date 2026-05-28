@@ -63,57 +63,74 @@ async def initialize_services() -> None:
         logger.warning("Could not install log stream handler: %s", exc)
 
     try:
-        # Initialize LLM Router (Model Gateway)
-        from omnicode.config.settings import _user_data_dir, resolve_provider_db_path
-        from omnicode.llm.provider_registry import (
-            get_provider_registry,
-            reset_provider_registry,
-        )
-        from omnicode.llm.provider_selection import (
-            get_provider_selection_store,
-            reset_provider_selection_store,
-        )
-        # Reset module-level singletons so a working-directory switch
-        # actually picks up the new (or shared) DB instead of reusing the
-        # one created on the previous boot.
-        reset_provider_registry()
-        reset_provider_selection_store()
+        # Honour the feature flags from omnicode_core/config/features.py.
+        # When `llm_router` is off the entire LLM stack (provider
+        # registry, router, write/edit pipelines that depend on it) is
+        # skipped — core search / read / patch still works without an
+        # LLM API key.
+        from omnicode_core.config.features import get_features
+        features = get_features()
+        if not features.llm_router:
+            logger.info(
+                "⚡ LLM router disabled by feature flag "
+                "(OMNICODE_LLM_ROUTER=false). Skipping provider registry, "
+                "router, write pipeline and edit pipeline initialization."
+            )
+        else:
+            # Initialize LLM Router (Model Gateway)
+            from omnicode.config.settings import (
+                _user_data_dir,
+                resolve_provider_db_path,
+            )
+            from omnicode.llm.provider_registry import (
+                get_provider_registry,
+                reset_provider_registry,
+            )
+            from omnicode.llm.provider_selection import (
+                get_provider_selection_store,
+                reset_provider_selection_store,
+            )
+            # Reset module-level singletons so a working-directory switch
+            # actually picks up the new (or shared) DB instead of reusing the
+            # one created on the previous boot.
+            reset_provider_registry()
+            reset_provider_selection_store()
 
-        # One-time migration: if the user previously had a project-local
-        # ``<wd>/.data/providers.db`` but no user-level one, copy it up so
-        # their existing API keys are immediately available across all
-        # projects.  Subsequent edits go through the user-level DB.
-        try:
-            import shutil as _shutil
-            from pathlib import Path as _P
-            user_db = _user_data_dir() / "providers.db"
-            project_db = _P(working_dir) / ".data" / "providers.db"
-            if project_db.exists() and not user_db.exists():
-                user_db.parent.mkdir(parents=True, exist_ok=True)
-                _shutil.copy2(project_db, user_db)
-                # Also copy the encryption key so existing rows can be
-                # decrypted with the same SecretBox.
-                project_key = project_db.with_name("providers.key")
-                user_key = user_db.with_name("providers.key")
-                if project_key.exists() and not user_key.exists():
-                    _shutil.copy2(project_key, user_key)
-                logger.info(
-                    "🔁 Migrated provider DB %s → %s (user-level shared store)",
-                    project_db, user_db,
-                )
-        except Exception as exc:
-            logger.warning("Provider DB migration skipped: %s", exc)
+            # One-time migration: if the user previously had a project-local
+            # ``<wd>/.data/providers.db`` but no user-level one, copy it up so
+            # their existing API keys are immediately available across all
+            # projects.  Subsequent edits go through the user-level DB.
+            try:
+                import shutil as _shutil
+                from pathlib import Path as _P
+                user_db = _user_data_dir() / "providers.db"
+                project_db = _P(working_dir) / ".data" / "providers.db"
+                if project_db.exists() and not user_db.exists():
+                    user_db.parent.mkdir(parents=True, exist_ok=True)
+                    _shutil.copy2(project_db, user_db)
+                    # Also copy the encryption key so existing rows can be
+                    # decrypted with the same SecretBox.
+                    project_key = project_db.with_name("providers.key")
+                    user_key = user_db.with_name("providers.key")
+                    if project_key.exists() and not user_key.exists():
+                        _shutil.copy2(project_key, user_key)
+                    logger.info(
+                        "🔁 Migrated provider DB %s → %s (user-level shared store)",
+                        project_db, user_db,
+                    )
+            except Exception as exc:
+                logger.warning("Provider DB migration skipped: %s", exc)
 
-        provider_db = resolve_provider_db_path(working_dir)
-        logger.info(f"📦 Provider registry DB: {provider_db}")
-        get_provider_registry(provider_db)
-        # Selections (role → provider mapping) live next to the registry.
-        from pathlib import Path as _Path
-        selections_db = str(_Path(provider_db).with_name("selections.db"))
-        get_provider_selection_store(selections_db)
-        llm_router = LLMRouter()
-        set_llm_router(llm_router)
-        logger.info("✅ LLM Router (Model Gateway) initialized")
+            provider_db = resolve_provider_db_path(working_dir)
+            logger.info(f"📦 Provider registry DB: {provider_db}")
+            get_provider_registry(provider_db)
+            # Selections (role → provider mapping) live next to the registry.
+            from pathlib import Path as _Path
+            selections_db = str(_Path(provider_db).with_name("selections.db"))
+            get_provider_selection_store(selections_db)
+            llm_router = LLMRouter()
+            set_llm_router(llm_router)
+            logger.info("✅ LLM Router (Model Gateway) initialized")
 
         # Initialize AST Parser (Tree-sitter)
         ast_parser = UnifiedASTParser()
@@ -135,15 +152,23 @@ async def initialize_services() -> None:
         patch_manager = PatchManager(working_dir)
         logger.info("✅ PatchManager initialized (snapshot + rollback layer)")
 
-        # Initialize write pipeline with search engine + patch manager
-        write_pipeline = WritePipeline(search_engine, patch_manager=patch_manager)
-        set_write_pipeline(write_pipeline)
-        logger.info("✅ Write pipeline initialized")
+        if features.llm_router:
+            # WritePipeline / EditPipeline both build an LLMRouter in
+            # their constructors, so they only make sense when the LLM
+            # stack is enabled.  Core safe-edit (PatchManager) above
+            # already works without them via /patch/* endpoints.
+            write_pipeline = WritePipeline(search_engine, patch_manager=patch_manager)
+            set_write_pipeline(write_pipeline)
+            logger.info("✅ Write pipeline initialized")
 
-        # Initialize edit pipeline with write pipeline + patch manager
-        edit_pipeline = EditPipeline(write_pipeline, patch_manager=patch_manager)
-        set_edit_pipeline(edit_pipeline)
-        logger.info("✅ Edit pipeline initialized")
+            edit_pipeline = EditPipeline(write_pipeline, patch_manager=patch_manager)
+            set_edit_pipeline(edit_pipeline)
+            logger.info("✅ Edit pipeline initialized")
+        else:
+            logger.info(
+                "⏭️  Write/Edit pipelines skipped (LLM disabled). "
+                "Use /patch/preview + /patch/apply for safe core edits."
+            )
 
         # Initialize memory manager
         memory_manager = MemoryManager(working_dir + "/.data")
