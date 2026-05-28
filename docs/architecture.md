@@ -91,7 +91,7 @@ For full deployment recipes see [`deployment.md`](deployment.md).
 The "Codebase Intelligence Layer" promise is exactly eight things,
 all shipped, all reachable through three converging entry points
 (`GET /capabilities`, `POST /intelligence/context`, MCP tool
-`omni_intelligence`):
+`omni_context`):
 
 | # | Capability | Module | Highlights |
 |---|---|---|---|

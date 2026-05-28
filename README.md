@@ -43,10 +43,10 @@ every AI editor needs but rarely has all of:
 |---|---|---|---|
 | 1 | **Code understanding** | Tree-sitter AST in 7 languages, multi-mode read (outline / symbols / full / range) | [`omnicode/ast_engine/`](omnicode/ast_engine/) |
 | 2 | **Context compression** | Strip comments, fold function bodies, rank chunks by priority — fits more code in the same prompt | [`omnicode/llm/token_manager.py`](omnicode/llm/token_manager.py) |
-| 3 | **Hybrid search** | Semantic + symbol + text + RRF + `why_matched` so the model sees *why* a hit was retrieved | [`omnicode/search/`](omnicode/search/) |
+| 3 | **Hybrid search** | Semantic + symbol + text fused via RRF (auto-selected for short queries; explicit `mode=hybrid` available). Per-result `why_matched` so the model sees *why* a hit was retrieved | [`omnicode/search/`](omnicode/search/) |
 | 4 | **Impact analysis** | BFS blast radius, callers, callees, risk score, suggested tests | [`omnicode_core/graph/impact.py`](omnicode_core/graph/impact.py) |
 | 5 | **Safe patch ops** | `preview` → `validate` → `apply` → `rollback` with snapshots; the LLM never writes raw files | [`omnicode_core/edit/patch.py`](omnicode_core/edit/patch.py) |
-| 6 | **Memory recall** | Multi-angle advisory derived from past edit sessions (what worked, what failed) | [`omnicode_core/memory/advisory.py`](omnicode_core/memory/advisory.py) |
+| 6 | **Memory recall** | Manually-stored project memories with multi-angle automatic recall before edits (search by file / symbol / task / error / dependency in parallel) | [`omnicode_core/memory/advisory.py`](omnicode_core/memory/advisory.py) |
 | 7 | **Debug console** | Web UI for index health, diff inspection, advisory drawer, edit-session viewer | [`templates/`](templates/) |
 | 8 | **Optional LLM** | Multi-provider router with circuit-breaker, fallback, best-of-N — opt-in via `[llm]` extras | [`omnicode/llm/router.py`](omnicode/llm/router.py) |
 
@@ -82,6 +82,12 @@ pip install -e .                  # core only (no LLM)
 
 Conda users: replace the venv steps with
 `conda create -n omnicode-env python=3.11 -y && conda activate omnicode-env`.
+
+> [!TIP]
+> The core install (no `[llm]` extra) gives you search, impact,
+> patch, memory, MCP, and the web console. Set
+> `OMNICODE_LLM_ROUTER=false` to make the boot path skip the LLM
+> stack entirely — useful when your AI editor brings its own model.
 
 ### Run
 
@@ -211,22 +217,26 @@ hardening checklist.
 
 ## 🔧 MCP tools
 
-Eight high-level tools by default (set `OMNICODE_MCP_TOOLS=core`):
+Eight core tools registered by default (`OMNICODE_MCP_TOOLS=core`):
 
 | Tool | What to ask for |
 |---|---|
-| `omni_search` | "Find where the auth middleware is set up" — semantic + symbol + text fused |
-| `omni_read` | "Show me the outline of `services/billing.py`" — outline / symbols / full / range |
-| `omni_edit` | "Add type hints to `process_order`" — preview → validate → apply → rollback |
-| `omni_analyze` | "What breaks if I rename `User.email`?" — callers, callees, risk, suggested tests |
-| `omni_memory` | "Has anyone solved this before in this repo?" — multi-angle advisory |
+| `omni_search` | "Find where the auth middleware is set up" — semantic / symbol / text / hybrid / LSP references |
+| `omni_read` | "Show me the outline of `services/billing.py`" — outline / symbols / full / range / imports / diagnostics |
+| `omni_impact` | "What breaks if I rename `User.email`?" — callers, callees, risk badge, suggested tests |
+| `omni_diagnostics` | "What's wrong with `api/users.py` right now?" — ruff / mypy / eslint / tsc / LSP diagnostics fused |
 | `omni_context` | "Give me everything I need to explain `create_app`" — composer in one call |
-| `omni_intelligence` | The composer over MCP, structured payload |
-| `discover_tools` | List the full surface and pick the right tool |
+| `omni_memory` | "Has anyone solved this before in this repo?" — manually-stored memories with multi-angle recall |
+| `omni_patch` | "Apply this patch safely" — preview → validate → apply → rollback, with EditSession id for undo |
+| `discover_tools` | List the surface and pick the right tool |
+
+Backwards-compatible aliases (still work for older MCP configs):
+`omni_analyze` → `omni_impact`, `omni_edit` → `omni_patch`,
+`omni_intelligence` → `omni_context`.
 
 Need finer-grained tools? `OMNICODE_MCP_TOOLS=all` exposes 24 (the 8
-high-level ones + 16 lower-level legacy tools); `legacy` exposes only
-the 16 lower-level ones.
+core ones + 16 lower-level legacy tools); `legacy` exposes only the 16
+lower-level ones.
 
 ---
 
@@ -288,6 +298,8 @@ web_console = true
 lsp = true
 memory = true
 safe_edit = true
+llm_router = true         # set false for a no-LLM core install
+ai_edit = true            # LLM-driven /edit endpoint; depends on llm_router
 ```
 
 Full reference — every env var, every TOML key, every precedence rule
@@ -303,6 +315,10 @@ code.
 
 - **Path sandbox** — `..`, absolute paths, out-of-tree symlinks
   rejected on every endpoint.
+- **Safe edits, always** — every write (LLM-driven `/edit`,
+  `intelligent_write`, fallback file ops) routes through PatchManager
+  for a snapshot + EditSession + rollback. The LLM never overwrites
+  your file without leaving a breadcrumb.
 - **Three auth tiers** — single API key, multi-user RBAC
   (admin / editor / viewer), and per-deployment read-only mode that
   composes cleanly.

@@ -40,10 +40,10 @@ LLM 在不了解你仓库的时候,会自信满满地胡说八道。多数编辑
 |---|---|---|---|
 | 1 | **代码理解** | 7 种语言的 Tree-sitter AST,多种读取模式 (outline / symbols / full / range) | [`omnicode/ast_engine/`](omnicode/ast_engine/) |
 | 2 | **上下文压缩** | 剥离注释、折叠函数体、按优先级裁剪 — 同样的 prompt 装下更多代码 | [`omnicode/llm/token_manager.py`](omnicode/llm/token_manager.py) |
-| 3 | **混合搜索** | 语义 + 符号 + 文本 + RRF + `why_matched`,让模型看到命中"原因" | [`omnicode/search/`](omnicode/search/) |
+| 3 | **混合搜索** | 语义 + 符号 + 文本 RRF 融合(短查询自动选 hybrid,也可显式 `mode=hybrid`),每条结果带 `why_matched`,让模型看到命中"原因" | [`omnicode/search/`](omnicode/search/) |
 | 4 | **影响分析** | BFS 影响半径、调用方、被调方、风险评分、推荐测试 | [`omnicode_core/graph/impact.py`](omnicode_core/graph/impact.py) |
 | 5 | **安全打补丁** | `preview` → `validate` → `apply` → `rollback`,LLM 不直接落盘 | [`omnicode_core/edit/patch.py`](omnicode_core/edit/patch.py) |
-| 6 | **记忆召回** | 从历史编辑会话中提炼多视角建议 (哪些方案有效、哪些失败) | [`omnicode_core/memory/advisory.py`](omnicode_core/memory/advisory.py) |
+| 6 | **记忆召回** | 用户主动存入的项目记忆,编辑前按多角度(file/symbol/task/error/dependency)并行召回 | [`omnicode_core/memory/advisory.py`](omnicode_core/memory/advisory.py) |
 | 7 | **调试控制台** | Web UI 看索引健康、diff 检视、advisory 抽屉、编辑会话浏览 | [`templates/`](templates/) |
 | 8 | **可选 LLM** | 多 Provider 路由,熔断器、回退、Best-of-N — 通过 `[llm]` extras 启用 | [`omnicode/llm/router.py`](omnicode/llm/router.py) |
 
@@ -78,6 +78,11 @@ pip install -e .                  # 仅核心(不含 LLM)
 
 Conda 用户把 venv 那两行换成
 `conda create -n omnicode-env python=3.11 -y && conda activate omnicode-env`。
+
+> [!TIP]
+> 不带 `[llm]` extra 的核心安装就提供 search / impact / patch / memory / MCP / Web 控制台。
+> 设置 `OMNICODE_LLM_ROUTER=false` 让启动路径完全跳过 LLM 栈 — AI 编辑器
+> 自带模型时这是最干净的部署形态。
 
 ### 运行
 
@@ -201,20 +206,24 @@ curl -X POST http://127.0.0.1:6789/intelligence/context \
 
 ## 🔧 MCP 工具
 
-默认 8 个高层工具 (`OMNICODE_MCP_TOOLS=core`):
+默认 8 个核心工具 (`OMNICODE_MCP_TOOLS=core`):
 
 | 工具 | 适合问什么 |
 |---|---|
-| `omni_search` | "帮我找到 auth 中间件在哪初始化" — 语义 + 符号 + 文本融合 |
-| `omni_read` | "给我 `services/billing.py` 的大纲" — outline / symbols / full / range |
-| `omni_edit` | "给 `process_order` 加上类型标注" — preview → validate → apply → rollback |
-| `omni_analyze` | "我把 `User.email` 重命名了会炸什么?" — 调用方、被调方、风险、推荐测试 |
-| `omni_memory` | "这个仓库以前有人解决过类似问题吗?" — 多视角 advisory |
+| `omni_search` | "帮我找到 auth 中间件在哪初始化" — 语义 / 符号 / 文本 / hybrid / LSP references |
+| `omni_read` | "给我 `services/billing.py` 的大纲" — outline / symbols / full / range / imports / diagnostics |
+| `omni_impact` | "我把 `User.email` 重命名了会炸什么?" — 调用方、被调方、风险徽章、推荐测试 |
+| `omni_diagnostics` | "`api/users.py` 现在有什么问题?" — ruff / mypy / eslint / tsc / LSP 诊断融合 |
 | `omni_context` | "把解释 `create_app` 需要的所有上下文给我" — composer 一次调完 |
-| `omni_intelligence` | composer 在 MCP 上的版本,返回结构化 payload |
-| `discover_tools` | 列出全部工具表面,挑一个最合适的 |
+| `omni_memory` | "这个仓库以前有人解决过类似问题吗?" — 用户存入的记忆 + 多角度自动召回 |
+| `omni_patch` | "把这段补丁安全应用上去" — preview → validate → apply → rollback,带 EditSession id 可撤销 |
+| `discover_tools` | 列出工具表面,挑一个最合适的 |
 
-需要更细粒度的工具? `OMNICODE_MCP_TOOLS=all` 暴露 24 个(8 个高层 + 16 个
+向后兼容别名(老 MCP 配置仍能工作):
+`omni_analyze` → `omni_impact`,`omni_edit` → `omni_patch`,
+`omni_intelligence` → `omni_context`。
+
+需要更细粒度的工具? `OMNICODE_MCP_TOOLS=all` 暴露 24 个(8 个核心 + 16 个
 低层旧版); `legacy` 只暴露 16 个低层。
 
 ---
@@ -272,6 +281,8 @@ web_console = true
 lsp = true
 memory = true
 safe_edit = true
+llm_router = true         # 设 false 走纯核心(无 LLM)安装
+ai_edit = true            # LLM 驱动的 /edit 端点;依赖 llm_router
 ```
 
 完整参考 — 每个 env 变量、每个 TOML 键、每条优先级规则 — 都在
@@ -285,6 +296,9 @@ safe_edit = true
 全部八层 — 用的是同一份代码。
 
 - **路径沙箱** — `..`、绝对路径、出树 symlink 在每个端点都被拒。
+- **写入永远走 PatchManager** — LLM 驱动的 `/edit`、智能 `write`、
+  fallback 文件操作全部经 PatchManager,自带 snapshot + EditSession +
+  rollback。LLM 不会在不留 breadcrumb 的情况下覆盖你的文件。
 - **三档鉴权** — 单 API key、多用户 RBAC (admin / editor / viewer)、
   per-deployment 只读模式,可以叠着用。
 - **provider key 加密落盘** — `~/.kiro/codebase-mcp/providers.db` 用 Fernet

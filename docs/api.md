@@ -607,7 +607,7 @@ Registered by `mcp_server.py` via `FastMCP`. Tunable surface:
 
 | `OMNICODE_MCP_TOOLS` | Tools registered | Total |
 |---|---|---|
-| `core` (default) | omni_search, omni_read, omni_edit, omni_analyze, omni_memory, omni_context, omni_intelligence, discover_tools | **8** |
+| `core` (default) | omni_search, omni_read, omni_impact, omni_diagnostics, omni_context, omni_memory, omni_patch, discover_tools | **8** |
 | `all` | core + 16 legacy | 24 |
 | `legacy` | 16 legacy only | 16 |
 
@@ -615,14 +615,22 @@ Registered by `mcp_server.py` via `FastMCP`. Tunable surface:
 
 | Tool | Notes |
 |---|---|
-| `omni_search(query, mode="auto")` | semantic / symbol / text / git / memory in one |
+| `omni_search(query, mode="auto")` | semantic / symbol / text / hybrid / references in one |
 | `omni_read(file, mode="outline")` | wraps the multi-mode `/read` endpoint |
-| `omni_edit(action="preview", ...)` | preview / validate / apply / rollback |
-| `omni_analyze(symbol, analysis="impact")` | callers / callees / impact / risk |
+| `omni_impact(symbol, depth=2)` | callers / callees / risk / suggested tests (parallel calls) |
+| `omni_diagnostics(file, sources)` | guard (ruff/eslint/...) + LSP diagnostics fused |
 | `omni_memory(action="search", ...)` | store / search / context / advisory |
 | `omni_context(file, symbol)` | full context dossier for one file+symbol |
-| `omni_intelligence(task, file, symbol, query, ...)` | full eight-capability composer |
-| `discover_tools(query)` | runtime catalog with filters |
+| `omni_patch(action="preview", ...)` | preview / validate / apply / rollback / sessions |
+| `discover_tools(query="")` | list / search the tool surface |
+
+Backwards-compat aliases (still register but redirect):
+
+| Alias | Replacement |
+|---|---|
+| `omni_analyze` | `omni_impact` |
+| `omni_edit`    | `omni_patch` |
+| `omni_intelligence` | `omni_context` |
 
 ### Transports
 

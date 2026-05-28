@@ -147,8 +147,8 @@ Helper scripts in `scripts/` (`run.bat`/`.sh`, `run-dev.bat`/`.sh`,
         "HF_HUB_OFFLINE": "1"
       },
       "autoApprove": [
-        "omni_search", "omni_read", "omni_analyze",
-        "omni_memory", "omni_context", "omni_intelligence",
+        "omni_search", "omni_read", "omni_impact",
+        "omni_diagnostics", "omni_memory", "omni_context",
         "discover_tools"
       ]
     }
@@ -157,7 +157,7 @@ Helper scripts in `scripts/` (`run.bat`/`.sh`, `run-dev.bat`/`.sh`,
 ```
 
 `autoApprove` is a Kiro convention — read-only tools don't need
-per-call confirmation. Keep `omni_edit` out of the list so writes
+per-call confirmation. Keep `omni_patch` out of the list so writes
 still prompt.
 
 ### Claude Desktop
@@ -189,9 +189,9 @@ All accept the same shape via their MCP config UIs. Use the same
 `command` + `args`. Continue's MCP integration also accepts SSE if
 you'd rather run `mcp_server.py --transport sse --port 6790`.
 
-By default 8 high-level tools are registered (`omni_search`,
-`omni_read`, `omni_edit`, `omni_analyze`, `omni_memory`,
-`omni_context`, `omni_intelligence`, `discover_tools`). Set
+By default 8 core tools are registered (`omni_search`,
+`omni_read`, `omni_impact`, `omni_diagnostics`, `omni_context`,
+`omni_memory`, `omni_patch`, `discover_tools`). Set
 `OMNICODE_MCP_TOOLS=all` if you also need the legacy 16
 fine-grained tools.
 
@@ -242,7 +242,7 @@ key is optional.
 |---|---|---|
 | `web_console` | `OMNICODE_WEB_CONSOLE` | `true` |
 | `mcp_http` | `OMNICODE_MCP_HTTP` | `false` |
-| `llm_router` | `OMNICODE_LLM_ROUTER` | `false` |
+| `llm_router` | `OMNICODE_LLM_ROUTER` | `true` |
 | `lsp` | `OMNICODE_LSP` | `true` |
 | `memory` | `OMNICODE_MEMORY` | `true` |
 | `safe_edit` | `OMNICODE_SAFE_EDIT` | `true` |
@@ -553,8 +553,32 @@ llm_router = false
 ai_edit = false
 ```
 
-The `[llm]` extras stay installed but unused; the capability
-fingerprint reports the feature off.
+Or set environment variables:
+
+```bash
+export OMNICODE_LLM_ROUTER=false
+export OMNICODE_AI_EDIT=false
+```
+
+When `llm_router=false` the boot path skips:
+
+- the provider registry (no SQLite writes for providers/selections)
+- the `LLMRouter`
+- `WritePipeline` and `EditPipeline` (they require the router)
+
+Everything else still works:
+
+- `/search/*`, `/read/*`, `/patch/preview`, `/patch/validate`,
+  `/patch/apply`, `/patch/rollback`
+- LSP bridge (`/lsp/*`)
+- Memory (`/memory/*`)
+- Impact analysis (`/graph/*`)
+- All eight high-level MCP tools (the LLM-dependent code paths inside
+  `/edit` return a clean error rather than crashing).
+
+This is the recommended posture when your AI editor (Claude / Cursor /
+Copilot) brings its own model and just calls OmniCode-MCP for code
+intelligence.
 
 ---
 
