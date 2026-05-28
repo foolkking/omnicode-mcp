@@ -216,8 +216,27 @@ class EditPipeline:
 
         # ---- 1. Build context items (instructions, sketch, original, blame, history, memory)
         keep_symbols = self._guess_keep_symbols(request.code_edit)
+
+        # P1-3: ask LSP to verify which mentioned identifiers are real
+        # workspace symbols. The LSP-augmented list takes precedence over
+        # the regex guesser when LSP is available; falls back gracefully.
+        regex_candidates: List[str] = list(keep_symbols)
+        for n in self._extract_mentioned_symbols(request.instructions or ""):
+            if n not in regex_candidates:
+                regex_candidates.append(n)
+        prefetched_symbols: Optional[List[str]] = None
+        if regex_candidates:
+            try:
+                prefetched_symbols = await self._lsp_workspace_symbol_lookup(
+                    regex_candidates, language,
+                )
+            except Exception as exc:
+                logger.debug("LSP symbol prefetch failed (fall back to regex): %s", exc)
+                prefetched_symbols = None
+
         items = self._build_base_context(
-            request, original_content, language, keep_symbols
+            request, original_content, language, keep_symbols,
+            prefetched_symbols=prefetched_symbols,
         )
 
         # Long-term memory injection (STAGE 7.5)
@@ -374,6 +393,7 @@ class EditPipeline:
         original_content: str,
         language: str,
         keep_symbols: List[str],
+        prefetched_symbols: Optional[List[str]] = None,
     ) -> List[ContextItem]:
         file_path = request.target_file
         items: List[ContextItem] = [
@@ -411,6 +431,7 @@ class EditPipeline:
             original_content=original_content,
             language=language,
             keep_symbols=keep_symbols,
+            prefetched_symbols=prefetched_symbols,
         )
         for anchor in anchors:
             items.append(
@@ -964,6 +985,76 @@ class EditPipeline:
             _push(m.group(1))
         return candidates[:8]
 
+    async def _lsp_workspace_symbol_lookup(
+        self, ident_candidates: List[str], language: str
+    ) -> List[str]:
+        """Verify which of ``ident_candidates`` are real workspace symbols.
+
+        We ask the LSP bridge ``workspace_symbols`` for each candidate.
+        Anything LSP knows about is promoted to the front of the
+        returned list (in the order LSP returned them); regex-only
+        guesses keep their relative order at the back.
+
+        Failure modes are silent:
+          - LSP server not installed → returns the input unchanged
+          - LSP timeout / error      → same
+          - language not supported   → same
+
+        Net effect: when LSP is up the AI gets symbol anchors that are
+        guaranteed to exist in the project; when LSP is down we fall
+        through to the regex behaviour we shipped in P0-3 (still
+        correct, just less precise).
+        """
+        if not ident_candidates:
+            return ident_candidates
+        try:
+            from omnicode_core.lsp.bridge import LSPBridge  # noqa: PLC0415
+            # Lazy import + a fresh bridge per call — the bridge is
+            # cheap to instantiate and we don't want to leak state
+            # across edits when the user switches workspaces.
+            bridge = LSPBridge(working_dir=os.getcwd())
+        except Exception as exc:
+            logger.debug("LSP workspace_symbols init skipped: %s", exc)
+            return ident_candidates
+
+        verified: List[str] = []
+        seen: set = set()
+        for name in ident_candidates:
+            try:
+                # workspace_symbols is best-effort. A short timeout
+                # so we never block the LLM call for a sluggish server.
+                import asyncio  # noqa: PLC0415
+                result = await asyncio.wait_for(
+                    bridge.workspace_symbols(name), timeout=2.0,
+                )
+            except (asyncio.TimeoutError, Exception) as exc:  # noqa: BLE001
+                logger.debug(
+                    "LSP workspace_symbols('%s') failed: %s", name, exc,
+                )
+                continue
+            if not result or "symbols" not in result:
+                continue
+            for sym in (result.get("symbols") or [])[:5]:
+                sym_name = sym.get("name", "")
+                if sym_name and sym_name not in seen:
+                    verified.append(sym_name)
+                    seen.add(sym_name)
+
+        if not verified:
+            return ident_candidates
+
+        # Promote LSP-verified names to the front; keep the rest in their
+        # original order behind. Cap at 8.
+        promoted = verified[:]
+        for n in ident_candidates:
+            if n not in seen:
+                promoted.append(n)
+        logger.debug(
+            "LSP workspace_symbols: %d input → %d verified, %d total",
+            len(ident_candidates), len(verified), len(promoted),
+        )
+        return promoted[:8]
+
     def _collect_symbol_anchors(
         self,
         *,
@@ -971,6 +1062,7 @@ class EditPipeline:
         original_content: str,
         language: str,
         keep_symbols: List[str],
+        prefetched_symbols: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """For every symbol mentioned by the user, extract its verbatim source.
 
@@ -978,13 +1070,22 @@ class EditPipeline:
         ready to be wrapped in ContextItem.  Empty list when AST parsing
         fails or no symbols match — the rest of the pipeline gracefully
         degrades to whole-file mode in that case.
+
+        When ``prefetched_symbols`` is provided (e.g. an LSP-verified
+        list from process_edit), it is used as the candidate pool and
+        the regex extractor is skipped. Falling back to regex when
+        prefetched_symbols is None preserves backward-compatible
+        behaviour for callers that don't have an async context.
         """
-        # Pool of candidate names: explicit ``def foo`` markers from the
-        # sketch, plus every identifier-shaped word in the instructions.
-        candidates: List[str] = list(keep_symbols or [])
-        for n in self._extract_mentioned_symbols(request.instructions or ""):
-            if n not in candidates:
-                candidates.append(n)
+        # Pool of candidate names: prefetched LSP list takes precedence;
+        # otherwise fall back to keep_symbols + the regex extractor.
+        if prefetched_symbols is not None:
+            candidates: List[str] = list(prefetched_symbols)
+        else:
+            candidates = list(keep_symbols or [])
+            for n in self._extract_mentioned_symbols(request.instructions or ""):
+                if n not in candidates:
+                    candidates.append(n)
         if not candidates:
             return []
 
