@@ -37,6 +37,45 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+
+class LSPTimeout(TimeoutError):
+    """Structured timeout error from the LSP bridge.
+
+    Carries enough context (method name, configured timeout, elapsed
+    time before giving up) for the API layer to render a useful error
+    envelope rather than the generic ``"request timed out"`` blob the
+    bridge used to emit. Covers the audit's "Better error envelopes
+    from the LSP bridge" 1.1 polish item.
+    """
+
+    def __init__(self, *, method: str, timeout: float, elapsed: float) -> None:
+        self.method = method
+        self.timeout = timeout
+        self.elapsed = elapsed
+        super().__init__(
+            f"LSP request '{method}' timed out after "
+            f"{elapsed:.1f}s (limit {timeout:.1f}s). "
+            "The language server may be cold-starting on a large "
+            "project, or stuck on an indexing pass. Retry once; if "
+            "it persists, check the LSP server's own logs."
+        )
+
+    def to_envelope(self) -> Dict[str, Any]:
+        """Serializable shape for /lsp/* error responses."""
+        return {
+            "error": "lsp_timeout",
+            "method": self.method,
+            "timeout_seconds": self.timeout,
+            "elapsed_seconds": round(self.elapsed, 2),
+            "message": str(self),
+            "hint": (
+                "Increase OMNICODE_LSP_REQUEST_TIMEOUT (seconds) if your "
+                "project is large, or check the language server is "
+                "actually responding (some servers stall on first index)."
+            ),
+        }
+
+
 # Language → server command mapping
 LSP_SERVERS: Dict[str, Dict[str, Any]] = {
     "python": {
@@ -654,8 +693,23 @@ class _LSPConnection:
     def is_alive(self) -> bool:
         return self.process is not None and self.process.returncode is None
 
-    async def request(self, method: str, params: Dict) -> Any:
-        """Send a request and wait for the response."""
+    async def request(self, method: str, params: Dict, timeout: Optional[float] = None) -> Any:
+        """Send a request and wait for the response.
+
+        Raises :class:`LSPTimeout` on timeout — carries ``method``,
+        ``timeout``, ``elapsed`` so callers can render a structured
+        envelope.
+
+        ``timeout`` defaults to ``OMNICODE_LSP_REQUEST_TIMEOUT`` env
+        var (seconds, decimal) or 30s when unset.
+        """
+        import time as _time
+        if timeout is None:
+            try:
+                timeout = float(os.environ.get("OMNICODE_LSP_REQUEST_TIMEOUT", "30"))
+            except (TypeError, ValueError):
+                timeout = 30.0
+
         self._msg_id += 1
         msg_id = self._msg_id
 
@@ -670,12 +724,16 @@ class _LSPConnection:
         self._pending[msg_id] = future
 
         await self._send(message)
+        started = _time.monotonic()
 
         try:
-            return await asyncio.wait_for(future, timeout=30.0)
+            return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError as exc:
             self._pending.pop(msg_id, None)
-            raise TimeoutError(f"LSP request {method} timed out") from exc
+            elapsed = _time.monotonic() - started
+            raise LSPTimeout(
+                method=method, timeout=timeout, elapsed=elapsed,
+            ) from exc
 
     async def notify(self, method: str, params: Dict):
         """Send a notification (no response expected)."""
