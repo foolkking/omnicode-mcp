@@ -2,7 +2,8 @@
 Request models for API endpoints
 """
 
-from typing import Optional, List
+from typing import List, Optional
+
 from pydantic import BaseModel, Field
 
 
@@ -36,6 +37,16 @@ class EditRequestAPI(BaseModel):
     )
     save_to_file: bool = Field(
         True, description="Whether to save to file after processing"
+    )
+    dry_run: bool = Field(
+        False,
+        description=(
+            "When true, the LLM still runs but the result is NOT written to "
+            "disk. The response carries a unified diff under `preview_diff` "
+            "so the caller can review and decide whether to re-run with "
+            "dry_run=false. Equivalent to save_to_file=false plus the preview "
+            "payload."
+        ),
     )
 
 

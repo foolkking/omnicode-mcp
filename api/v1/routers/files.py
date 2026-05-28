@@ -309,10 +309,16 @@ async def intelligent_edit(request: EditRequestAPI):
             language=request.language,
         )
 
+        # When dry_run is requested, force save_to_file off so the LLM
+        # output never lands on disk. The diff still gets surfaced via
+        # `preview_diff` below so the AI editor can show the user the
+        # change and decide whether to re-run with dry_run=false.
+        effective_save = request.save_to_file and not request.dry_run
+
         # Process through edit pipeline
         try:
             result = await edit_pipeline.process_edit(
-                request=edit_request, save_to_file=request.save_to_file
+                request=edit_request, save_to_file=effective_save
             )
         except Exception as pipeline_error:
             return create_detailed_error_response(
@@ -360,7 +366,38 @@ async def intelligent_edit(request: EditRequestAPI):
             },
             "edit_session_id": getattr(result, "edit_session_id", None),
             "rollback_available": bool(getattr(result, "edit_session_id", None)),
+            "dry_run": request.dry_run,
         }
+
+        # In dry-run mode, attach a unified diff so the AI editor can
+        # show the user what *would* have changed without anything
+        # actually being written to disk.
+        if request.dry_run and result.original_content is not None:
+            import difflib
+            diff_lines = list(difflib.unified_diff(
+                result.original_content.splitlines(keepends=True),
+                result.final_content.splitlines(keepends=True),
+                fromfile=f"a/{request.target_file}",
+                tofile=f"b/{request.target_file}",
+                n=3,
+            ))
+            response_data["preview_diff"] = "".join(diff_lines)
+            # Lines summary for token-conscious clients
+            added = sum(
+                1 for line in diff_lines
+                if line.startswith("+") and not line.startswith("+++")
+            )
+            removed = sum(
+                1 for line in diff_lines
+                if line.startswith("-") and not line.startswith("---")
+            )
+            response_data["preview_summary"] = {
+                "lines_added": added,
+                "lines_removed": removed,
+                "no_changes": (
+                    result.original_content == result.final_content
+                ),
+            }
 
         if result.success:
             return create_success_response(response_data)

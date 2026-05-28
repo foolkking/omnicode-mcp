@@ -131,6 +131,14 @@ async def text_search(
     case_sensitive: bool = Query(False, description="Case sensitive search"),
     max_results: int = Query(50, description="Maximum results"),
     context_lines: int = Query(2, description="Lines of context before/after each hit"),
+    merge_adjacent: bool = Query(
+        True,
+        description=(
+            "When true (default), hits within 2*context_lines of each other "
+            "in the same file fold into one record. Set false to keep every "
+            "match as a separate row."
+        ),
+    ),
 ):
     """Line-level text search across the workspace.
 
@@ -160,6 +168,7 @@ async def text_search(
             context_lines=context_lines,
             use_regex=use_regex,
             case_sensitive=case_sensitive,
+            merge_adjacent=merge_adjacent,
         )
 
         results = []

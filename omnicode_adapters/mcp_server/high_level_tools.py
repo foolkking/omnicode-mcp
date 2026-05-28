@@ -134,14 +134,20 @@ async def _run_symbol(
 
 
 async def _run_text(
-    make_request, query: str, file_pattern: Optional[str], max_results: int
+    make_request, query: str, file_pattern: Optional[str], max_results: int,
+    flat: bool = False,
 ) -> Tuple[List[Dict[str, Any]], int]:
-    """Line-level grep across the workspace."""
+    """Line-level grep across the workspace.
+
+    When ``flat=True`` the backend disables adjacent-line merging so
+    every matched line shows up as its own result row.
+    """
     params = {
         "query": query,
         "file_pattern": file_pattern or _DEFAULT_TEXT_GLOBS,
         "max_results": max_results,
         "context_lines": 2,
+        "merge_adjacent": (not flat),
     }
     raw = await make_request("POST", "/search/text", params=params)
     data = raw.get("result", raw) if isinstance(raw, dict) else {}
@@ -477,6 +483,7 @@ def register_high_level_tools(mcp, make_request):
         rerank: bool = True,
         token_budget: int = 0,
         around_file: Optional[str] = None,
+        flat: bool = False,
     ) -> str:
         """Search the codebase with adaptive mode selection.
 
@@ -499,6 +506,9 @@ def register_high_level_tools(mcp, make_request):
           - around_file:   bias results toward this file's neighbourhood (callgraph
                            hops + same directory). Other files still appear, just
                            lower in rank.
+          - flat:          when true, disable adjacent-line merging in text mode.
+                           Each matching line becomes its own result. Useful when
+                           the AI wants to post-process every hit individually.
 
         Returns plain text in a structured layout: per-result file + line, kind,
         score, why_matched tags, and (when budget allows) ±2 lines of code.
@@ -522,7 +532,8 @@ def register_high_level_tools(mcp, make_request):
                 )
             elif resolved_mode == "text":
                 results, total = await _run_text(
-                    make_request, query, file_pattern, max_results
+                    make_request, query, file_pattern, max_results,
+                    flat=flat,
                 )
             elif resolved_mode == "references":
                 results, total = await _run_references(make_request, query, max_results)
@@ -1216,12 +1227,16 @@ def register_high_level_tools(mcp, make_request):
         patch: Optional[str] = None,
         instructions: Optional[str] = None,
         session_id: Optional[str] = None,
+        dry_run: bool = False,
     ) -> str:
         """[deprecated alias] Use omni_patch for safe edits.
 
         Actions:
           - preview / validate / apply / rollback: delegate to omni_patch
-          - ai_edit: LLM-driven edit (only when OMNICODE_LLM_ROUTER=true)
+          - ai_edit: LLM-driven edit (only when OMNICODE_LLM_ROUTER=true).
+                     When ``dry_run=True`` the LLM still runs but no
+                     write happens — the response carries a unified
+                     diff under preview_diff so you can show the user.
 
         Kept so older MCP configs don't break.
         """
@@ -1233,12 +1248,34 @@ def register_high_level_tools(mcp, make_request):
                     "target_file": file,
                     "instructions": instructions,
                     "code_edit": patch or "#",
-                    "save_to_file": True,
+                    "save_to_file": not dry_run,
+                    "dry_run": dry_run,
                 })
                 if "error" in result:
                     return f"❌ Edit error: {result['error']}"
                 data = result.get("result", result)
                 success = data.get("success", False)
+                # Dry-run: show the preview diff regardless of success
+                if dry_run:
+                    diff = data.get("preview_diff", "")
+                    summary = data.get("preview_summary", {}) or {}
+                    if summary.get("no_changes"):
+                        return f"⚪ Dry run: LLM produced no changes for {file}"
+                    diff_lines = diff.splitlines()
+                    if len(diff_lines) > 80:
+                        diff = "\n".join(diff_lines[:80]) + (
+                            f"\n... ({len(diff_lines) - 80} more diff lines)"
+                        )
+                    a = summary.get("lines_added", 0)
+                    r = summary.get("lines_removed", 0)
+                    return (
+                        f"📋 Dry-run preview for {file}\n"
+                        f"   +{a} / -{r} lines (no write performed)\n\n"
+                        f"{diff}\n\n"
+                        f"   Re-run with dry_run=False to apply, or "
+                        f"omni_patch(action='preview', file=…, content=…) "
+                        f"to render externally."
+                    )
                 if success:
                     score = data.get("quality_score", 0)
                     sid = data.get("edit_session_id")
