@@ -86,10 +86,26 @@ class SemanticSearchEngine:
     """
     Bridges the legacy SemanticSearchEngine to the new hybrid Tree-sitter + FAISS + SentenceTransformers search architecture.
     """
-    def __init__(self, working_dir: str):
+    def __init__(self, working_dir: str, shard_id: Optional[str] = None):
         self.working_dir = os.path.abspath(working_dir)
-        self.db_dir = os.path.join(self.working_dir, ".data")
-        os.makedirs(self.db_dir, exist_ok=True)
+
+        # Sharding (Wave 2 W2-10). When ``shard_id`` is omitted the
+        # engine mounts the default shard so existing single-tenant
+        # mounts keep working. Multi-tenant cloud deployments pick a
+        # shard id per registered workspace and route reads/writes
+        # accordingly.
+        from omnicode_core.index.sharding import (
+            DEFAULT_SHARD_ID,
+            auto_migrate_legacy,
+            resolve_shard_dir,
+        )
+
+        self.shard_id = shard_id or DEFAULT_SHARD_ID
+        # First-run migration only matters for the default shard;
+        # named shards are always created fresh.
+        if self.shard_id == DEFAULT_SHARD_ID:
+            auto_migrate_legacy(self.working_dir)
+        self.db_dir = resolve_shard_dir(self.working_dir, self.shard_id)
 
         # Instantiate Omnicode modules
         self.ast_parser = UnifiedASTParser()

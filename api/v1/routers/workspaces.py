@@ -74,9 +74,27 @@ async def add_workspace(body: _AddBody):
 
 @router.delete("/{workspace_id}")
 async def remove_workspace(workspace_id: str):
-    ok = get_workspace_registry().remove(workspace_id)
+    registry = get_workspace_registry()
+    target = registry.get(workspace_id)
+    ok = registry.remove(workspace_id)
     if not ok:
         raise HTTPException(status_code=404, detail="workspace not found")
+
+    # Drop the per-workspace FAISS shard so the disk footprint matches
+    # the registry. Best-effort — log but don't fail the API call.
+    if target is not None:
+        try:
+            from omnicode_core.index.sharding import drop_shard
+
+            drop_shard(target.path, workspace_id)
+        except ValueError:
+            # drop_shard refuses to drop the default shard; that's
+            # fine — only named shards represent registered workspaces.
+            pass
+        except Exception as exc:
+            # Disk error / shard already gone — note it but don't
+            # roll back the registry change.
+            print(f"[workspaces] shard cleanup skipped: {exc}")
     return _ok({"removed": workspace_id})
 
 
