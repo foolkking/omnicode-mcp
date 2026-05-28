@@ -1,8 +1,8 @@
 # API Reference
 
-> Generated against `foolkking/main` head `096edb4`. The live OpenAPI
-> schema is always at `http://<host>:<port>/docs` and `/openapi.json`
-> when the server is running.
+> Complete catalogue of REST endpoints and MCP tools. The live
+> OpenAPI schema is always at `http://<host>:<port>/docs` and
+> `/openapi.json` when the server is running.
 >
 > Every successful response uses the envelope:
 >

@@ -1,6 +1,6 @@
 """Intelligence Layer endpoint — single-call, eight-capability orchestration.
 
-Implements architecture-v2.md §17. AI editors call this once and get
+Implements architecture.md §17. AI editors call this once and get
 back a structured payload combining the eight capabilities so they can
 construct an LLM prompt without making 8 round-trips of their own.
 

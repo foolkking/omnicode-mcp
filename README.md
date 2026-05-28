@@ -148,7 +148,7 @@ curl -X POST http://127.0.0.1:6789/patch/preview \
 | **cloud** | This machine (mirror) | Index, search, LSP, ~edit~ | writes OFF, apply OFF |
 | **hybrid** | User's local box | Index + search + memory + graph; agent pushes file bodies | writes ON via agent, apply OFF |
 
-For real cloud deployment see [`docs/cloud-deployment.md`](docs/cloud-deployment.md).
+For real cloud deployment see [`docs/deployment.md`](docs/deployment.md).
 
 ## Architecture
 
@@ -201,27 +201,20 @@ For real cloud deployment see [`docs/cloud-deployment.md`](docs/cloud-deployment
 The split between `omnicode/` (legacy, has LLM deps) and
 `omnicode_core/` (clean v2 layer) lets us keep LLM features as opt-in
 extras without breaking older callers. See
-[`docs/architecture-v2.md`](docs/architecture-v2.md) for the full
+[`docs/architecture.md`](docs/architecture.md) for the full
 rationale.
 
 ## Documentation
 
-Start here, in order:
+Five docs, no maze:
 
 | Doc | What it covers |
 |---|---|
-| [`docs/features.md`](docs/features.md) | **Feature inventory** — every endpoint, every CLI command, every config key, persistence layout, module map. |
-| [`docs/architecture-v2.md`](docs/architecture-v2.md) | Architecture rationale; long-form §1-§17 design decisions. |
-| [`docs/api-reference.md`](docs/api-reference.md) | Full REST + MCP catalog with request / response shapes. |
-| [`docs/configuration.md`](docs/configuration.md) | Every env var + TOML key + precedence rules. |
-| [`docs/security.md`](docs/security.md) | Sandbox, RBAC, key rotation, read-only mode, MCP-over-HTTP auth. |
-| [`docs/cloud-deployment.md`](docs/cloud-deployment.md) | systemd + nginx pattern; docker-compose + Caddy pattern; hardening checklist. |
-| [`docs/llm-extras.md`](docs/llm-extras.md) | Optional LLM router, provider registry, AI edit pipeline. |
-| [`docs/running.md`](docs/running.md) | Local-run cookbook with conda + venv + Windows / macOS / Linux. |
-| [`docs/test_plan.md`](docs/test_plan.md) | Manual + automated regression matrix. |
-| [`docs/wave2-plan.md`](docs/wave2-plan.md) | Wave 2 implementation log (10 / 10 done). |
-| [`docs/final-audit.md`](docs/final-audit.md) | Point-by-point audit of architecture-v2 §1-§17. |
-| [`docs/roadmap.md`](docs/roadmap.md) | Long-term research direction; everything pre-1.0 is shipped. |
+| [`docs/architecture.md`](docs/architecture.md) | What's in the box — design rationale, eight capabilities, module map, persistence layout. |
+| [`docs/usage.md`](docs/usage.md) | Install, configure, run, connect AI editors. Includes optional LLM extras. |
+| [`docs/api.md`](docs/api.md) | Full REST + MCP catalog with request / response shapes. |
+| [`docs/deployment.md`](docs/deployment.md) | Production deployment patterns + 8-layer security model. |
+| [`docs/roadmap.md`](docs/roadmap.md) | Post-1.0 research directions; permanent non-goals. |
 | [`extensions/vscode/README.md`](extensions/vscode/README.md) | Thin VS Code extension (3 commands). |
 | [`_keep_/README.md`](_keep_/README.md) | How to share artefacts that bypass `.gitignore`. |
 
@@ -257,7 +250,7 @@ memory = true
 safe_edit = true
 ```
 
-Full reference: [`docs/configuration.md`](docs/configuration.md).
+Full reference: [`docs/usage.md`](docs/usage.md).
 
 ## Security
 
@@ -277,7 +270,7 @@ Full reference: [`docs/configuration.md`](docs/configuration.md).
   the same auth sources; `--auth required` refuses to start when
   none are configured.
 
-Full security model: [`docs/security.md`](docs/security.md).
+Full security model: [`docs/deployment.md`](docs/deployment.md).
 
 ## CLI
 
@@ -343,7 +336,7 @@ people have built or plan to build on top:
 
 ## Roadmap
 
-The big design plan ([`docs/architecture-v2.md`](docs/architecture-v2.md))
+The big design plan ([`docs/architecture.md`](docs/architecture.md))
 is fully implemented as of 1.0.0-rc1:
 
 | Phase | Items | Status |
@@ -370,7 +363,7 @@ PRs welcome. Please:
 - Add a regression test for any UI-visible fix.
 - Keep API responses on the `{"success": true, "result": {...}}`
   envelope so the web client handlers don't break.
-- Document architectural changes in `docs/test_plan.md`.
+- Document architectural changes in `CONTRIBUTING.md`.
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full developer
 on-ramp.

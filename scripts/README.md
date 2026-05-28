@@ -1,6 +1,6 @@
 # scripts/
 
-可双击或一行命令运行的脚本。详细说明见 [`docs/running.md`](../docs/running.md)。
+可双击或一行命令运行的脚本。详细说明见 [`docs/usage.md`](../docs/usage.md)。
 
 ## Windows
 
@@ -43,4 +43,4 @@ CONDA_ENV_NAME=my-env PORT=7000 ./scripts/run.sh
 ## 不用 conda
 
 如果你用 `venv` 而不是 conda,脚本不能直接用——它们用 `conda run` 调度。
-最简单的办法是激活 venv 后手动跑命令,见 `docs/running.md`。
+最简单的办法是激活 venv 后手动跑命令,见 `docs/usage.md`。

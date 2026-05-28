@@ -1,0 +1,299 @@
+# Architecture
+
+> Single source of truth for *what's in the box*. Combines the design
+> rationale (formerly `architecture-v2.md`), the feature inventory
+> (formerly `features.md`), and the §1-§17 audit (formerly
+> `final-audit.md`).
+
+---
+
+## Table of contents
+
+- [Project identity](#project-identity)
+- [Three deployment modes](#three-deployment-modes)
+- [The eight capabilities](#the-eight-capabilities)
+- [Module map](#module-map)
+- [Persistence layout](#persistence-layout)
+- [Engineering & quality](#engineering--quality)
+- [Where to look first](#where-to-look-first)
+
+---
+
+## Project identity
+
+OmniCode-MCP is a **local-first, optionally cloud-hosted Codebase
+Intelligence Layer** that any AI editor can call.
+
+### Core value proposition
+
+1. Make AI **understand** the codebase (AST + LSP + call graph + git
+   history).
+2. Stop AI from re-reading whole files (`outline / symbols /
+   relevant_chunks / diagnostics / imports / tests` modes).
+3. Give AI **context** before it edits (symbols, references,
+   diagnostics, callers, callees, recent commits, past memories,
+   blast radius).
+4. Make every edit **reviewable** — preview → validate → apply →
+   rollback, with snapshot-backed sessions.
+5. Stay **local-first, controllable, auditable** — fully offline by
+   default, API keys encrypted at rest, no cloud dependency unless
+   the operator opts in.
+
+### What we're NOT
+
+- ❌ Not an AI editor — Cursor / Continue / Claude Code / Aider do
+  that. We're the layer they call.
+- ❌ Not a VS Code replacement.
+- ❌ Not a self-built Agent framework — LangGraph / autogen do that
+  better.
+- ❌ Not a multi-tenant SaaS (near term). Single-tenant self-host is
+  the deployment model.
+
+### Architectural rules
+
+These are non-negotiable:
+
+1. `omnicode_core/` does not import from Web UI or specific LLM
+   providers. Adapters call core, never the reverse.
+2. MCP / HTTP / Web Console are **adapters** sharing the same
+   service singletons in `core/dependencies.py`.
+3. LLM features are **optional** (`pip install omnicode-mcp[llm]`).
+4. Caller-supplied paths go through the sandbox before any
+   filesystem call.
+5. State writes go through the read-only middleware; new mutating
+   endpoints inherit the gate automatically.
+6. Per-workspace data lives in shards (`<wd>/.data/shards/<id>/`),
+   never the legacy single `.data/` layout.
+7. Imports stay one-way: `adapters → core → stdlib / third-party`.
+
+---
+
+## Three deployment modes
+
+| Mode | Code lives | This server does | Default flag preset |
+|---|---|---|---|
+| **local** | This machine | Index, search, LSP, edit | writes ON, apply ON |
+| **cloud** | This machine (mirror) | Index, search, LSP, ~edit~ | writes OFF, apply OFF |
+| **hybrid** | User's local box | Index + search + memory + graph | writes ON via agent, apply OFF |
+
+CLI: `omnicode serve --mode local|cloud|hybrid` plus `--headless`,
+`--host`, `--port`. Hybrid means a separate
+`omnicode agent` process on the user's machine pushes file bodies to
+this server's `/index/*` endpoints; the user's editor still applies
+patches locally.
+
+For full deployment recipes see [`deployment.md`](deployment.md).
+
+---
+
+## The eight capabilities
+
+The "Codebase Intelligence Layer" promise is exactly eight things,
+all shipped, all reachable through three converging entry points
+(`GET /capabilities`, `POST /intelligence/context`, MCP tool
+`omni_intelligence`):
+
+| # | Capability | Module | Highlights |
+|---|---|---|---|
+| 1 | Code understanding | `omnicode/ast_engine/` | tree-sitter for py / js / ts / cpp / java / go / rust; outline + symbols + imports + tests + relevant_chunks + diagnostics modes |
+| 2 | Structured context compression | `omnicode/llm/token_manager.py` | comment strip, function fold, priority-based pruner |
+| 3 | Hybrid search | `omnicode/search/` + `omnicode_core/search/` | semantic + symbol + text + RRF; `why_matched` tags on every result; cross-encoder reranker (opt-in) |
+| 4 | Call-graph impact | `omnicode_core/graph/impact.py` | BFS blast radius, callers, callees, entry points, dead symbols, related tests, low/medium/high risk rating |
+| 5 | Safe patch operations | `omnicode_core/edit/patch.py` | preview → validate → apply → rollback with snapshots; sessions persisted as JSON |
+| 6 | Memory advisory | `omnicode_core/memory/advisory.py` | multi-angle recall (file / symbol / task / error / git diff) with confidence + signals |
+| 7 | Debug console | `templates/` + WebSocket logs | search debug, edit sessions, impact viewer, advisory drawer, code graph viewer (SVG → 2D canvas → WebGL2 tiers) |
+| 8 | Optional LLM enhancement | `omnicode/llm/router.py` | LiteLLM-backed multi-provider routing; opt-in via `pip install omnicode-mcp[llm]` |
+
+The composer (`omnicode_core/intelligence/composer.py`) runs all
+eight in parallel inside a token budget and reports per-capability
+errors without failing the call.
+
+---
+
+## Module map
+
+```
+omnicode_core/                    ← clean v2 layer (no UI / LLM deps)
+├── auth/                         ← multi-user RBAC + master-key rotation
+│   ├── users.py                  ← SQLite store, SHA-256 token hashes
+│   ├── migrations.py             ← PRAGMA user_version runner
+│   └── rotation.py               ← Fernet master-key rotation
+├── config/
+│   ├── features.py               ← runtime feature flags
+│   └── toml_loader.py            ← omnicode.toml → env-var injector
+├── edit/
+│   └── patch.py                  ← PatchManager (preview / validate / apply / rollback / explain / sessions)
+├── embeddings/
+│   └── backend.py                ← local / remote / hybrid backends
+├── graph/
+│   └── impact.py                 ← ImpactAnalyzer (7 public methods)
+├── index/
+│   ├── file_tracker.py           ← incremental index bookkeeping
+│   └── sharding.py               ← per-workspace FAISS shards (auto-migrate from legacy)
+├── intelligence/
+│   └── composer.py               ← eight-capability orchestrator
+├── lsp/
+│   └── bridge.py                 ← LSP JSON-RPC client (10 servers)
+├── memory/
+│   └── advisory.py               ← MemoryAdvisor — proactive recall
+├── search/
+│   └── reranker.py               ← cross-encoder rerank (opt-in)
+├── security/
+│   └── sandbox.py                ← path traversal guard
+└── workspace/
+    └── registry.py               ← workspace bookmark store
+
+omnicode/                         ← legacy modules (still used; depend on LLM extras)
+├── ast_engine/                   ← tree-sitter parser + chunker + call/inheritance graph
+├── search/                       ← FAISS + SQLite vector store + hybrid RRF engine
+├── llm/                          ← multi-provider router, provider registry, secret box
+├── pipelines/                    ← AI edit pipeline (three-layer defence)
+├── git_context/                  ← history risk analyzer, blame, issue linker
+├── memory/                       ← memory store + dedupe + hybrid scorer
+├── guard/                        ← static-analysis gate (ruff / eslint / cppcheck)
+└── server/                       ← legacy MCP tool definitions
+
+omnicode_adapters/                ← thin layer that calls core
+├── agent/                        ← local file-sync watcher (hybrid mode)
+│   ├── client.py                 ← stateless httpx client + retry
+│   └── watcher.py                ← debounced watchfiles loop + polling fallback
+├── cli/                          ← omnicode CLI subcommands
+│   ├── main.py                   ← argparse entry point
+│   └── commands/                 ← init / index / status / serve / mcp / agent / dev / doctor / rotate-master-key
+└── mcp_server/
+    ├── high_level_tools.py       ← 6 + 1 omni_* tools
+    └── http_auth.py              ← MCP-over-HTTP bearer-token gate
+
+api/v1/routers/                   ← FastAPI routers (22 total)
+├── admin.py                      ← /admin/users + /admin/tokens (RBAC management)
+├── agent.py                      ← /index/upsert-file etc. (hybrid mode)
+├── files.py                      ← /read with 7 modes
+├── git.py                        ← /git, /session, /git/history, /git/issues
+├── graph.py                      ← /graph/impact + /risk + /related-tests + /entrypoints + /dead
+├── intelligence.py               ← /capabilities + /intelligence/context
+├── lsp.py                        ← /lsp/* bridge endpoints
+├── memory.py                     ← /memory/* including /memory/advisory
+├── patch.py                      ← /patch/preview + /validate + /apply + /rollback + /explain
+├── search.py                     ← /search hybrid + /search/index
+├── workspaces.py                 ← /workspaces CRUD
+└── (...others: project, directory, fs_browser, working_directory, model providers, logs, health, static_files, guard)
+
+core/                             ← FastAPI middlewares + dependency injection
+├── dependencies.py               ← service singletons (search engine, git mgr, llm router, ast parser)
+├── lifespan.py                   ← startup / shutdown lifecycle
+├── auth_middleware.py            ← legacy single-key gate
+├── rbac_middleware.py            ← multi-user RBAC gate
+└── read_only_middleware.py       ← read-only mode gate
+
+extensions/
+└── vscode/                       ← thin VS Code extension (3 commands, ~340 LoC TS)
+
+templates/                        ← Web Console (vanilla JS + Tailwind, EN/中文 i18n)
+├── components/
+│   ├── layout/sidebar.html
+│   └── sections/                 ← dashboard / search / graph-viewer / impact-viewer / edit-sessions / providers / memory / logs / etc.
+└── static/js/                    ← api/routes.js + components/loader.js + utils/{theme,i18n,features}.js
+```
+
+`omnicode_core` is the destination of the v2 refactor; new features
+go there. `omnicode/` (singular) is the legacy tree, kept because
+it owns the LLM router, search engine, AST chunker, and git
+analyser — none of which warrant a rewrite right now.
+
+---
+
+## Persistence layout
+
+```
+<wd>/                                          ← active working directory
+└── .data/
+    └── shards/
+        ├── default/                           ← legacy single-tenant data (auto-migrated from <wd>/.data/<file>)
+        │   ├── vector_store.faiss             ← FAISS index of code chunks
+        │   ├── vector_store.db                ← chunk metadata (SQLite)
+        │   ├── file_tracker.db                ← mtime / hash for incremental rebuild
+        │   ├── snapshots/                     ← pre-apply file backups
+        │   └── edit_sessions/                 ← JSON session records
+        └── wk_<id>/                           ← per-workspace shard (multi-tenant)
+            └── (same layout)
+
+~/.kiro/codebase-mcp/                          ← user-level shared state
+├── providers.db                               ← Fernet-encrypted provider keys
+├── providers.key                              ← master Fernet key (file mode 0600)
+├── users.db                                   ← RBAC users + token hashes (versioned by PRAGMA user_version)
+└── workspaces.json                            ← workspace bookmarks
+```
+
+Sharding is auto-migrated on first run by
+`omnicode_core/index/sharding.py::auto_migrate_legacy()` —
+idempotent, refuses to overwrite an already-populated default
+shard.
+
+---
+
+## Engineering & quality
+
+### Tests
+
+```bash
+python -m pytest tests -q               # ~30 s, 433 passed, 12 skipped
+python -m pytest tests/integration/test_route_regressions.py -q
+```
+
+The 12 skipped tests are LSP binary probes (jdtls / omnisharp etc.)
+that auto-skip when the language server isn't installed locally.
+Unit tests under `tests/unit/` (40+ files), integration under
+`tests/integration/`.
+
+### Lint
+
+```bash
+ruff check omnicode omnicode_core omnicode_adapters api core tests
+```
+
+Config in `pyproject.toml`. Always clean on `main`.
+
+### CI
+
+`.github/workflows/ci.yml` runs:
+
+1. ruff lint (read-only check on the whole tree)
+2. pytest matrix on Python 3.11 + 3.12
+3. Docker image build smoke (push to `main` only)
+
+Branch protection blocks merges until lint + tests pass.
+
+### Container
+
+| File | Purpose |
+|---|---|
+| `Dockerfile` | App image; pre-downloads embedding model |
+| `docker-compose.yml` | Local dev compose |
+| `deploy/docker-compose.cloud.yml` | Cloud overlay with Caddy reverse proxy |
+| `deploy/Caddyfile` | TLS termination config |
+
+### systemd
+
+`deploy/omnicode.service` and `deploy/omnicode-mcp.service` ship
+hardened defaults: `NoNewPrivileges`, `ProtectSystem=strict`,
+`ReadWritePaths` scoped to the workspace, `MemoryMax=4G` on the
+main service.
+
+---
+
+## Where to look first
+
+* **New to the project?** Read [README.md](../README.md) →
+  [usage.md](usage.md) → this doc.
+* **Calling OmniCode from another tool?** Read
+  [api.md](api.md). Three endpoints are enough for most use cases:
+  1. `GET /capabilities` — discover what's online.
+  2. `POST /intelligence/context` — pull a structured,
+     token-budgeted dossier in one round-trip.
+  3. `POST /patch/preview` + `POST /patch/apply` — make the
+     change.
+* **Deploying to a server?** Read [deployment.md](deployment.md)
+  end-to-end.
+* **Curious what's next?** Read [roadmap.md](roadmap.md) — the
+  original P0/P1/P2 + Wave 1 + Wave 2 backlogs are all shipped;
+  the file lists post-1.0 research directions.

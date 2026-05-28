@@ -11,7 +11,7 @@ Precedence (highest wins):
     3. TOML file values.
     4. Pydantic defaults.
 
-Section / key mapping (mirrors the prompt in architecture-v2.md §11):
+Section / key mapping (mirrors the prompt in architecture.md §11):
 
 ```
 [server]
