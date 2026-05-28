@@ -1,20 +1,27 @@
 """
-High-level MCP tools — 6 aggregated tools + 1 discovery.
+High-level MCP tools — the eight-tool core surface.
 
-These replace the need for AI clients to choose between 25+ fine-grained
-tools.  Each high-level tool internally dispatches to the appropriate
-backend endpoint based on the `mode` or `action` parameter.
+These eight tools are designed so an external AI editor can map the
+"what do I want to do" question to a single tool with one ``mode`` /
+``action`` parameter — no need to navigate 25 fine-grained tools and
+spend 10k tokens on schema descriptions.
 
-Token savings: ~10k schema tokens → ~3k (70% reduction in tool definitions).
+Token savings: ~10k schema tokens → ~3.5k. Tool descriptions kept short.
 
-Usage by AI clients:
-    omni_search(query="create_app", mode="auto")
-    omni_read(file="main.py", mode="outline")
-    omni_edit(action="preview", patch="...")
-    omni_analyze(symbol="create_app", analysis="impact")
-    omni_memory(action="search", query="faiss")
-    omni_context(file="main.py", symbol="create_app")
-    discover_tools(query="git")
+Tool roster:
+
+  omni_search       — semantic / symbol / text / hybrid / references
+  omni_read         — outline / symbols / full / range / imports / diagnostics
+  omni_impact       — callers / callees / risk / related tests
+  omni_diagnostics  — lint / type / security checks for a file or workspace
+  omni_context      — composer: outline + impact + memory + git in one call
+  omni_memory       — store / search / advisory
+  omni_patch        — preview / validate / apply / rollback (safe edit)
+  discover_tools    — discovery + capability listing
+
+Backwards compatibility: ``omni_analyze``, ``omni_edit``,
+``omni_intelligence`` are kept as deprecated aliases that delegate to
+the new tools, so older MCP configs don't break.
 """
 
 import json
@@ -620,21 +627,370 @@ def register_high_level_tools(mcp, make_request):
             return f"❌ Read failed: {e}"
 
     @mcp.tool()
+    async def omni_impact(
+        symbol: str,
+        depth: int = 2,
+        max_files: int = 200,
+    ) -> str:
+        """Assess the blast radius of changing a symbol — required reading
+        before any non-trivial edit.
+
+        Returns:
+          • risk level (low / medium / high) with the reasons,
+          • direct callers and callees,
+          • files affected,
+          • recommended tests to run after the change.
+
+        Combines /graph/impact + /graph/risk + /graph/related-tests in
+        parallel so the AI gets one consolidated payload.
+        """
+        try:
+            import asyncio
+
+            params = {"symbol": symbol, "depth": depth, "max_files": max_files}
+            risk_task = make_request("GET", "/graph/risk", params={
+                "symbol": symbol, "max_files": max_files,
+            })
+            impact_task = make_request("GET", "/graph/impact", params=params)
+            tests_task = make_request("GET", "/graph/related-tests", params={
+                "symbol": symbol, "max_files": max_files,
+            })
+            risk_raw, impact_raw, tests_raw = await asyncio.gather(
+                risk_task, impact_task, tests_task, return_exceptions=True,
+            )
+
+            def _safe(r):
+                if isinstance(r, Exception):
+                    return {"error": str(r)}
+                return r.get("result", r) if isinstance(r, dict) else {}
+
+            risk = _safe(risk_raw)
+            impact = _safe(impact_raw)
+            tests = _safe(tests_raw)
+
+            risk_level = risk.get("risk", "unknown")
+            risk_reasons = risk.get("reasons", []) or []
+            badge = {"low": "🟢", "medium": "🟡", "high": "🔴"}.get(risk_level, "⚪")
+
+            lines = [f"💥 Impact: {symbol}\n"]
+            lines.append(f"   {badge} Risk: {risk_level}")
+            for reason in risk_reasons[:6]:
+                lines.append(f"      • {reason}")
+
+            affected = impact.get("affected", []) or []
+            dependents = impact.get("dependents", []) or []
+            files_count = impact.get("files_count", 0)
+
+            lines.append("")
+            lines.append(f"   ⬇️  Callees affected:  {len(affected)}")
+            for n in affected[:8]:
+                lines.append(f"      → {n}")
+            lines.append(f"   ⬆️  Callers depending: {len(dependents)}")
+            for n in dependents[:8]:
+                lines.append(f"      ← {n}")
+            lines.append(f"   📁  Files in blast radius: {files_count}")
+
+            test_files = tests.get("test_files", []) or []
+            if test_files:
+                lines.append("")
+                lines.append(f"   🧪 Suggested tests ({len(test_files)}):")
+                for t in test_files[:6]:
+                    lines.append(f"      • {t}")
+                cmds = tests.get("suggested_commands", []) or []
+                for cmd in cmds[:3]:
+                    lines.append(f"      $ {cmd}")
+
+            return "\n".join(lines)
+
+        except Exception as e:
+            return f"❌ omni_impact failed: {e}"
+
+    @mcp.tool()
+    async def omni_diagnostics(
+        file: Optional[str] = None,
+        severity: str = "all",
+        sources: str = "guard,lsp",
+    ) -> str:
+        """Get structured lint / type / static-analysis diagnostics.
+
+        Parameters:
+          - file:     workspace-relative path. If None, returns a summary
+                      across the recently-edited files (TBD; for now
+                      ``file`` is required).
+          - severity: 'all' | 'error' | 'warning'. Default 'all'.
+          - sources:  comma-separated list of 'guard,lsp'. Guard runs ruff
+                      + mypy + bandit (Python) or eslint + tsc (JS/TS).
+                      LSP returns the language-server diagnostics for the
+                      file.
+
+        Returns a structured per-line list so the AI can decide what to
+        fix without parsing tool stdout.
+        """
+        if not file:
+            return (
+                "❌ omni_diagnostics requires a file path.\n"
+                "   Workspace-wide aggregation is on the roadmap — for "
+                "now scope to a single file."
+            )
+        try:
+            import asyncio
+
+            wanted = {s.strip() for s in sources.split(",") if s.strip()}
+
+            tasks = []
+            labels = []
+            if "guard" in wanted:
+                tasks.append(make_request(
+                    "POST", "/guard/check", params={"file_path": file},
+                ))
+                labels.append("guard")
+            if "lsp" in wanted:
+                tasks.append(make_request(
+                    "GET", f"/lsp/diagnostics/{file}",
+                ))
+                labels.append("lsp")
+
+            if not tasks:
+                return f"❌ Unknown sources '{sources}'. Use: guard, lsp"
+
+            raws = await asyncio.gather(*tasks, return_exceptions=True)
+
+            all_issues: List[Dict[str, Any]] = []
+
+            for label, raw in zip(labels, raws, strict=False):
+                if isinstance(raw, Exception):
+                    all_issues.append({
+                        "source": label,
+                        "severity": "info",
+                        "line": None,
+                        "rule": "tool_unavailable",
+                        "message": f"{label} call failed: {raw}",
+                    })
+                    continue
+                data = raw.get("result", raw) if isinstance(raw, dict) else {}
+                if label == "guard":
+                    issues = data.get("issues", []) or []
+                    for it in issues:
+                        all_issues.append({
+                            "source": it.get("tool") or "guard",
+                            "severity": it.get("severity") or "warning",
+                            "line": it.get("line"),
+                            "column": it.get("column"),
+                            "rule": it.get("code") or "",
+                            "message": it.get("message") or "",
+                        })
+                    # legacy text fallback if backend didn't structure
+                    if not issues:
+                        for txt in (data.get("errors") or "").splitlines():
+                            if txt.strip():
+                                all_issues.append({
+                                    "source": "guard",
+                                    "severity": "error",
+                                    "line": None,
+                                    "rule": "",
+                                    "message": txt,
+                                })
+                elif label == "lsp":
+                    diags = data.get("diagnostics", []) or []
+                    for d in diags:
+                        rng = d.get("range", {}).get("start", {}) if isinstance(d, dict) else {}
+                        all_issues.append({
+                            "source": "lsp",
+                            "severity": d.get("severity") or "warning",
+                            "line": rng.get("line"),
+                            "column": rng.get("character"),
+                            "rule": d.get("code") or "",
+                            "message": d.get("message") or "",
+                        })
+
+            # Filter by severity
+            sev = severity.lower().strip()
+            if sev not in ("all", ""):
+                wanted_set = {sev}
+                if sev == "error":
+                    wanted_set = {"error"}
+                elif sev == "warning":
+                    wanted_set = {"warning", "warn"}
+                all_issues = [
+                    i for i in all_issues
+                    if (i.get("severity") or "").lower() in wanted_set
+                ]
+
+            if not all_issues:
+                return f"✅ {file} — no diagnostics ({severity}, sources={sources})"
+
+            # Sort: errors first, then by line
+            sev_rank = {"error": 0, "warning": 1, "warn": 1, "info": 2, "hint": 3}
+            all_issues.sort(key=lambda i: (
+                sev_rank.get((i.get("severity") or "").lower(), 4),
+                i.get("line") or 0,
+            ))
+
+            lines = [f"🩺 Diagnostics for {file} ({len(all_issues)} issues)\n"]
+            for it in all_issues[:25]:
+                emoji = {
+                    "error": "❌", "warning": "⚠️", "warn": "⚠️",
+                    "info": "ℹ️", "hint": "💡",
+                }.get((it.get("severity") or "").lower(), "•")
+                line_no = it.get("line")
+                col = it.get("column")
+                anchor = f"L{line_no}" if line_no else "?"
+                if col is not None:
+                    anchor += f":{col}"
+                rule = f" [{it.get('rule')}]" if it.get("rule") else ""
+                lines.append(
+                    f"  {emoji} {anchor:<10} {it['source']}{rule}: {it['message']}"
+                )
+            if len(all_issues) > 25:
+                lines.append(f"\n  ... ({len(all_issues) - 25} more issues, increase max if needed)")
+            return "\n".join(lines)
+
+        except Exception as e:
+            return f"❌ omni_diagnostics failed: {e}"
+
+    @mcp.tool()
+    async def omni_patch(
+        action: str = "preview",
+        file: Optional[str] = None,
+        content: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> str:
+        """Safe edit operations — never let an LLM write to disk directly.
+
+        Actions:
+          - preview:   show a unified diff of what would change
+          - validate:  run static checks on the proposed content
+          - apply:     write to disk + create snapshot + record EditSession
+          - rollback:  restore the file from a previous EditSession's snapshot
+          - sessions:  list recent EditSessions
+
+        The recommended flow before any AI-driven edit is:
+        preview → validate → apply, then keep the returned session_id
+        in case you need to rollback.
+        """
+        try:
+            if action == "preview":
+                if not file or content is None:
+                    return "❌ omni_patch preview needs both file and content."
+                raw = await make_request("POST", "/patch/preview", json={
+                    "file_path": file, "content": content,
+                })
+                data = raw.get("result", raw) if isinstance(raw, dict) else {}
+                if not data.get("success", True):
+                    return f"❌ Preview failed: {data.get('message', 'unknown')}"
+                added = data.get("lines_added", 0)
+                removed = data.get("lines_removed", 0)
+                diff = data.get("diff", "")
+                # Cap diff at 80 lines for the MCP response so we don't
+                # blow the AI's context with megabytes of changes.
+                diff_lines = diff.splitlines()
+                if len(diff_lines) > 80:
+                    diff = "\n".join(diff_lines[:80]) + (
+                        f"\n... ({len(diff_lines) - 80} more diff lines)"
+                    )
+                return (
+                    f"📋 Preview: {file}\n"
+                    f"   +{added} / -{removed} lines\n\n"
+                    f"{diff}"
+                )
+
+            if action == "validate":
+                if not file or content is None:
+                    return "❌ omni_patch validate needs both file and content."
+                raw = await make_request("POST", "/patch/validate", json={
+                    "file_path": file, "content": content,
+                })
+                data = raw.get("result", raw) if isinstance(raw, dict) else {}
+                ok = data.get("success", False)
+                checks = data.get("checks", []) or []
+                msg = data.get("message", "")
+                lines = [
+                    f"{'✅' if ok else '❌'} Validate: {file}",
+                    f"   {msg}" if msg else "",
+                ]
+                for chk in checks[:10]:
+                    lines.append(f"   • {chk}")
+                return "\n".join(line for line in lines if line)
+
+            if action == "apply":
+                if not file or content is None:
+                    return "❌ omni_patch apply needs both file and content."
+                raw = await make_request("POST", "/patch/apply", json={
+                    "file_path": file, "content": content,
+                })
+                data = raw.get("result", raw) if isinstance(raw, dict) else {}
+                if not data.get("success", False):
+                    return f"❌ Apply failed: {data.get('message', 'unknown')}"
+                sid = data.get("session_id")
+                added = data.get("lines_added", 0)
+                removed = data.get("lines_removed", 0)
+                rb = data.get("rollback_available", True)
+                return (
+                    f"✅ Applied: {file}\n"
+                    f"   +{added} / -{removed} lines\n"
+                    f"   session_id: {sid}\n"
+                    f"   rollback_available: {rb}\n"
+                    f"\n   To undo: omni_patch(action='rollback', session_id='{sid}')"
+                )
+
+            if action == "rollback":
+                if not session_id:
+                    return "❌ omni_patch rollback needs session_id."
+                raw = await make_request(
+                    "POST", "/patch/rollback",
+                    params={"session_id": session_id},
+                )
+                data = raw.get("result", raw) if isinstance(raw, dict) else {}
+                ok = data.get("success", False)
+                msg = data.get("message", "")
+                return f"{'✅' if ok else '❌'} Rollback: {msg}"
+
+            if action == "sessions":
+                raw = await make_request("GET", "/patch/sessions", params={"limit": 20})
+                data = raw.get("result", raw) if isinstance(raw, dict) else {}
+                sessions = data.get("sessions", []) or []
+                if not sessions:
+                    return "📜 No recent EditSessions."
+                lines = [f"📜 Recent EditSessions ({len(sessions)}):\n"]
+                for s in sessions[:20]:
+                    sid = s.get("session_id", "?")
+                    fp = s.get("file_path", "?")
+                    ts = s.get("timestamp", "?")
+                    src = s.get("source", "?")
+                    a = s.get("lines_added", 0)
+                    r = s.get("lines_removed", 0)
+                    lines.append(
+                        f"  {sid}  {ts}  {fp}  +{a}/-{r}  ({src})"
+                    )
+                return "\n".join(lines)
+
+            return (
+                f"❌ Unknown omni_patch action: {action}.\n"
+                f"   Use: preview, validate, apply, rollback, sessions"
+            )
+
+        except Exception as e:
+            return f"❌ omni_patch failed: {e}"
+
+    # -------------------------------------------------------------------
+    # Backwards-compat alias — omni_analyze delegates to omni_impact for
+    # the most common case ("impact" analysis). Kept so older MCP configs
+    # don't break, but new clients should use omni_impact directly.
+    # -------------------------------------------------------------------
+    @mcp.tool()
     async def omni_analyze(
         symbol: str,
         analysis: str = "impact",
         depth: int = 2,
         path: Optional[str] = None,
     ) -> str:
-        """Analyze code relationships and impact.
+        """[deprecated alias] Use omni_impact for impact analysis.
 
         Analysis types:
-          - impact: who calls this, what it calls, risk level, suggested tests
-          - callers: list all callers of this symbol
-          - callees: list all functions this symbol calls
-          - graph: full call graph for a scope (use path to limit)
+          - impact (default): delegates to omni_impact
+          - callers / callees / graph: low-level call-graph queries
 
-        Essential before modifying any function — tells you what might break.
+        Kept for backwards compatibility with older MCP configs.
         """
         try:
             if analysis in ("callers", "callees", "impact"):
@@ -861,17 +1217,13 @@ def register_high_level_tools(mcp, make_request):
         instructions: Optional[str] = None,
         session_id: Optional[str] = None,
     ) -> str:
-        """Safe code editing with preview, validate, apply, and rollback.
+        """[deprecated alias] Use omni_patch for safe edits.
 
         Actions:
-          - preview: show what a patch would change (diff)
-          - validate: run static checks on the patch without applying
-          - apply: apply a validated patch to the file
-          - rollback: undo the last applied patch
-          - ai_edit: use LLM to generate + apply an edit (requires instructions + file)
+          - preview / validate / apply / rollback: delegate to omni_patch
+          - ai_edit: LLM-driven edit (only when OMNICODE_LLM_ROUTER=true)
 
-        For AI-generated edits, use action='ai_edit' with file + instructions.
-        For manual patches, use action='preview' then 'apply'.
+        Kept so older MCP configs don't break.
         """
         try:
             if action == "ai_edit":
@@ -889,20 +1241,57 @@ def register_high_level_tools(mcp, make_request):
                 success = data.get("success", False)
                 if success:
                     score = data.get("quality_score", 0)
-                    return f"✅ Edit applied to {file} (quality={score:.2f})"
+                    sid = data.get("edit_session_id")
+                    line = f"✅ Edit applied to {file} (quality={score:.2f})"
+                    if sid:
+                        line += (
+                            f"\n   session_id: {sid}\n"
+                            f"   To undo: omni_patch(action='rollback', "
+                            f"session_id='{sid}')"
+                        )
+                    return line
                 else:
                     analysis = data.get("failure_analysis", {})
                     stage = analysis.get("stage", "?")
                     reason = analysis.get("root_cause", analysis.get("failure_reasons", "unknown"))
                     return f"❌ Edit failed at stage '{stage}': {reason}"
 
-            elif action in ("preview", "validate", "apply", "rollback"):
-                # These will be fully implemented in step 6 (Patch Session).
-                # For now, return a placeholder that explains the capability.
+            # Forward preview / validate / apply / rollback to omni_patch
+            if action in ("preview", "validate", "apply", "rollback"):
+                # Re-invoke through the same make_request chain — content
+                # comes in via the legacy ``patch`` param so we map it.
+                content = patch
+                if action == "preview":
+                    if not file or content is None:
+                        return "❌ omni_edit preview needs both file and patch."
+                    raw = await make_request("POST", "/patch/preview", json={
+                        "file_path": file, "content": content,
+                    })
+                elif action == "validate":
+                    if not file or content is None:
+                        return "❌ omni_edit validate needs both file and patch."
+                    raw = await make_request("POST", "/patch/validate", json={
+                        "file_path": file, "content": content,
+                    })
+                elif action == "apply":
+                    if not file or content is None:
+                        return "❌ omni_edit apply needs both file and patch."
+                    raw = await make_request("POST", "/patch/apply", json={
+                        "file_path": file, "content": content,
+                    })
+                else:  # rollback
+                    if not session_id:
+                        return "❌ omni_edit rollback needs session_id."
+                    raw = await make_request(
+                        "POST", "/patch/rollback",
+                        params={"session_id": session_id},
+                    )
+                data = raw.get("result", raw) if isinstance(raw, dict) else {}
+                ok = data.get("success", False)
+                msg = data.get("message", "")
                 return (
-                    f"⚠️ Patch {action} is planned but not yet fully implemented.\n"
-                    f"Use action='ai_edit' for LLM-powered editing, or\n"
-                    f"use the Web Console's Edit Session page for manual patch review."
+                    f"{'✅' if ok else '❌'} {action}: {msg}\n"
+                    f"   (omni_edit is a deprecated alias — prefer omni_patch)"
                 )
 
             return f"❌ Unknown action: {action}. Use: preview, validate, apply, rollback, ai_edit"
@@ -979,38 +1368,46 @@ def register_high_level_tools(mcp, make_request):
         Call with a query to find relevant tools, or empty to list all.
         This is useful when you're not sure which tool to use.
 
-        High-level tools (recommended):
-          - omni_search: search code (auto/semantic/symbol/text)
-          - omni_read: read files (outline/symbols/full/imports/diagnostics)
-          - omni_edit: safe editing (preview/validate/apply/rollback/ai_edit)
-          - omni_analyze: impact analysis (callers/callees/graph)
-          - omni_memory: project memory (search/store/context)
-          - omni_context: get full context for a file+symbol in one call
+        Eight core tools (recommended):
+          - omni_search:      search code (auto/semantic/symbol/text/hybrid/references)
+          - omni_read:        read files (outline/symbols/full/imports/diagnostics/range)
+          - omni_impact:      blast radius — callers / callees / risk / related tests
+          - omni_diagnostics: lint / type / static analysis for a file
+          - omni_context:     composer — outline + impact + memory + git in one call
+          - omni_memory:      project memory (search/store/advisory)
+          - omni_patch:       safe edit (preview / validate / apply / rollback)
+          - discover_tools:   this tool
 
-        Legacy tools (still available, more granular):
-          search_tool, read_code_tool, edit_file, write_tool, file_tool,
-          git_tool, session_tool, memory_tool, project_context_tool,
-          list_file_symbols_tool, read_symbol_from_database,
-          project_structure_tool, list_directory_tool, show_directory_tree,
-          code_analysis_tool, execute_tool
+        Deprecated aliases (still work, prefer the named replacements):
+          - omni_analyze   → omni_impact
+          - omni_edit      → omni_patch
+          - omni_intelligence → omni_context
         """
         tools_info = {
-            "omni_search": "Search code: auto/semantic/symbol/text modes",
-            "omni_read": "Read files: outline/symbols/full/imports/diagnostics/range/symbol",
-            "omni_edit": "Safe editing: preview/validate/apply/rollback/ai_edit",
-            "omni_analyze": "Impact analysis: callers/callees/graph/impact",
-            "omni_memory": "Project memory: search/store/context/advisory",
-            "omni_context": "Full context for file+symbol in one call",
-            "omni_intelligence": "Eight-capability composer — single call, structured payload, token-budgeted",
+            "omni_search": "Search code (auto/semantic/symbol/text/hybrid/references)",
+            "omni_read": "Read files (outline/symbols/full/imports/diagnostics/range)",
+            "omni_impact": "Blast radius — callers/callees/risk/suggested tests",
+            "omni_diagnostics": "Lint / type / static-analysis diagnostics for a file",
+            "omni_context": "Composer — outline + impact + memory + git in one call",
+            "omni_memory": "Project memory (search/store/advisory)",
+            "omni_patch": "Safe edit (preview / validate / apply / rollback)",
             "discover_tools": "This tool — find what's available",
         }
 
         if not query:
-            lines = ["📦 OmniCode High-Level Tools:\n"]
+            lines = ["📦 OmniCode tools:\n"]
             for name, desc in tools_info.items():
-                lines.append(f"  • {name}: {desc}")
-            lines.append("\n💡 Tip: Use omni_context as your first call before editing.")
-            lines.append("   It returns outline + callers + diagnostics + memories in one shot.")
+                lines.append(f"  • {name:<18} {desc}")
+            lines.append("")
+            lines.append(
+                "💡 Recommended flow before any edit:\n"
+                "   1. omni_context(file=…)                 — get the lay of the land\n"
+                "   2. omni_impact(symbol=…)                — check blast radius\n"
+                "   3. omni_diagnostics(file=…)             — see existing issues\n"
+                "   4. omni_patch(action='preview', …)      — render the diff\n"
+                "   5. omni_patch(action='validate', …)     — run static checks\n"
+                "   6. omni_patch(action='apply', …)        — write + create rollback hook"
+            )
             return "\n".join(lines)
 
         # Filter by query
