@@ -1,13 +1,15 @@
 # OmniCode-MCP — Feature Inventory
 
 > Snapshot of the shipped feature set on the `foolkking/main` branch
-> through commit `68b911e`. Use this as the single source of truth
+> through commit `3e64aae`. Use this as the single source of truth
 > when explaining the project to a new collaborator or to an LLM.
 >
 > Pairs with:
 > * [`docs/architecture-v2.md`](architecture-v2.md) — the long-form
 >   architecture plan.
-> * [`docs/wave2-plan.md`](wave2-plan.md) — what's still parked.
+> * [`docs/wave2-plan.md`](wave2-plan.md) — Wave 2 implementation log.
+> * [`docs/final-audit.md`](final-audit.md) — point-by-point check
+>   against the original architecture prompt.
 > * [`docs/cloud-deployment.md`](cloud-deployment.md) — production
 >   deployment guide.
 
@@ -335,24 +337,24 @@ Run-helpers under `scripts/` (`run.bat`/`.sh`, `run-dev.bat`/`.sh`,
 
 | Path | Holds |
 |---|---|
-| `<wd>/.data/vector_store.faiss` | FAISS index of code chunks |
-| `<wd>/.data/vector_store.db`    | chunk metadata (SQLite) |
-| `<wd>/.data/file_tracker.db`    | mtime / hash for incremental indexing |
-| `<wd>/.data/snapshots/`         | pre-apply file backups |
-| `<wd>/.data/edit_sessions/`     | JSON session records |
-| `<wd>/.data/selections.db`      | selected-text history |
-| `~/.kiro/codebase-mcp/providers.db`  | encrypted provider keys |
-| `~/.kiro/codebase-mcp/users.db`      | RBAC users + token hashes |
-| `~/.kiro/codebase-mcp/workspaces.json` | workspace bookmarks |
+| `<wd>/.data/shards/<shard_id>/vector_store.faiss` | FAISS index of code chunks (per workspace) |
+| `<wd>/.data/shards/<shard_id>/vector_store.db`    | chunk metadata (SQLite) |
+| `<wd>/.data/shards/<shard_id>/file_tracker.db`    | mtime / hash for incremental indexing |
+| `<wd>/.data/shards/<shard_id>/snapshots/`         | pre-apply file backups |
+| `<wd>/.data/shards/<shard_id>/edit_sessions/`     | JSON session records |
+| `~/.kiro/codebase-mcp/providers.db`               | encrypted provider keys |
+| `~/.kiro/codebase-mcp/users.db`                   | RBAC users + token hashes (versioned via PRAGMA user_version) |
+| `~/.kiro/codebase-mcp/workspaces.json`            | workspace bookmarks |
 
 ---
 
 ## 14 · Engineering & quality
 
-* **Tests**: `pytest tests/` — currently **378 passed, 2 skipped**.
-  Unit tests under `tests/unit/` (≈30 files), integration under
-  `tests/integration/` (composer + REST + edit pipeline + issue
-  linker).
+* **Tests**: `pytest tests/` — currently **433 passed, 12 skipped**
+  (skipped tests are LSP binary probes that auto-skip when the
+  server isn't installed locally).
+  Unit tests under `tests/unit/` (40+ files), integration under
+  `tests/integration/` (composer + REST + edit pipeline + agent).
 * **Lint**: `ruff check omnicode omnicode_core omnicode_adapters api core tests`
   — clean.
 * **CI**: `.github/workflows/ci.yml` — Python 3.11 / 3.12 matrix,
@@ -380,13 +382,16 @@ omnicode_core/
 ├── graph/
 │   └── impact.py     # ImpactAnalyzer (7 public methods)
 ├── index/
-│   └── file_tracker.py  # incremental index bookkeeping
+│   ├── file_tracker.py  # incremental index bookkeeping
+│   └── sharding.py      # per-workspace FAISS shards (W2-10)
 ├── intelligence/
 │   └── composer.py   # eight-capability orchestrator
 ├── lsp/
 │   └── bridge.py     # LSP JSON-RPC client (5 servers)
 ├── memory/
 │   └── advisory.py   # MemoryAdvisor
+├── search/
+│   └── reranker.py   # cross-encoder rerank (W2-9, opt-in)
 ├── security/
 │   └── sandbox.py    # path traversal guard
 └── workspace/
