@@ -19,7 +19,9 @@ Usage by AI clients:
 
 import json
 import logging
-from typing import Any, Dict, Optional
+import re
+from pathlib import PurePosixPath
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,413 @@ def _format_json(data: Any, max_lines: int = 80) -> str:
     if len(lines) > max_lines:
         return "\n".join(lines[:max_lines]) + f"\n... ({len(lines) - max_lines} more lines)"
     return text
+
+
+# ---------------------------------------------------------------------------
+# omni_search helpers
+# ---------------------------------------------------------------------------
+
+# Default globs when the caller doesn't pass file_pattern. Mirrors the
+# backend default in omnicode_core.search.text_grep.
+_DEFAULT_TEXT_GLOBS = (
+    "*.py,*.js,*.jsx,*.ts,*.tsx,*.go,*.rs,*.java,*.cpp,*.c,*.h,"
+    "*.rb,*.php,*.kt,*.cs,*.md,*.toml,*.yaml,*.yml,*.json"
+)
+
+_IDENT_RE = re.compile(r"^[A-Za-z_][\w.]*$")
+_CONST_RE = re.compile(r"^[A-Z][A-Z0-9_]+$")
+_QUOTED_RE = re.compile(r'^"[^"]+"$|^\'[^\']+\'$')
+
+
+def _detect_mode(query: str) -> str:
+    """Pick a sensible default mode from the query shape.
+
+    Heuristics, ordered by confidence:
+
+    1. Exact ALL_CAPS_IDENTIFIER → ``text``  (env vars, constants).
+    2. Quoted literal ``"foo bar"`` → ``text``.
+    3. Dotted / underscored identifier (no spaces, < 60 chars) → ``symbol``.
+    4. Short natural-language query (≤ 3 words) → ``hybrid``.
+    5. Anything else → ``semantic``.
+    """
+    q = query.strip()
+    if not q:
+        return "semantic"
+
+    if _CONST_RE.fullmatch(q):
+        return "text"
+
+    if _QUOTED_RE.fullmatch(q):
+        return "text"
+
+    if _IDENT_RE.fullmatch(q) and len(q) <= 60:
+        return "symbol"
+
+    word_count = len(q.split())
+    if word_count <= 3 and len(q) <= 40:
+        return "hybrid"
+
+    return "semantic"
+
+
+async def _run_semantic(
+    make_request, query: str, file_pattern: Optional[str], max_results: int, rerank: bool
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Pure semantic (FAISS) search. Optional cross-encoder rerank."""
+    payload: Dict[str, Any] = {
+        "query": query,
+        "search_type": "semantic",
+        "max_results": max(max_results, 10),
+    }
+    if file_pattern:
+        payload["file_pattern"] = file_pattern.split(",")[0].strip()
+
+    raw = await make_request("POST", "/search", json=payload)
+    data = raw.get("result", raw) if isinstance(raw, dict) else {}
+    results = list(data.get("results", []))
+
+    if rerank:
+        # The backend already invokes the reranker when OMNICODE_RERANKER=true,
+        # but we add the tag here so the tool surface still mentions reranking
+        # is on by default at the MCP layer (informational only).
+        for r in results:
+            why = list(r.get("why_matched", []) or [])
+            if "reranker:requested" not in why:
+                why.append("reranker:requested")
+            r["why_matched"] = why
+
+    return results, data.get("total_results", len(results))
+
+
+async def _run_symbol(
+    make_request, query: str, file_pattern: Optional[str], max_results: int
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Fuzzy symbol-name search."""
+    params = {"query": query, "fuzzy": True, "max_results": max_results}
+    if file_pattern:
+        # symbol_search backend takes a single glob, take the first.
+        params["file_pattern"] = file_pattern.split(",")[0].strip()
+
+    raw = await make_request("POST", "/search/symbols", params=params)
+    data = raw.get("result", raw) if isinstance(raw, dict) else {}
+    results = list(data.get("results", []))
+    return results, data.get("total_results", len(results))
+
+
+async def _run_text(
+    make_request, query: str, file_pattern: Optional[str], max_results: int
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Line-level grep across the workspace."""
+    params = {
+        "query": query,
+        "file_pattern": file_pattern or _DEFAULT_TEXT_GLOBS,
+        "max_results": max_results,
+        "context_lines": 2,
+    }
+    raw = await make_request("POST", "/search/text", params=params)
+    data = raw.get("result", raw) if isinstance(raw, dict) else {}
+    results = list(data.get("results", []))
+    return results, data.get("total_results", len(results))
+
+
+async def _run_hybrid(
+    make_request, query: str, file_pattern: Optional[str], max_results: int, rerank: bool
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Run symbol + semantic searches in parallel, fuse with RRF."""
+    import asyncio
+
+    # Over-fetch each side so RRF has material to work with.
+    overfetch = max(max_results * 3, 15)
+    sym_task = _run_symbol(make_request, query, file_pattern, overfetch)
+    sem_task = _run_semantic(make_request, query, file_pattern, overfetch, rerank)
+    sym_pair, sem_pair = await asyncio.gather(sym_task, sem_task)
+
+    sym_results, _ = sym_pair
+    sem_results, _ = sem_pair
+
+    fused = _rrf_fuse([sym_results, sem_results], labels=["symbol", "semantic"])
+    return fused[:max_results], len(fused)
+
+
+def _rrf_fuse(
+    lists: List[List[Dict[str, Any]]], labels: List[str], k: int = 60
+) -> List[Dict[str, Any]]:
+    """Reciprocal Rank Fusion across multiple result lists.
+
+    Each item is keyed by ``(file_path, line_start_or_line_number,
+    symbol_name)`` so the same hit found by both sources merges.
+    """
+    scores: Dict[Tuple[str, Any, str], float] = {}
+    items: Dict[Tuple[str, Any, str], Dict[str, Any]] = {}
+    sources: Dict[Tuple[str, Any, str], List[str]] = {}
+
+    for lst, label in zip(lists, labels, strict=False):
+        for rank, item in enumerate(lst):
+            key = (
+                item.get("file_path", ""),
+                item.get("line_start") or item.get("line_number") or 0,
+                item.get("symbol_name", ""),
+            )
+            if key not in scores:
+                scores[key] = 0.0
+                items[key] = dict(item)
+                sources[key] = []
+            scores[key] += 1.0 / (k + rank + 1)
+            if label not in sources[key]:
+                sources[key].append(label)
+
+    fused = []
+    for key, score in sorted(scores.items(), key=lambda kv: kv[1], reverse=True):
+        item = items[key]
+        item["relevance_score"] = score
+        why = list(item.get("why_matched", []) or [])
+        for label in sources[key]:
+            tag = f"hybrid:{label}"
+            if tag not in why:
+                why.append(tag)
+        item["why_matched"] = why
+        fused.append(item)
+    return fused
+
+
+async def _run_references(
+    make_request, query: str, max_results: int
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Find every usage of a symbol via the LSP bridge.
+
+    The LSP ``references`` endpoint takes a position, not a name, so we
+    first look up the symbol via ``/lsp/workspace-symbols`` to anchor
+    on a real declaration, then ask LSP for the usages.
+    """
+    # Step 1: locate the declaration via workspace-symbols.
+    raw = await make_request("GET", "/lsp/workspace-symbols", params={"query": query})
+    data = raw.get("result", raw) if isinstance(raw, dict) else {}
+    locations = data.get("symbols", []) or data.get("locations", [])
+    if not locations:
+        # Fall back to the AST symbol search to find a candidate.
+        sym_results, _ = await _run_symbol(make_request, query, None, 1)
+        if not sym_results:
+            return [], 0
+        first = sym_results[0]
+        anchor_file = first.get("file_path", "")
+        anchor_line = (first.get("line_start") or 1) - 1
+        anchor_col = 0
+    else:
+        anchor = locations[0]
+        anchor_file = (
+            anchor.get("file_path")
+            or anchor.get("file")
+            or anchor.get("uri", "").replace("file://", "")
+        )
+        loc = anchor.get("location") or anchor
+        rng = loc.get("range", {}).get("start", {}) if isinstance(loc, dict) else {}
+        anchor_line = rng.get("line", 0)
+        anchor_col = rng.get("character", 0)
+
+    if not anchor_file:
+        return [], 0
+
+    # Step 2: ask LSP for references at that position.
+    raw = await make_request(
+        "POST",
+        "/lsp/references",
+        params={
+            "file": anchor_file,
+            "line": anchor_line,
+            "col": anchor_col,
+            "include_declaration": True,
+        },
+    )
+    data = raw.get("result", raw) if isinstance(raw, dict) else {}
+    refs = data.get("locations") or data.get("references") or []
+
+    results = []
+    for ref in refs[:max_results]:
+        file = (
+            ref.get("file_path")
+            or ref.get("file")
+            or ref.get("uri", "").replace("file://", "")
+        )
+        rng = ref.get("range", {}).get("start", {}) if isinstance(ref, dict) else {}
+        line = rng.get("line", 0) + 1  # LSP is 0-indexed; show 1-indexed
+        results.append(
+            {
+                "file_path": file,
+                "line_number": line,
+                "symbol_name": query,
+                "match_type": "reference",
+                "relevance_score": 1.0,
+                "why_matched": ["lsp:references"],
+            }
+        )
+
+    return results, len(refs)
+
+
+def _rerank_by_proximity(
+    results: List[Dict[str, Any]], around_file: str
+) -> List[Dict[str, Any]]:
+    """Bump results that sit close to ``around_file`` in the file tree.
+
+    Same-file > same-directory > parent-directory > rest.
+    """
+    anchor = PurePosixPath(around_file.replace("\\", "/"))
+
+    def proximity_score(path: str) -> int:
+        if not path:
+            return 0
+        p = PurePosixPath(path.replace("\\", "/"))
+        if p == anchor:
+            return 100
+        if p.parent == anchor.parent:
+            return 50
+        # one directory above
+        if str(p.parent).startswith(str(anchor.parent.parent)):
+            return 20
+        return 0
+
+    enriched = []
+    for r in results:
+        bump = proximity_score(r.get("file_path", ""))
+        if bump:
+            r["relevance_score"] = float(r.get("relevance_score", 0)) + bump / 100
+            why = list(r.get("why_matched", []) or [])
+            why.append(f"proximity:{bump}")
+            r["why_matched"] = why
+        enriched.append(r)
+
+    enriched.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
+    return enriched
+
+
+def _no_results_message(query: str, resolved_mode: str, requested_mode: str) -> str:
+    """Render an actionable hint when search came back empty."""
+    suggestions = []
+    if resolved_mode != "text":
+        suggestions.append("• `mode=text`   — line-level grep on the literal string")
+    if resolved_mode != "symbol":
+        suggestions.append("• `mode=symbol` — fuzzy match on function/class names")
+    if resolved_mode != "semantic":
+        suggestions.append("• `mode=semantic` — natural-language → code")
+    if resolved_mode != "hybrid":
+        suggestions.append("• `mode=hybrid` — fuse symbol + semantic via RRF")
+
+    # Lightweight query-rewrite suggestions.
+    rewrites: List[str] = []
+    q = query.strip()
+    parts = re.findall(r"[A-Z][a-z]+|[a-z]+|[0-9]+", q.replace("_", " "))
+    if parts and " ".join(parts).lower() != q.lower():
+        rewrites.append(f"`{' '.join(parts).lower()}`  (split identifier into words)")
+    if "_" in q and " " not in q:
+        rewrites.append(f"`{q.replace('_', ' ')}`  (treat underscores as spaces)")
+    if len(q) > 30:
+        rewrites.append(f"`{' '.join(q.split()[:3])}…`  (shorter, focus on core terms)")
+
+    if requested_mode == "auto":
+        header = f"🔍 No results for '{query}' (mode=auto→{resolved_mode})"
+    else:
+        header = f"🔍 No results for '{query}' (mode={resolved_mode})"
+
+    lines = [header, ""]
+    if suggestions:
+        lines.append("Try a different mode:")
+        lines.extend(suggestions)
+        lines.append("")
+    if rewrites:
+        lines.append("Or rewrite the query:")
+        for r in rewrites:
+            lines.append(f"• {r}")
+        lines.append("")
+    lines.append("Common misses: case sensitivity, language filter (try `file_pattern='*'`).")
+    return "\n".join(lines)
+
+
+def _approx_token_count(text: str) -> int:
+    """Rough estimator — every 4 chars is ~1 token. Good enough for budget gates."""
+    return max(1, len(text) // 4)
+
+
+def _render_results(
+    *,
+    query: str,
+    requested_mode: str,
+    resolved_mode: str,
+    results: List[Dict[str, Any]],
+    total: int,
+    token_budget: int,
+) -> str:
+    """Render search results as plain text.
+
+    When ``token_budget > 0`` we render in two passes: first a verbose
+    pass with snippet + context, then if the total would blow the
+    budget we fall back to a compact pass that drops snippets.
+    """
+    header_mode = (
+        f"mode={requested_mode}" if requested_mode == resolved_mode
+        else f"mode={requested_mode}→{resolved_mode}"
+    )
+    header = f"🔍 {total} result(s) for '{query}' ({header_mode})\n"
+
+    verbose = [header]
+    for i, r in enumerate(results, 1):
+        verbose.extend(_render_one_result(i, r, with_snippet=True))
+
+    full = "\n".join(verbose)
+
+    if token_budget <= 0 or _approx_token_count(full) <= token_budget:
+        return full
+
+    # Compact pass — drop snippets / context.
+    compact = [header]
+    for i, r in enumerate(results, 1):
+        compact.extend(_render_one_result(i, r, with_snippet=False))
+    compact.append(f"\n(token-budget {token_budget} exceeded full render; snippets dropped)")
+    return "\n".join(compact)
+
+
+def _render_one_result(idx: int, r: Dict[str, Any], *, with_snippet: bool) -> List[str]:
+    """Format a single hit — works for symbol / semantic / text / reference."""
+    file = r.get("file_path", "")
+    line_no = (
+        r.get("line_number")
+        or r.get("line_start")
+        or 0
+    )
+    name = r.get("symbol_name") or file or "?"
+    kind = r.get("symbol_type") or r.get("chunk_type") or r.get("match_type") or ""
+    score = r.get("relevance_score", 0)
+    why = r.get("why_matched") or []
+    sig = r.get("signature", "")
+    line_content = r.get("line_content", "")
+    ctx_before = r.get("context_before") or []
+    ctx_after = r.get("context_after") or []
+
+    out = [f"{idx}. {name}"]
+    if file:
+        out.append(f"   📄 {file}:{line_no}")
+    if kind or why:
+        tail = f"score={score:.2f}" if isinstance(score, (int, float)) else ""
+        if why:
+            tail += f"  why={','.join(why[:4])}"
+        out.append(f"   🏷️ {kind}  {tail}".rstrip())
+
+    if not with_snippet:
+        out.append("")
+        return out
+
+    if line_content:
+        # Text-mode hit: render ±N lines context.
+        out.append("   📜 snippet:")
+        start_line = line_no - len(ctx_before)
+        for offset, raw_line in enumerate(ctx_before + [line_content] + ctx_after):
+            n = start_line + offset
+            marker = "►" if n == line_no else " "
+            out.append(f"      {marker} {n:>4} | {raw_line}")
+    elif sig:
+        # Symbol/semantic hit: render the signature.
+        out.append(f"   ✏️ {sig[:160]}")
+    out.append("")
+    return out
 
 
 def register_high_level_tools(mcp, make_request):
@@ -47,80 +456,79 @@ def register_high_level_tools(mcp, make_request):
         mode: str = "auto",
         file_pattern: Optional[str] = None,
         max_results: int = 10,
+        rerank: bool = True,
+        token_budget: int = 0,
+        around_file: Optional[str] = None,
     ) -> str:
-        """Search the codebase with automatic mode selection.
+        """Search the codebase with adaptive mode selection.
 
         Modes:
-          - auto: intelligently picks the best search strategy
-          - semantic: natural language → code (FAISS embedding similarity)
-          - symbol: fuzzy symbol name matching (function/class names)
-          - text: exact substring search
-          - references: find all usages of a symbol (requires LSP)
+          - auto:       rule-based pick across {symbol, text, hybrid, semantic}
+          - hybrid:     run symbol + semantic in parallel, fuse with RRF
+          - semantic:   natural language → code (FAISS bi-encoder + optional rerank)
+          - symbol:     fuzzy symbol-name matching across functions/classes/methods
+          - text:       line-level grep (returns real line numbers + ±2 lines context)
+          - references: find every usage of a symbol via the LSP bridge
 
-        Returns structured results with file, symbol, score, and why_matched.
+        Other parameters:
+          - file_pattern:  comma-separated globs ("*.py,*.md"); applies to text mode
+                           (and is forwarded as a filter where supported).
+          - rerank:        request cross-encoder rerank for semantic/hybrid (W2-9).
+                           Effective only when ``OMNICODE_RERANKER=true`` in the
+                           server env; otherwise the parameter is a no-op.
+          - token_budget:  if > 0, trim the rendered output to roughly this many
+                           tokens by dropping snippets/context first.
+          - around_file:   bias results toward this file's neighbourhood (callgraph
+                           hops + same directory). Other files still appear, just
+                           lower in rank.
+
+        Returns plain text in a structured layout: per-result file + line, kind,
+        score, why_matched tags, and (when budget allows) ±2 lines of code.
+
+        On 0 hits the tool suggests alternative modes and broader queries.
         """
         try:
-            # Auto mode: if query looks like a symbol name (no spaces, camelCase
-            # or snake_case), use symbol search; otherwise semantic.
-            if mode == "auto":
-                has_spaces = " " in query.strip()
-                if not has_spaces and len(query) < 60:
-                    mode = "symbol"
-                else:
-                    mode = "semantic"
+            resolved_mode = _detect_mode(query) if mode == "auto" else mode
 
-            if mode == "symbol":
-                result = await make_request("POST", "/search/symbols", params={
-                    "query": query,
-                    "fuzzy": True,
-                    "max_results": max_results,
-                })
-            elif mode == "text":
-                result = await make_request("POST", "/search/text", params={
-                    "query": query,
-                    "file_pattern": file_pattern or "*.py",
-                    "max_results": max_results,
-                })
-            elif mode == "semantic":
-                result = await make_request("POST", "/search", json={
-                    "query": query,
-                    "search_type": "semantic",
-                    "file_pattern": file_pattern,
-                    "max_results": max_results,
-                })
+            if resolved_mode == "hybrid":
+                results, total = await _run_hybrid(
+                    make_request, query, file_pattern, max_results, rerank
+                )
+            elif resolved_mode == "semantic":
+                results, total = await _run_semantic(
+                    make_request, query, file_pattern, max_results, rerank
+                )
+            elif resolved_mode == "symbol":
+                results, total = await _run_symbol(
+                    make_request, query, file_pattern, max_results
+                )
+            elif resolved_mode == "text":
+                results, total = await _run_text(
+                    make_request, query, file_pattern, max_results
+                )
+            elif resolved_mode == "references":
+                results, total = await _run_references(make_request, query, max_results)
             else:
-                return f"❌ Unknown search mode: {mode}. Use: auto, semantic, symbol, text"
+                return (
+                    f"❌ Unknown search mode: {mode}.\n"
+                    f"   Use one of: auto, hybrid, semantic, symbol, text, references"
+                )
 
-            if "error" in result:
-                return f"❌ Search error: {result['error']}"
-
-            # Format results
-            data = result.get("result", result)
-            results = data.get("results", [])
-            total = data.get("total_results", len(results))
+            # Bias results toward `around_file`'s neighbourhood when asked.
+            if around_file and results:
+                results = _rerank_by_proximity(results, around_file)
 
             if not results:
-                return f"🔍 No results for '{query}' (mode={mode})"
+                return _no_results_message(query, resolved_mode, mode)
 
-            lines = [f"🔍 {total} result(s) for '{query}' (mode={mode})\n"]
-            for i, r in enumerate(results[:max_results], 1):
-                name = r.get("symbol_name") or r.get("file_path", "?")
-                file = r.get("file_path", "")
-                score = r.get("relevance_score", 0)
-                kind = r.get("symbol_type") or r.get("chunk_type", "")
-                sig = r.get("signature", "")
-                line_start = r.get("line_start") or r.get("line_number", "")
-
-                lines.append(f"{i}. {name}")
-                if file:
-                    lines.append(f"   📄 {file}:{line_start}")
-                if kind:
-                    lines.append(f"   🏷️ {kind}  score={score:.2f}")
-                if sig:
-                    lines.append(f"   ✏️ {sig[:120]}")
-                lines.append("")
-
-            return "\n".join(lines)
+            return _render_results(
+                query=query,
+                requested_mode=mode,
+                resolved_mode=resolved_mode,
+                results=results[:max_results],
+                total=total,
+                token_budget=token_budget,
+            )
 
         except Exception as e:
             return f"❌ Search failed: {e}"

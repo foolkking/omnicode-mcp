@@ -123,37 +123,57 @@ async def update_file_index(
 @router.post("/text")
 async def text_search(
     query: str = Query(..., description="Text to search for"),
-    file_pattern: str = Query("*.py", description="File pattern filter"),
+    file_pattern: str = Query(
+        "",
+        description="Comma-separated globs (e.g. '*.py,*.md'). Empty = sensible source-code defaults.",
+    ),
     use_regex: bool = Query(False, description="Use regex matching"),
     case_sensitive: bool = Query(False, description="Case sensitive search"),
     max_results: int = Query(50, description="Maximum results"),
+    context_lines: int = Query(2, description="Lines of context before/after each hit"),
 ):
-    """Search for text content in files"""
-    try:
-        search_engine = get_search_engine()
-        if not search_engine:
-            return create_error_response("Semantic search not initialized", 500)
+    """Line-level text search across the workspace.
 
-        request = SearchRequest(
-            query=query,
-            search_type="text",
-            file_pattern=file_pattern,
-            use_regex=use_regex,
-            case_sensitive=case_sensitive,
-            max_results=max_results,
+    Walks the working directory, prunes vendor / cache directories,
+    and returns real `(file, line_no, line_content, context_before,
+    context_after)` records with column spans for highlighting.
+
+    Unlike the previous SQLite-chunk LIKE scan, this hits every file
+    that matches ``file_pattern`` — not just files that have been
+    indexed — so freshly-added code is searchable immediately.
+    """
+    try:
+        from omnicode_core.search.text_grep import grep_workspace
+
+        settings = get_settings()
+        patterns = (
+            [p.strip() for p in file_pattern.split(",") if p.strip()]
+            if file_pattern
+            else None
         )
 
-        results = await search_engine.search(request)
+        hits = grep_workspace(
+            workspace_root=settings.WORKING_DIR,
+            query=query,
+            file_patterns=patterns,
+            max_results=max_results,
+            context_lines=context_lines,
+            use_regex=use_regex,
+            case_sensitive=case_sensitive,
+        )
 
-        # Format results for API response
-        formatted_results = []
-        for result in results:
-            formatted_results.append(
+        results = []
+        for h in hits:
+            results.append(
                 {
-                    "file_path": result.file_path,
-                    "line_number": result.line_start,
-                    "content": result.chunk_type,  # Contains the matched line content
+                    "file_path": h.file_path,
+                    "line_number": h.line_number,
+                    "line_content": h.line_content,
+                    "context_before": h.context_before,
+                    "context_after": h.context_after,
+                    "match_span": list(h.match_span),
                     "match_type": "text",
+                    "why_matched": ["text:line_match"],
                 }
             )
 
@@ -161,10 +181,11 @@ async def text_search(
             {
                 "query": query,
                 "search_type": "text",
-                "file_pattern": file_pattern,
+                "file_pattern": file_pattern or "(defaults)",
                 "use_regex": use_regex,
-                "results": formatted_results,
-                "total_results": len(formatted_results),
+                "case_sensitive": case_sensitive,
+                "results": results,
+                "total_results": len(results),
             }
         )
 
