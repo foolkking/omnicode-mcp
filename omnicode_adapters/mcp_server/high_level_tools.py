@@ -429,11 +429,22 @@ def _render_one_result(idx: int, r: Dict[str, Any], *, with_snippet: bool) -> Li
 
     if line_content:
         # Text-mode hit: render ±N lines context.
-        out.append("   📜 snippet:")
+        merged_extra = r.get("merged_lines") or []
+        if merged_extra:
+            out.append(
+                f"   📜 snippet (+ {len(merged_extra)} adjacent match"
+                f"{'es' if len(merged_extra) != 1 else ''}):"
+            )
+        else:
+            out.append("   📜 snippet:")
         start_line = line_no - len(ctx_before)
+        merged_set = set(merged_extra)
         for offset, raw_line in enumerate(ctx_before + [line_content] + ctx_after):
             n = start_line + offset
-            marker = "►" if n == line_no else " "
+            if n == line_no or n in merged_set:
+                marker = "►"
+            else:
+                marker = " "
             out.append(f"      {marker} {n:>4} | {raw_line}")
     elif sig:
         # Symbol/semantic hit: render the signature.

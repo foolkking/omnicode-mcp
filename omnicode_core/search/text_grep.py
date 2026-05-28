@@ -133,6 +133,7 @@ class GrepHit:
             "context_before": self.context_before,
             "context_after": self.context_after,
             "match_span": list(self.match_span),
+            "merged_lines": list(getattr(self, "_merged_lines", []) or []),
         }
 
 
@@ -261,6 +262,7 @@ def grep_workspace(
     context_lines: int = 2,
     use_regex: bool = False,
     case_sensitive: bool = False,
+    merge_adjacent: bool = True,
 ) -> List[GrepHit]:
     """Run a line-level text search over the workspace.
 
@@ -285,6 +287,11 @@ def grep_workspace(
         Treat ``query`` as a regex instead of a plain substring.
     case_sensitive:
         Default behaviour is case-insensitive (matches grep -i).
+    merge_adjacent:
+        When two hits are within ``2 * context_lines + 1`` lines of each
+        other in the same file, merge them into a single hit covering
+        both. Mirrors ripgrep's default grouping behaviour. Set False to
+        keep every match as a separate row.
     """
     if not query.strip():
         return []
@@ -309,10 +316,81 @@ def grep_workspace(
             remaining=remaining,
         )
         if hits:
+            if merge_adjacent and context_lines > 0:
+                hits = _merge_adjacent_hits(hits, context_lines)
             out.extend(hits)
             remaining -= len(hits)
 
     return out
+
+
+def _merge_adjacent_hits(hits: List[GrepHit], context_lines: int) -> List[GrepHit]:
+    """Merge hits whose context windows overlap.
+
+    Two hits in the same file at lines ``a < b`` are merged when
+    ``b - a <= 2 * context_lines + 1``. The merged record:
+
+    * keeps the earliest line as ``line_number`` (the "anchor"),
+    * appends every additional matched line after the anchor as part of
+      ``context_after`` (so the rendered snippet still shows them),
+    * keeps the original ``match_span`` of the first hit (downstream
+      renderers are expected to only show the anchor's column markers
+      anyway).
+
+    The implementation is O(n) and assumes hits arrive in line order
+    (which ``_scan_file`` produces).
+    """
+    if not hits:
+        return hits
+
+    merged: List[GrepHit] = []
+    for h in hits:
+        if not merged or merged[-1].file_path != h.file_path:
+            merged.append(h)
+            continue
+
+        prev = merged[-1]
+        # Range of lines the previous record's context window covers.
+        prev_window_end = prev.line_number + len(prev.context_after)
+        gap = h.line_number - prev_window_end
+
+        if gap <= context_lines:
+            # Overlap or touching — extend prev.context_after so it now
+            # spans through h.line_number + its context_after, while
+            # de-duplicating overlap.
+            prev_anchor = prev.line_number
+            covered_through = max(
+                prev_anchor + len(prev.context_after),
+                h.line_number + len(h.context_after),
+            )
+            new_after: List[str] = []
+            # Walk every line index after the anchor up to ``covered_through``.
+            # We rebuild from h's content so the new lines are included.
+            # ``h.context_before`` covers lines (h.line_number - len(h.context_before)) .. (h.line_number - 1)
+            # ``h.line_content`` is line h.line_number
+            # ``h.context_after`` covers lines (h.line_number + 1) .. (h.line_number + len(h.context_after))
+            # ``prev.context_after`` covers (prev_anchor + 1) .. (prev_anchor + len(prev.context_after))
+            for offset in range(1, covered_through - prev_anchor + 1):
+                line_no = prev_anchor + offset
+                if line_no <= prev_anchor + len(prev.context_after):
+                    new_after.append(prev.context_after[line_no - prev_anchor - 1])
+                elif line_no == h.line_number:
+                    new_after.append(h.line_content)
+                elif line_no - h.line_number - 1 < len(h.context_after):
+                    new_after.append(h.context_after[line_no - h.line_number - 1])
+                else:
+                    # Gap we don't have content for — pad with empty line.
+                    new_after.append("")
+            prev.context_after = new_after
+            # Track the merged extra match line numbers in why_matched-style
+            # piggyback: use the dataclass's ``__dict__`` since we don't
+            # want to expand the public schema for this micro-feature.
+            extra = prev.__dict__.setdefault("_merged_lines", [])
+            extra.append(h.line_number)
+        else:
+            merged.append(h)
+
+    return merged
 
 
 __all__ = ["GrepHit", "grep_workspace"]

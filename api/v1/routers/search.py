@@ -164,18 +164,25 @@ async def text_search(
 
         results = []
         for h in hits:
-            results.append(
-                {
-                    "file_path": h.file_path,
-                    "line_number": h.line_number,
-                    "line_content": h.line_content,
-                    "context_before": h.context_before,
-                    "context_after": h.context_after,
-                    "match_span": list(h.match_span),
-                    "match_type": "text",
-                    "why_matched": ["text:line_match"],
-                }
-            )
+            row = {
+                "file_path": h.file_path,
+                "line_number": h.line_number,
+                "line_content": h.line_content,
+                "context_before": h.context_before,
+                "context_after": h.context_after,
+                "match_span": list(h.match_span),
+                "match_type": "text",
+                # Plain-text matches don't have a continuous relevance
+                # score; every hit is equally "matched". Use 1.0 so the
+                # MCP renderer doesn't display a bogus 0.00.
+                "relevance_score": 1.0,
+                "why_matched": ["text:line_match"],
+            }
+            merged_extra = list(getattr(h, "_merged_lines", []) or [])
+            if merged_extra:
+                row["merged_lines"] = merged_extra
+                row["why_matched"].append(f"text:merged({len(merged_extra) + 1})")
+            results.append(row)
 
         return create_success_response(
             {
