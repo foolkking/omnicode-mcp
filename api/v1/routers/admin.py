@@ -8,12 +8,53 @@ caller becomes admin.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from omnicode_core.auth import Role, get_user_store
+from omnicode_core.observability import get_audit_log, get_rate_limiter
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+# ---------------------------------------------------------------------------
+# Per-IP rate limit dep — applied to every mutating endpoint here.
+# Read endpoints (GET) skip rate limiting; the value of audit-logging
+# every list_users() request is low and this keeps the limiter table small.
+# ---------------------------------------------------------------------------
+def _rate_limit_admin(request: Request) -> None:
+    """Reject calls from a (per-IP) bucket that exceeds the admin policy.
+
+    Default: 30 mutations / minute / IP, burst of 10. Override via
+    ``OMNICODE_ADMIN_RATE_LIMIT`` env var (decimal, requests per minute).
+    """
+    import os
+    rate = float(os.environ.get("OMNICODE_ADMIN_RATE_LIMIT", "30"))
+    limiter = get_rate_limiter("admin", rate_per_minute=rate, burst=10)
+    ip = (request.client.host if request.client else "") or "anonymous"
+    allowed, retry_after = limiter.check("admin", ip)
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Rate limit exceeded for /admin/* "
+                f"(retry after {retry_after:.1f}s). "
+                f"Tune OMNICODE_ADMIN_RATE_LIMIT to raise."
+            ),
+            headers={"Retry-After": f"{int(retry_after) + 1}"},
+        )
+
+
+def _emit_audit(request: Request, action: str, target: str, outcome: str) -> None:
+    ip = (request.client.host if request.client else "") or ""
+    get_audit_log().emit(
+        actor="anonymous",  # actor lookup happens in middleware; admin shape
+                            # currently doesn't surface the resolved user
+        action=action,
+        target=target,
+        ip=ip,
+        outcome=outcome,
+    )
 
 
 def _ok(payload):
@@ -46,11 +87,12 @@ async def list_users():
     return _ok({"users": [u.to_dict() for u in get_user_store().list_users()]})
 
 
-@router.post("/users")
-async def create_user(body: _CreateUserBody):
+@router.post("/users", dependencies=[Depends(_rate_limit_admin)])
+async def create_user(body: _CreateUserBody, request: Request):
     try:
         role = Role.parse(body.role)
     except ValueError as exc:
+        _emit_audit(request, "POST /admin/users", body.username, "denied")
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     store = get_user_store()
     # Bootstrap rule: when no users exist, force the first one to be admin so
@@ -64,6 +106,7 @@ async def create_user(body: _CreateUserBody):
     try:
         user = store.create_user(body.username, role)
     except ValueError as exc:
+        _emit_audit(request, "POST /admin/users", body.username, "denied")
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     payload = {"user": user.to_dict()}
@@ -74,25 +117,34 @@ async def create_user(body: _CreateUserBody):
             "Save this token now — it cannot be retrieved again. "
             "Send it as X-API-Key on subsequent admin requests."
         )
+    _emit_audit(
+        request, "POST /admin/users", body.username,
+        "ok_bootstrap" if is_bootstrap else "ok",
+    )
     return _ok(payload)
 
 
-@router.put("/users/{username}/role")
-async def update_role(username: str, body: _UpdateRoleBody):
+@router.put("/users/{username}/role", dependencies=[Depends(_rate_limit_admin)])
+async def update_role(username: str, body: _UpdateRoleBody, request: Request):
     try:
         role = Role.parse(body.role)
     except ValueError as exc:
+        _emit_audit(request, "PUT /admin/users/{u}/role", username, "denied")
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     user = get_user_store().update_role(username, role)
     if user is None:
+        _emit_audit(request, "PUT /admin/users/{u}/role", username, "not_found")
         raise HTTPException(status_code=404, detail="user not found")
+    _emit_audit(request, "PUT /admin/users/{u}/role", f"{username}->{role.value}", "ok")
     return _ok({"user": user.to_dict()})
 
 
-@router.delete("/users/{username}")
-async def delete_user(username: str):
+@router.delete("/users/{username}", dependencies=[Depends(_rate_limit_admin)])
+async def delete_user(username: str, request: Request):
     if not get_user_store().delete_user(username):
+        _emit_audit(request, "DELETE /admin/users/{u}", username, "not_found")
         raise HTTPException(status_code=404, detail="user not found")
+    _emit_audit(request, "DELETE /admin/users/{u}", username, "ok")
     return _ok({"deleted": username})
 
 
@@ -104,8 +156,8 @@ async def list_tokens(username: str | None = None):
     return _ok({"tokens": get_user_store().list_tokens(username)})
 
 
-@router.post("/tokens")
-async def issue_token(body: _IssueTokenBody):
+@router.post("/tokens", dependencies=[Depends(_rate_limit_admin)])
+async def issue_token(body: _IssueTokenBody, request: Request):
     try:
         issued = get_user_store().issue_token(
             body.username,
@@ -113,7 +165,13 @@ async def issue_token(body: _IssueTokenBody):
             expires_in_days=body.expires_in_days,
         )
     except ValueError as exc:
+        _emit_audit(request, "POST /admin/tokens", body.username, "not_found")
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _emit_audit(
+        request, "POST /admin/tokens",
+        f"{issued.username}#{(body.label or '')[:24]}",
+        "ok",
+    )
     return _ok(
         {
             "token": issued.token,  # plain — only ever returned here
@@ -126,15 +184,17 @@ async def issue_token(body: _IssueTokenBody):
     )
 
 
-@router.delete("/tokens/{token_hash}")
-async def revoke_token(token_hash: str):
+@router.delete("/tokens/{token_hash}", dependencies=[Depends(_rate_limit_admin)])
+async def revoke_token(token_hash: str, request: Request):
     if not get_user_store().revoke_token(token_hash):
+        _emit_audit(request, "DELETE /admin/tokens/{h}", token_hash[:24], "not_found")
         raise HTTPException(status_code=404, detail="token not found")
+    _emit_audit(request, "DELETE /admin/tokens/{h}", token_hash[:24], "ok")
     return _ok({"revoked": token_hash})
 
 
-@router.delete("/users/{username}/tokens")
-async def revoke_all_user_tokens(username: str):
+@router.delete("/users/{username}/tokens", dependencies=[Depends(_rate_limit_admin)])
+async def revoke_all_user_tokens(username: str, request: Request):
     """Revoke every token belonging to ``username`` in one call.
 
     Use case: an employee left or a laptop was lost — kill the whole
@@ -142,8 +202,13 @@ async def revoke_all_user_tokens(username: str):
     """
     store = get_user_store()
     if store.get_user(username) is None:
+        _emit_audit(request, "DELETE /admin/users/{u}/tokens", username, "not_found")
         raise HTTPException(status_code=404, detail="user not found")
     count = store.revoke_user_tokens(username)
+    _emit_audit(
+        request, "DELETE /admin/users/{u}/tokens", username,
+        f"ok_revoked={count}",
+    )
     return _ok({"username": username, "revoked": count})
 
 

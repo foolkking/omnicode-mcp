@@ -101,6 +101,31 @@ LSP_SERVERS: Dict[str, Dict[str, Any]] = {
         "or use the Roslyn LS via dotnet workload",
         "extensions": [".cs"],
     },
+    # ----- P2 fleet expansion (round 2) ----------------------------------
+    "swift": {
+        # SourceKit-LSP ships with the Swift toolchain on macOS / Linux.
+        # No extra install once `swift` is on PATH.
+        "command": ["sourcekit-lsp"],
+        "install_hint": "Install Swift toolchain via brew install swift "
+        "or https://swift.org/download",
+        "extensions": [".swift"],
+    },
+    "scala": {
+        # Metals — packaged via coursier or sbt on most setups.
+        "command": ["metals"],
+        "install_hint": "brew install coursier && coursier install metals "
+        "(see https://scalameta.org/metals/docs/editors/overview)",
+        "extensions": [".scala", ".sbt", ".sc"],
+    },
+    "haskell": {
+        # Haskell Language Server — `haskell-language-server-wrapper`
+        # is the recommended entry point (autoselects the matching LSP
+        # binary for the local GHC version).
+        "command": ["haskell-language-server-wrapper", "--lsp"],
+        "install_hint": "brew install haskell-language-server "
+        "(or https://haskell-language-server.readthedocs.io)",
+        "extensions": [".hs", ".lhs"],
+    },
 }
 
 

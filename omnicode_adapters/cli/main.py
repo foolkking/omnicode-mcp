@@ -48,11 +48,13 @@ def main():
     serve_parser.add_argument("--reload", action="store_true", help="Auto-reload on file changes")
     serve_parser.add_argument(
         "--mode",
-        choices=("local", "cloud", "hybrid"),
+        choices=("local", "cloud", "hybrid", "local-readonly"),
         default="local",
         help=(
             "Deployment mode (Wave 1, gap §13). "
             "local: single-user dev (defaults). "
+            "local-readonly: like local but blocks all writes — useful "
+            "for demoing the API to a colleague over localhost. "
             "cloud: shared/remote — turns on read-only + blocks /patch/apply by default. "
             "hybrid: cloud index + local apply — read-only off, apply still gated."
         ),

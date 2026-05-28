@@ -18,6 +18,7 @@ from api.v1.routers.logs import router as logs_router
 from api.v1.routers.lsp import router as lsp_router
 from api.v1.routers.memory import router as memory_router
 from api.v1.routers.model import router as model_router
+from api.v1.routers.monitoring import router as monitoring_router
 from api.v1.routers.patch import router as patch_router
 from api.v1.routers.project import router as project_router
 from api.v1.routers.search import router as search_router
@@ -48,6 +49,7 @@ all_routers = [
     intelligence_router,
     graph_router,
     agent_router,
+    monitoring_router,
 ]
 
 __all__ = [

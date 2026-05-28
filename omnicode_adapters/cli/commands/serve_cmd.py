@@ -28,6 +28,16 @@ _MODE_PRESETS: dict[str, dict[str, str]] = {
         "OMNICODE_READ_ONLY": "false",
         "OMNICODE_ALLOW_APPLY_PATCH": "false",
     },
+    "local-readonly": {
+        # Like 'local' but writes are off. Use case: demoing the
+        # codebase intelligence layer to a colleague over your laptop
+        # without giving them ability to apply patches. Same trust
+        # boundary as 'local' (no auth gate); the gate is read-only
+        # mode itself.
+        "OMNICODE_MODE": "local",
+        "OMNICODE_READ_ONLY": "true",
+        "OMNICODE_ALLOW_APPLY_PATCH": "false",
+    },
 }
 
 
