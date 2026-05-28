@@ -337,8 +337,18 @@ class EditPipeline:
             # The escalation result becomes the canonical outcome.
             first = second
 
-        # ---- 4. Memory write-back: persist a "solution" memory on success
-        if first.get("edit_success") and first.get("guard_result") is not None and not self._guard_has_errors(first["guard_result"]):
+        # ---- 4. Memory write-back: persist edit-session outcomes for the
+        #          memory advisor to surface on the next similar task. The
+        #          success path has been on by default since STAGE 7.5; the
+        #          failure-ingestion path is opt-in via
+        #          OMNICODE_TELEMETRY_INGEST=true so privacy-conscious
+        #          deployments don't accidentally record user prompts.
+        edit_succeeded = (
+            first.get("edit_success")
+            and first.get("guard_result") is not None
+            and not self._guard_has_errors(first["guard_result"])
+        )
+        if edit_succeeded:
             try:
                 await self._write_memory(
                     instructions=request.instructions,
@@ -346,7 +356,26 @@ class EditPipeline:
                     summary=first.get("summary", ""),
                 )
             except Exception as exc:
-                logger.debug("Memory write-back skipped: %s", exc)
+                logger.debug("Memory write-back (success) skipped: %s", exc)
+        else:
+            telemetry_on = (
+                os.environ.get("OMNICODE_TELEMETRY_INGEST", "").lower()
+                in ("1", "true", "yes", "on")
+            )
+            if telemetry_on:
+                try:
+                    failure_reasons = list(first.get("errors", []) or [])
+                    if first.get("guard_result") is not None and self._guard_has_errors(first["guard_result"]):
+                        failure_reasons.append(
+                            f"Guard escalated: {first['guard_result'].summary()}"
+                        )
+                    await self._write_failure_memory(
+                        instructions=request.instructions,
+                        file_path=file_path,
+                        failure_reasons=failure_reasons,
+                    )
+                except Exception as exc:
+                    logger.debug("Memory write-back (failure) skipped: %s", exc)
 
         processing_time = time.time() - start_time
 
@@ -1260,6 +1289,48 @@ class EditPipeline:
             )
         except Exception as exc:
             logger.debug("memory store skipped: %s", exc)
+
+    @staticmethod
+    async def _write_failure_memory(
+        *,
+        instructions: str,
+        file_path: str,
+        failure_reasons: List[str],
+    ) -> None:
+        """Write a 'mistake' memory after a failed edit attempt (P1-4).
+
+        Opt-in only — gated upstream by OMNICODE_TELEMETRY_INGEST. The
+        memory advisor surfaces these on the next similar prompt so
+        the LLM doesn't repeat the same dead-end approach.
+        """
+        try:
+            from core import get_memory_manager
+            from memory_system.models import (
+                MemoryCategory,
+                MemoryImportance,
+                MemoryRequest,
+            )
+
+            mgr = get_memory_manager()
+            if mgr is None:
+                return
+            reasons_str = "; ".join(str(r)[:120] for r in failure_reasons[:3])
+            content = (
+                f"Edit FAILED for {os.path.basename(file_path)}. "
+                f"Instructions: {instructions[:240]}. "
+                f"Reasons: {reasons_str[:300]}."
+            )
+            await mgr.store_memory(
+                MemoryRequest(
+                    category=MemoryCategory.MISTAKE,
+                    content=content,
+                    importance=MemoryImportance.MEDIUM,
+                    tags=["edit", "auto", "failed_attempt"],
+                    related_files=[file_path],
+                )
+            )
+        except Exception as exc:
+            logger.debug("memory store (failure) skipped: %s", exc)
 
     def _try_symbol_surgical(
         self,

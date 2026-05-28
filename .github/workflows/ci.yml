@@ -56,9 +56,71 @@ jobs:
           name: test-results-${{ matrix.python-version }}
           path: test-results.xml
 
+  test-no-llm:
+    # P1-5: verify the core install works without the LLM stack.
+    # Boots the app with OMNICODE_LLM_ROUTER=false and runs the
+    # full test suite minus tests that explicitly need the LLM
+    # router. Prevents the no-LLM contract from regressing silently.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('pyproject.toml') }}
+          restore-keys: ${{ runner.os }}-pip-
+
+      - name: Cache HuggingFace models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: ${{ runner.os }}-hf-all-MiniLM-L6-v2
+
+      - name: Install (core deps only — no [llm] extras)
+        run: |
+          pip install -e ".[dev]"
+
+      - name: Run tests with LLM router disabled
+        env:
+          OMNICODE_LLM_ROUTER: "false"
+          OMNICODE_AI_EDIT: "false"
+          TRANSFORMERS_OFFLINE: "0"
+          HF_HUB_OFFLINE: "0"
+        run: |
+          # Skip tests that explicitly target the LLM router/pipelines
+          # or hit the provider/selections endpoints (those endpoints
+          # 503 when llm_router=false, which is the expected and tested
+          # behaviour — those specific tests just need the LLM stack
+          # initialised). Everything else (search, patch, impact,
+          # memory, MCP surface, AST, LSP, etc.) must still pass.
+          python -m pytest tests -q --tb=short \
+            --deselect tests/unit/test_llm_router.py \
+            --deselect tests/unit/test_provider_registry.py \
+            --deselect tests/unit/test_token_manager.py \
+            --deselect tests/unit/test_secret_box.py \
+            --deselect tests/unit/test_master_key_rotation.py \
+            --deselect tests/unit/test_model_normalization.py \
+            --deselect tests/integration/test_edit_pipeline.py \
+            -k 'not TestProviderEndpoints and not TestModelStatus and not test_provider_test_unknown' \
+            --junitxml=test-results-no-llm.xml
+
+      - name: Upload no-LLM test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-no-llm
+          path: test-results-no-llm.xml
+
   docker:
     runs-on: ubuntu-latest
-    needs: test
+    needs: [test, test-no-llm]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
