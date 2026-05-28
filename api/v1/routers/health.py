@@ -4,10 +4,8 @@ Health and status endpoints for system monitoring
 
 import os
 from datetime import datetime
-from pathlib import Path
 
 from fastapi import APIRouter
-from fastapi.responses import FileResponse
 
 from core import get_services_status, get_settings
 from core.dependencies import (
@@ -79,31 +77,6 @@ async def get_status():
         status_info["git_stats"] = git_manager.get_stats()
 
     return create_success_response(status_info)
-
-
-@router.get("/")
-async def read_index():
-    """Serve the new component-based dashboard HTML"""
-    return FileResponse("templates/index.html")
-
-
-# Static file routes for templates
-@router.get("/templates/components/{file_path:path}")
-async def serve_component(file_path: str):
-    """Serve HTML component files"""
-    component_path = Path("templates/components") / file_path
-    if component_path.exists() and component_path.suffix == ".html":
-        return FileResponse(component_path)
-    return {"error": "Component not found"}
-
-
-@router.get("/static/{file_type}/{file_path:path}")
-async def serve_static(file_type: str, file_path: str):
-    """Serve static JS/CSS files"""
-    static_path = Path(f"templates/static/{file_type}") / file_path
-    if static_path.exists():
-        return FileResponse(static_path)
-    return {"error": "Static file not found"}
 
 
 @router.get("/working-directory")
