@@ -2,19 +2,21 @@
 
 # OmniCode-MCP
 
-**A production-grade Codebase MCP server with AST-aware search, multi-LLM routing, AI-driven edit pipelines, and a full web console.**
+**A local-first, optionally cloud-deployable Codebase Intelligence Layer
+that any AI editor can call.**
 
-[![Python](https://img.shields.io/badge/python-3.11+-blue?logo=python&logoColor=white)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/python-3.11%20|%203.12-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.111+-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![MCP](https://img.shields.io/badge/MCP-Model%20Context%20Protocol-7C3AED)](https://modelcontextprotocol.io/)
 [![Tree-sitter](https://img.shields.io/badge/tree--sitter-7%20languages-22C55E)](https://tree-sitter.github.io/tree-sitter/)
+[![LSP](https://img.shields.io/badge/LSP-10%20languages-0EA5E9)](https://microsoft.github.io/language-server-protocol/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-267%20passed-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-433%20passed-brightgreen)](#testing)
 
-[Features](#features) ·
+[Why OmniCode?](#why-omnicode-mcp) ·
 [Quick Start](#quick-start) ·
 [Architecture](#architecture) ·
-[API](#http-api) ·
+[Documentation](#documentation) ·
 [Roadmap](#roadmap) ·
 [References](#references)
 
@@ -22,290 +24,296 @@
 
 ---
 
-## Overview
+## What is OmniCode-MCP?
 
-OmniCode-MCP wraps a working directory in a single FastAPI service that exposes:
+OmniCode-MCP is a **service AI editors call**, not yet another AI editor.
+It wraps a working directory (or many) in a single FastAPI process and
+exposes:
 
-- A **semantic + symbol + text search engine** built on Tree-sitter, FAISS, and `sentence-transformers`.
-- An **AI editing pipeline** with three-layer defence (whole-file / surgical / patch) so Gemini-style "thinking" output never overwrites your code.
-- A **multi-provider LLM gateway** (LiteLLM) with hot-pluggable API keys, role-based selection, and best-of-N parallel routing.
-- A **memory system** with hybrid keyword + cosine scoring, deduplication, and per-field match localisation.
-- A **call-graph + inheritance visualiser** with D3 force-directed layout, automatic SVG-to-Canvas switch above 1500 nodes, cluster colouring, and hop-bounded scope filters.
-- A **dark-mode bilingual web console** with a built-in MCP tool registry visible to Claude Desktop / VS Code / Cursor.
+- **Eight composable capabilities** for code understanding, search,
+  impact analysis, safe patch operations, and proactive memory recall.
+- **A Model Context Protocol surface** so Claude Desktop, Cursor,
+  Continue, Aider, Kiro, and any future MCP client can plug in.
+- **A REST + WebSocket HTTP API** plus an optional Web Console for
+  human review.
 
-The project is a refactor of the original [`codebase-mcp`](https://github.com/danyQe/codebase-mcp) into a modular,
-fully tested, multi-language, multi-provider implementation.
+The point is to make every AI editor that calls in **smarter, more
+token-efficient, and safer** when it touches a real codebase. We do
+**not** compete with Cursor / Continue / Copilot — they edit code, we
+make their edits land more accurately.
 
-## Features
+## Why OmniCode-MCP
 
-### Code intelligence
+The eight things every AI editor needs but rarely has all of:
 
-| Feature | Highlights |
-|---|---|
-| **AST chunking** | Tree-sitter for Python, JavaScript, TypeScript, C++, Java, Go, Rust |
-| **Symbol search** | SQL `LIKE` over indexed symbol names — fuzzy + exact, scoring by name proximity |
-| **Semantic search** | FAISS index persisted to disk; survives restarts; rebuilt incrementally |
-| **Text search** | SQLite-backed substring scan with file-pattern filter |
-| **Symbol outline** | List every named symbol in a file with `line_start`/`line_end`, signature, parent class |
-| **Call graph** | Cross-file caller/callee edges; degree-based hub ranking; bounded edge cap by `max_nodes × 30` |
-| **Inheritance graph** | `subclass → base`, `impl Trait for Struct`, multi-language |
+| # | Capability | What it does | Module |
+|---|---|---|---|
+| 1 | Code understanding | Tree-sitter AST in 7 languages, multi-mode read | [`omnicode/ast_engine/`](omnicode/ast_engine/) |
+| 2 | Context compression | Comment-strip, function-fold, priority pruner | [`omnicode/llm/token_manager.py`](omnicode/llm/token_manager.py) |
+| 3 | Hybrid search | Semantic + symbol + text + RRF + `why_matched` | [`omnicode/search/`](omnicode/search/) |
+| 4 | Impact analysis | BFS blast radius, callers, callees, risk score | [`omnicode_core/graph/impact.py`](omnicode_core/graph/impact.py) |
+| 5 | Safe patch ops | Preview → validate → apply → rollback with snapshots | [`omnicode_core/edit/patch.py`](omnicode_core/edit/patch.py) |
+| 6 | Memory recall | Multi-angle advisory from past edit sessions | [`omnicode_core/memory/advisory.py`](omnicode_core/memory/advisory.py) |
+| 7 | Debug console | Web UI for index status, diff inspector, advisory drawer | [`templates/`](templates/) |
+| 8 | Optional LLM | Multi-provider router, opt-in via `[llm]` extras | [`omnicode/llm/router.py`](omnicode/llm/router.py) |
 
-### AI editing
-
-- **Three-layer defence**: prose detector + reasoning-strip + final-shrink check, so the file is never overwritten by chain-of-thought leakage.
-- **Symbol surgical mode**: when instructions reference an unambiguous symbol, only that function/class is rewritten and spliced back, preserving the rest of the file byte-for-byte.
-- **`reasoning_effort=none`**: forwarded to LiteLLM so reasoning models (`gemini-2.5-flash-thinking`, `o1-*`, `claude-3.5-sonnet-thinking-*`) don't leak `<thinking>` blocks into the output.
-- **Structured failure analysis**: when an edit fails, the API returns 200 with `failure_analysis.{stage, root_cause, suggested_fixes, raw_llm_excerpt}`.
-
-### Multi-provider LLM gateway
-
-- **Hot-pluggable providers**: register OpenAI-compatible / Anthropic / Gemini / Ollama / Azure / Bedrock from the web UI; encryption-at-rest via Fernet.
-- **User-level shared registry**: API keys live in `~/.kiro/codebase-mcp/providers.db` so they're available across every project.
-- **Role-based routing**: assign `default` / `quality` / `cost` / `fastest` / `edit` / `scan` / `review` / `summary` / `chat` to specific providers.
-- **Best-of-N**: race the top N providers, pick the longest non-empty response.
-- **Provider Test**: built-in `/providers/{name}/test` with 20 s timeout, structured `hint` + `hint_field` for UI red-border feedback.
-
-### Memory system
-
-- **Fingerprint deduplication**: SHA1 of `(category, normalized_content)`; repeated stores increment `access_count`.
-- **Hybrid scoring**: `min_score` threshold filters out clearly irrelevant rows; combined keyword + cosine similarity rescues tag-only and filename-only matches.
-- **Per-field match localisation**: every result carries a `match_fields` array indicating exactly where the query landed (`content`, `tags`, `category`, `subcategory`, `related_files`, `embedding`) with a `snippet` and `weight`.
-
-### Web console
-
-- **Dashboard**: 4 stat cards (files / symbols / memories / branch), live system health, recent tool-call timeline.
-- **Search & Index**: three search tabs with the same code-preview modal (85vh, scrollable, jump-to-line, highlight.js syntax colouring, "Open in editor" via `vscode://file/...`).
-- **File Operations**: read / write / AI-edit with three pipelines (whole-file / surgical / patch).
-- **Code Graph Viewer**: D3 force-directed call graph or inheritance graph; cluster-coloured by top-level directory; `Hops` filter for "show N hops around symbol X"; cascading directory-scope picker; auto-switch to Canvas2D for graphs >1500 nodes.
-- **Memory System**: store / search / edit (modal) / dedupe; results show `×N` access count and per-field match snippets.
-- **Model Providers**: register, edit, test, enable/disable, reorder; role-assignment grid for 9 routing roles.
-- **Working Directory**: validate / switch with native folder picker; per-project `.data/` is auto-loaded so memories and indices survive directory switches.
-- **Tri-state theme**: light / dark / system; tri-state language toggle EN / 中文 with DOM-walking translator and 250+ phrase dictionary.
-- **Live logs**: WebSocket-streamed, auto-backfill on connect.
-
-### MCP tool registry
-
-25+ tools registered via `FastMCP`. They speak stdio to Claude Desktop, VS Code, or Cursor and proxy to the FastAPI backend, so you get the full feature set inside the AI client.
-
-## Architecture
-
-```
-              ┌───────────────────────────────────────────────┐
-              │     MCP Client (Claude Desktop / Cursor /     │
-              │              VS Code / Windsurf)              │
-              └───────────────────────────────────────────────┘
-                                   │ stdio
-                                   ▼
-              ┌───────────────────────────────────────────────┐
-              │         mcp_server.py — FastMCP host          │
-              │  25+ tools: search / read / edit / git /      │
-              │  memory / providers / project / directory     │
-              └───────────────────────────────────────────────┘
-                                   │ HTTP / JSON
-                                   ▼
-              ┌───────────────────────────────────────────────┐
-              │     main.py  +  api/v1/routers/*  (FastAPI)   │
-              └───────────────────────────────────────────────┘
-                  │             │           │             │
-       ┌──────────┘             │           │             └──────────┐
-       ▼                        ▼           ▼                        ▼
-┌────────────────┐    ┌────────────────┐ ┌────────────────┐ ┌────────────────┐
-│ omnicode/      │    │ omnicode/llm/  │ │ omnicode/      │ │ memory_system/ │
-│ ast_engine/    │    │ + provider     │ │ pipelines/     │ │ + dedupe       │
-│  + chunker     │    │   registry     │ │  + edit (3-    │ │ + hybrid       │
-│  + call graph  │    │ + LLM router   │ │    layer       │ │   scoring      │
-│  + inheritance │    │ + LiteLLM      │ │    defence)    │ │ + per-field    │
-│ omnicode/      │    │ + best-of-N    │ │  + write       │ │   localisation │
-│  search/       │    │ + secret_box   │ │ + EditPipeline │ │ + auto context │
-│ FAISS+SQLite   │    │   (Fernet)     │ │ + Guard        │ │   advisory     │
-└────────────────┘    └────────────────┘ └────────────────┘ └────────────────┘
-       │                       │                  │                 │
-       └───────────────────────┴──────────────────┴─────────────────┘
-                                   │
-                                   ▼
-                         ┌────────────────────┐
-                         │ <project>/.data/   │
-                         │  vector_store.db   │  per-project semantic index
-                         │  vector_store.faiss│  (persisted, restart-safe)
-                         │  metadata.db       │  per-project memory store
-                         └────────────────────┘
-                         ┌────────────────────────────────┐
-                         │ ~/.kiro/codebase-mcp/          │
-                         │  providers.db / providers.key  │  USER-LEVEL keys
-                         │  selections.db                 │  shared across projects
-                         └────────────────────────────────┘
-```
-
-## Tech stack
-
-- **Backend**: Python 3.11, FastAPI, Uvicorn, Pydantic 2
-- **AST**: tree-sitter 0.22+ with per-language grammars
-- **Search**: FAISS, sentence-transformers (`all-MiniLM-L6-v2`), SQLite
-- **LLM gateway**: LiteLLM, Anthropic / OpenAI / Gemini / DeepSeek / Ollama / Azure / Bedrock
-- **MCP**: `mcp` Python SDK (FastMCP)
-- **Static analysis**: ruff, mypy, eslint, tsc, cppcheck (auto-detected)
-- **Frontend**: Tailwind CSS, vanilla JS modules, D3 v7, highlight.js (lazy-loaded)
-- **Crypto**: cryptography (Fernet) for API-key encryption at rest
-- **Tests**: pytest, pytest-asyncio, anyio, FastAPI TestClient
+A **single REST call** at `POST /intelligence/context` runs all eight
+in parallel, fits the result in your token budget, and returns it as
+a structured payload. Or use the **MCP tool `omni_intelligence`** to
+get the same shape over stdio / SSE / streamable-http.
 
 ## Quick Start
 
-### Prerequisites
-
-- Python 3.11+
-- Conda (recommended) or `venv`
-- Git
-- Optional: Node.js for JS/TS static analysis
-
-### 1. Clone and create the environment
+### 1 · Install
 
 ```bash
 git clone https://github.com/foolkking/omnicode-mcp.git
 cd omnicode-mcp
 
-# Conda (recommended)
-conda create -n omnicode-env python=3.11 -y
-conda activate omnicode-env
-pip install -e .
-
-# OR venv
 python -m venv .venv
-. .venv/Scripts/activate    # Windows PowerShell
-# . .venv/bin/activate      # macOS / Linux
-pip install -e .
+. .venv/Scripts/activate          # Windows PowerShell
+# . .venv/bin/activate            # macOS / Linux
+
+pip install -e .                  # core only (no LLM)
+# pip install -e ".[llm]"         # add multi-provider LLM router
+# pip install -e ".[agent]"       # add filesystem watcher for hybrid mode
+# pip install -e ".[dev]"         # tests + linters
 ```
 
-### 2. Configure environment variables
+### 2 · Run
 
 ```bash
-cp .env.example .env
+# Local mode — default
+omnicode serve --console          # API + Web Console at http://127.0.0.1:6789/
+omnicode serve --headless         # API only — no UI
+omnicode mcp                      # MCP stdio (for Claude / Cursor / Kiro)
+omnicode dev                      # console + auto-reload
+
+# Cloud / hybrid presets
+omnicode serve --mode cloud       # read-only + apply blocked
+omnicode serve --mode hybrid      # accepts pushes from a local agent
 ```
 
-Edit `.env`:
+The first index build takes 30 – 60 s; subsequent rebuilds are
+incremental (2 – 3 s).
 
-```ini
-# Optional — keys can also be added via the web UI's Model Providers panel
-GEMINI_API_KEY=AIza...
-OPENAI_API_KEY=sk-...
-ANTHROPIC_API_KEY=sk-ant-...
+### 3 · Connect an AI editor (MCP stdio)
 
-# Embeddings — kept offline by default
-TRANSFORMERS_OFFLINE=1
-HF_HUB_OFFLINE=1
-
-# Default provider
-DEFAULT_LLM_PROVIDER=gemini
-DEFAULT_LLM_MODEL=gemini-2.5-flash
-```
-
-### 3. Run the API server
-
-```bash
-uvicorn main:app --port 6789
-```
-
-Then open <http://127.0.0.1:6789/> in your browser.
-
-The first index build takes 30 – 60 s; click **Search → Rebuild Index** in the dashboard.
-
-### 4. Connect to Claude Desktop / Cursor / VS Code
-
-Add to `%APPDATA%\Claude\claude_desktop_config.json` (Windows) or `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
+Add to `~/.kiro/settings/mcp.json` (Kiro), `claude_desktop_config.json`
+(Claude Desktop), or your MCP-compatible client of choice:
 
 ```json
 {
   "mcpServers": {
     "omnicode": {
-      "command": "python",
-      "args": ["C:/path/to/omnicode-mcp/mcp_server.py"],
+      "command": "omnicode",
+      "args": ["mcp"],
       "env": {
-        "ENV_FILE": "C:/path/to/omnicode-mcp/.env"
+        "TRANSFORMERS_OFFLINE": "1",
+        "HF_HUB_OFFLINE": "1"
       }
     }
   }
 }
 ```
 
-Restart the client. You should see 25+ omnicode tools available.
+Restart the client. By default 8 high-level tools are registered
+(`omni_search`, `omni_read`, `omni_edit`, `omni_analyze`,
+`omni_memory`, `omni_context`, `omni_intelligence`, `discover_tools`).
+Set `OMNICODE_MCP_TOOLS=all` if you also need the legacy 16
+fine-grained tools.
 
-## HTTP API
+### 4 · Use it from anything else
 
-The full route list lives at `/docs` (Swagger) once the server is running. Highlights:
+```bash
+# Discover what this deployment can do
+curl http://127.0.0.1:6789/capabilities
 
-| Method | Path | Purpose |
-|---|---|---|
-| `POST` | `/search` | Semantic search via FAISS |
-| `POST` | `/search/text` | Substring scan with file-pattern filter |
-| `POST` | `/search/symbols` | Fuzzy / exact symbol search |
-| `GET`  | `/search/symbols/{file_path:path}` | List symbols in a file |
-| `GET`  | `/search/symbols/graph` | Build cross-file call graph |
-| `GET`  | `/search/inheritance` | Build subclass → base graph |
-| `POST` | `/search/symbols/relations` | Per-symbol callers + callees |
-| `POST` | `/read` | Read file with line range or symbol resolution |
-| `POST` | `/write` | Write file with quality gate |
-| `POST` | `/edit` | AI edit with three-layer defence |
-| `POST` | `/memory/store` | Store memory (auto-dedupe by fingerprint) |
-| `POST` | `/memory/search` | Hybrid keyword + semantic search with `min_score` |
-| `POST` | `/memory/dedupe` | Collapse duplicate active memories |
-| `GET`  | `/providers` | List registered LLM providers |
-| `POST` | `/providers/{name}/test` | Test provider with 20s timeout |
-| `PUT`  | `/selections` | Set role → provider assignments |
-| `GET`  | `/working-directory` | Active project info + service status |
-| `PUT`  | `/working-directory` | Switch project (auto-loads new `.data/`) |
-| `WS`   | `/logs/stream` | Live log tail |
+# One-call multi-capability composer
+curl -X POST http://127.0.0.1:6789/intelligence/context \
+  -H 'content-type: application/json' \
+  -d '{"task": "explain create_app", "file_path": "main.py", "symbol": "create_app"}'
 
-## Per-project data layout
-
-Every project keeps an isolated data folder so switching working directories preserves
-each project's memories and search index without conflicts.
-
-```
-<project>/
-├── .data/
-│   ├── vector_store.db          # SQLite chunks (per-project)
-│   ├── vector_store.faiss       # persisted FAISS index (per-project)
-│   ├── metadata.db              # memory store (per-project)
-│   └── providers.db             # legacy per-project provider DB (still honoured)
-└── .codebase/                   # auto-commit git repo for AI edits
-
-~/.kiro/codebase-mcp/            # USER-LEVEL — shared across projects
-├── providers.db                 # provider registry + encrypted API keys
-├── providers.key                # Fernet key (file mode 0600)
-└── selections.db                # role → provider assignments
+# Preview + apply a patch
+curl -X POST http://127.0.0.1:6789/patch/preview \
+  -H 'content-type: application/json' \
+  -d '{"file_path": "main.py", "content": "..."}'
 ```
 
-Resolution order for the provider DB:
+## Three deployment modes
 
-1. `PROVIDER_DB_PATH` env var, if set (relative paths resolve to the working dir).
-2. `<project>/.data/providers.db` if it already exists (legacy).
-3. `~/.kiro/codebase-mcp/providers.db` (user-level shared default).
+| Mode | Code lives | This server does | Default knobs |
+|---|---|---|---|
+| **local** | This machine | Index, search, LSP, edit | writes ON, apply ON |
+| **cloud** | This machine (mirror) | Index, search, LSP, ~edit~ | writes OFF, apply OFF |
+| **hybrid** | User's local box | Index + search + memory + graph; agent pushes file bodies | writes ON via agent, apply OFF |
 
-A one-time migration copies a legacy project DB up to the user level on first run, so
-existing API keys stay decryptable.
+For real cloud deployment see [`docs/cloud-deployment.md`](docs/cloud-deployment.md).
 
-## Web console screenshots
+## Architecture
 
-> Screenshots are kept in `docs/screenshots/`. Open the dashboard at <http://127.0.0.1:6789/>
-> after starting the server.
+```
+              ┌─────────────────────────────────────────────────────────┐
+              │   AI Editor / Agent  (Cursor · Claude Desktop · Kiro    │
+              │   · Continue · Aider · custom REST client · VS Code     │
+              │   ext.)                                                 │
+              └─────────────────────────────────────────────────────────┘
+                            │ MCP stdio / SSE / streamable-http
+                            │              · or ·
+                            │ HTTP REST (with X-API-Key / Bearer)
+                            ▼
+              ┌─────────────────────────────────────────────────────────┐
+              │      Adapters  (omnicode_adapters/)                     │
+              │  · cli/                — omnicode CLI subcommands        │
+              │  · mcp_server/         — FastMCP host + auth gate        │
+              │  · agent/              — local file-sync watcher (W2-2)  │
+              └─────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+              ┌─────────────────────────────────────────────────────────┐
+              │     FastAPI app  (api/v1/routers/* — 22 routers)        │
+              │     Middlewares: API-key → RBAC → read-only             │
+              └─────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+              ┌─────────────────────────────────────────────────────────┐
+              │  omnicode_core/   ← language-agnostic, no UI / LLM dep  │
+              │  ├── intelligence/composer.py  (the 8-capability one)   │
+              │  ├── ast/  search/  graph/  memory/  edit/  lsp/        │
+              │  ├── auth/ (RBAC, migrations, master-key rotation)      │
+              │  ├── workspace/ (per-workspace bookmarks)               │
+              │  ├── index/ sharding.py (per-workspace FAISS shards)    │
+              │  ├── embeddings/ (local · remote · hybrid backends)     │
+              │  └── security/sandbox.py                                │
+              └─────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+              ┌─────────────────────────────────────────────────────────┐
+              │   Storage                                                │
+              │   <wd>/.data/shards/<id>/  vector_store.faiss + .db,    │
+              │                            file_tracker.db, snapshots/, │
+              │                            edit_sessions/                │
+              │   ~/.kiro/codebase-mcp/    providers.db, users.db,      │
+              │                            workspaces.json               │
+              └─────────────────────────────────────────────────────────┘
+```
+
+The split between `omnicode/` (legacy, has LLM deps) and
+`omnicode_core/` (clean v2 layer) lets us keep LLM features as opt-in
+extras without breaking older callers. See
+[`docs/architecture-v2.md`](docs/architecture-v2.md) for the full
+rationale.
+
+## Documentation
+
+Start here, in order:
+
+| Doc | What it covers |
+|---|---|
+| [`docs/features.md`](docs/features.md) | **Feature inventory** — every endpoint, every CLI command, every config key, persistence layout, module map. |
+| [`docs/architecture-v2.md`](docs/architecture-v2.md) | Architecture rationale; long-form §1-§17 design decisions. |
+| [`docs/api-reference.md`](docs/api-reference.md) | Full REST + MCP catalog with request / response shapes. |
+| [`docs/configuration.md`](docs/configuration.md) | Every env var + TOML key + precedence rules. |
+| [`docs/security.md`](docs/security.md) | Sandbox, RBAC, key rotation, read-only mode, MCP-over-HTTP auth. |
+| [`docs/cloud-deployment.md`](docs/cloud-deployment.md) | systemd + nginx pattern; docker-compose + Caddy pattern; hardening checklist. |
+| [`docs/llm-extras.md`](docs/llm-extras.md) | Optional LLM router, provider registry, AI edit pipeline. |
+| [`docs/running.md`](docs/running.md) | Local-run cookbook with conda + venv + Windows / macOS / Linux. |
+| [`docs/test_plan.md`](docs/test_plan.md) | Manual + automated regression matrix. |
+| [`docs/wave2-plan.md`](docs/wave2-plan.md) | Wave 2 implementation log (10 / 10 done). |
+| [`docs/final-audit.md`](docs/final-audit.md) | Point-by-point audit of architecture-v2 §1-§17. |
+| [`docs/roadmap.md`](docs/roadmap.md) | Long-term research direction; everything pre-1.0 is shipped. |
+| [`extensions/vscode/README.md`](extensions/vscode/README.md) | Thin VS Code extension (3 commands). |
+| [`_keep_/README.md`](_keep_/README.md) | How to share artefacts that bypass `.gitignore`. |
+
+## Configuration at a glance
+
+Three sources, highest wins:
+
+1. **CLI flags** — `omnicode serve --mode cloud --port 8765 ...`
+2. **Process env vars** — every Pydantic Settings field has a matching env name.
+3. **TOML file** — `omnicode.toml` next to where you launch (or `OMNICODE_CONFIG=/path`). See [`omnicode.example.toml`](omnicode.example.toml).
+
+Common knobs:
+
+```toml
+[server]
+mode = "local"            # local | cloud | hybrid
+
+[security]
+api_key = ""              # legacy single-key auth (X-API-Key)
+allow_apply_patch = true  # cloud deployments often flip this off
+mcp_tools = "core"        # core (8) | all (24) | legacy (16)
+
+[index]
+embedding_model = "sentence-transformers/all-MiniLM-L6-v2"
+
+[search]
+reranker = false          # cross-encoder rerank, opt-in (W2-9)
+
+[features]
+web_console = true
+lsp = true
+memory = true
+safe_edit = true
+```
+
+Full reference: [`docs/configuration.md`](docs/configuration.md).
+
+## Security
+
+- **Path sandbox** — every file path is resolved, then checked
+  against the workspace root. `..` traversal, absolute paths, and
+  out-of-tree symlinks are rejected.
+- **Three auth tiers** — legacy single-key (`OMNICODE_API_KEY`),
+  multi-user RBAC (admin / editor / viewer), and per-deployment
+  read-only mode. Stack composes cleanly.
+- **Provider keys at rest** — Fernet-encrypted in
+  `~/.kiro/codebase-mcp/providers.db`. `omnicode rotate-master-key`
+  re-encrypts every row under a fresh key with rollback on failure.
+- **Token expiry + revoke-by-user** — `expires_in_days` on issue,
+  auto-revoke on first use after expiry, `DELETE
+  /admin/users/{u}/tokens` for one-call employee offboarding.
+- **MCP-over-HTTP gate** — SSE / streamable-http transports honour
+  the same auth sources; `--auth required` refuses to start when
+  none are configured.
+
+Full security model: [`docs/security.md`](docs/security.md).
+
+## CLI
+
+```bash
+omnicode init                     # write .data/ skeleton
+omnicode index [--force]          # incremental / full rebuild
+omnicode status                   # via /health
+omnicode doctor                   # python / LSP / models / ports check
+omnicode serve [--headless] [--console] [--mode local|cloud|hybrid]
+omnicode dev                      # console + auto-reload
+omnicode mcp                      # stdio MCP for AI editors
+omnicode agent --remote URL --token TOK --workspace .
+omnicode rotate-master-key [--db ...] [--key ...] [--new-key BASE64]
+```
+
+Run-helpers under [`scripts/`](scripts/) (`run.bat`/`.sh`,
+`run-dev.bat`/`.sh`, `test.bat`/`.sh`, `lint.bat`/`.sh`).
 
 ## Testing
 
-The full test suite covers AST parsing, call/inheritance graphs, token compression, the LLM router with stubbed providers, the encryption-at-rest provider registry, edit-pipeline safety against thinking-model leakage, and route-level regressions for every UI bug shipped to date.
-
 ```bash
-# All tests
-conda run --no-capture-output -n omnicode-env python -m pytest tests -q
+# All tests (~30 s)
+python -m pytest tests -q
 
-# Targeted regression suite (~75 s)
+# Just the regressions ring (~12 s)
 python -m pytest tests/integration/test_route_regressions.py -q
 
 # Lint
-ruff check omnicode api core tests
+ruff check omnicode omnicode_core omnicode_adapters api core tests
 ```
 
-Latest CI status: **267 passed, 1 skipped, 13 warnings** in ~90 s.
+Latest CI status: **433 passed, 12 skipped** (skipped are LSP-binary
+probes that auto-skip when the language server isn't installed
+locally).
 
-Performance benchmarks (Windows laptop, ~125 source files, in `benchmarks/run_all.py`):
+Performance benchmarks (`benchmarks/run_all.py`, ~125 source files):
 
 | Benchmark | Target | Measured |
 |---|---|---|
@@ -313,48 +321,59 @@ Performance benchmarks (Windows laptop, ~125 source files, in `benchmarks/run_al
 | Call graph `update_file` median | < 50 ms | 10 ms |
 | Inheritance cold build | < 1 s | 503 ms |
 | Token compress 5 KB | < 10 ms | 2 – 2.5 ms |
+| Incremental rebuild (no file changes) | — | < 1 s |
 
-## Configuration
+## What you can build on top
 
-All settings live in `omnicode/config/settings.py` and are overridable via `.env` or environment variables.
+OmniCode-MCP is intentionally a **layer**, not a product. Things
+people have built or plan to build on top:
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `WORKING_DIR` | `cwd` | Project root the server operates on |
-| `API_HOST` / `API_PORT` | `127.0.0.1` / `6789` | Where FastAPI listens |
-| `PROVIDER_DB_PATH` | unset → user-level | Force a specific provider DB path |
-| `EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Sentence-transformers model |
-| `MAX_SEARCH_RESULTS` | `10` | Default page size |
-| `QUALITY_THRESHOLD` | `0.8` | Edit pipeline quality gate |
-| `CODEBASE_GIT_DIR` | `.codebase` | Auto-commit git for AI edits |
-| `MEMORY_MIN_IMPORTANCE` | `3` | Default importance filter |
-| `FS_BROWSER_DENY_PATTERNS` | `[/etc/shadow, ...]` | Paths the file picker refuses |
+- **AI editor plugins** that ask `/intelligence/context` before each
+  prompt to save tokens.
+- **Code-review bots** that watch PRs and run
+  `/graph/impact?symbol=…&depth=3` to flag high-blast-radius changes.
+- **Custom Web Consoles** — the existing one is just an HTML/JS
+  client of the public REST API.
+- **Refactor agents** that loop over `/patch/preview` →
+  `/patch/validate` → `/patch/apply` with their own LLM, never
+  letting the LLM write to disk directly.
+- **CI guards** that fail the build if a PR touches a symbol with a
+  `risk_level=high` rating without also adding a test in the
+  suggested-tests list.
 
 ## Roadmap
 
-Detailed evaluation of upcoming work is tracked in [`docs/roadmap.md`](docs/roadmap.md), prioritised by token-savings impact:
+The big design plan ([`docs/architecture-v2.md`](docs/architecture-v2.md))
+is fully implemented as of 1.0.0-rc1:
 
-1. LSP-MCP bridge — `goToDefinition` / `findReferences` / `hover` / `getDiagnostics`
-2. Symbol-outline mode for `/read` (≈ 50 % token reduction on large-file reads)
-3. Diagnostics-first search (attach Guard output to every result)
-4. Tool-description compression (mcp-compressor pattern)
-5. TOON output encoding for large graph payloads
-6. Skills framework alignment with Anthropic Agent Skills
-7. Code-execution tool with sandboxed exec
-8. Tool search instead of list-all on MCP startup
-9. Incremental embedding cache
-10. Auto memory advisory injection into edit pipeline
+| Phase | Items | Status |
+|---|---|---|
+| P0 | Core / adapter split, headless mode, LSP bridge, incremental index, patch ops, MCP slim, structured read modes | ✅ |
+| P1 | Search rerank scaffolding, memory advisory, impact analysis, edit-session, search debug, API key auth, Docker compose, GH Actions | ✅ |
+| P2 | Cloud / hybrid / local modes, MCP-over-HTTP, multi workspace, RBAC, WebGL graph, multi embedding models | ✅ |
+| §17 final | Composer assembly + capability fingerprint | ✅ |
+| Wave 1 audit | Sandbox, read-only, why_matched, REST exposure for impact + advisory, LSP rename, modes flag, MCP slim | ✅ |
+| Wave 2 (10 items) | TOML config, HTTPS+systemd, MCP-over-HTTP auth, local agent, master-key rotation, Web Console new pages, LSP fleet, reranker, FAISS shards, VS Code extension | ✅ |
+
+Next: [`docs/roadmap.md`](docs/roadmap.md) tracks long-term research
+directions (per-language code-specific embeddings, agent skills
+alignment, code-execution sandbox).
 
 ## Contributing
 
 PRs welcome. Please:
 
-- Run `ruff check omnicode api core tests` before pushing — never apply `--fix` to `tests/` (history reason: a previous `ruff --fix tests` accidentally deleted the directory).
-- Add a regression test in `tests/integration/test_route_regressions.py` for any UI-visible fix.
-- Keep API responses on the `{"success": true, "result": {...}}` envelope so the web client handlers don't break.
+- Run `ruff check omnicode omnicode_core omnicode_adapters api core tests`
+  before pushing — never apply `--fix` to `tests/` (history
+  reason: a previous `ruff --fix tests` accidentally deleted the
+  directory).
+- Add a regression test for any UI-visible fix.
+- Keep API responses on the `{"success": true, "result": {...}}`
+  envelope so the web client handlers don't break.
 - Document architectural changes in `docs/test_plan.md`.
 
-See [`docs/test_plan.md`](docs/test_plan.md) for the manual + automated test matrix.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full developer
+on-ramp.
 
 ## License
 
@@ -364,11 +383,12 @@ MIT — see [`LICENSE`](LICENSE).
 
 ## References
 
-The design draws on the following sources. Content has been paraphrased and condensed for licensing compliance; reproduction stays under thirty consecutive words per source.
+The design draws on the following sources. Content has been
+paraphrased and condensed for licensing compliance; reproduction stays
+under thirty consecutive words per source.
 
 ### Specifications and protocols
 
-- [Model Context Protocol — Wikipedia overview](https://en.wikipedia.org/wiki/Model_Context_Protocol)
 - [Model Context Protocol — official site](https://modelcontextprotocol.io/)
 - [Tree-sitter — incremental parsing library](https://tree-sitter.github.io/tree-sitter/)
 - [Language Server Protocol specification](https://microsoft.github.io/language-server-protocol/)
@@ -378,58 +398,39 @@ The design draws on the following sources. Content has been paraphrased and cond
 - [Code execution with MCP — building more efficient AI agents](https://anthropic.com/engineering/code-execution-with-mcp), 2025-11
 - [Writing effective tools for AI agents](https://www.anthropic.com/engineering/writing-tools-for-agents), 2025-09
 - [Advanced tool use on the Claude Developer Platform](https://www.anthropic.com/engineering/advanced-tool-use), 2025-11
-- [New capabilities for building agents on the Anthropic API](https://www.anthropic.com/news/agent-capabilities-api), 2025-10
-- [Anthropic — code execution tool docs](https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/code-execution-tool)
 
 ### Token efficiency and MCP optimisation
 
-- [StackOne — MCP Token Optimization: 4 Approaches Compared](https://www.stackone.com/blog/mcp-token-optimization/), 2025-12
-- [MindStudio — How to Reduce Token Usage in AI Agents: 10 MCP Optimization Techniques](https://www.mindstudio.ai/blog/reduce-token-usage-ai-agents-mcp-optimization), 2025-12
-- [Mukund Kidambi — Beyond GraphQL: what actually reduces token spend in MCP servers](https://medium.com/@mukundkidambi/beyond-graphql-what-actually-reduces-token-spend-in-mcp-servers-9aa3350e8d4d), 2025-12
-- [Atlassian Labs — mcp-compressor](https://github.com/atlassian-labs/mcp-compressor), 2025
-- [PlainEnglish — Building the Blueprint for Production-Grade MCP Servers](https://plainenglish.io/artificial-intelligence/building-the-blueprint-for-production-grade-mcp-servers), 2025-12
+- [StackOne — MCP Token Optimization](https://www.stackone.com/blog/mcp-token-optimization/), 2025-12
+- [MindStudio — MCP Optimization Techniques](https://www.mindstudio.ai/blog/reduce-token-usage-ai-agents-mcp-optimization), 2025-12
+- [Atlassian Labs — mcp-compressor](https://github.com/atlassian-labs/mcp-compressor)
 
 ### LSP integration in MCP
 
-- [Claude Code v2.0.74 LSP support](https://how2shout.com/news/claude-code-v2-0-74-lsp-language-server-protocol-update.html), 2025-12
-- [Skywork — What is lsp-mcp? Bridging MCP and LSP](https://skywork.ai/blog/lsp-mcp-mcp-lsp-bridge/), 2025
-- [jonrad/lsp-mcp](https://github.com/jonrad/lsp-mcp), 2025
-- [LobeHub — vimo-ai LSP MCP Server](https://lobehub.com/mcp/vimo-ai-lsp-mcp-server), 2025
-- [Visual Studio Marketplace — sehejjain.lsp-mcp-bridge](https://marketplace.visualstudio.com/items?itemName=sehejjain.lsp-mcp-bridge)
-- [Visual Studio Marketplace — CJL.lsp-mcp](https://marketplace.visualstudio.com/items?itemName=CJL.lsp-mcp)
-- [Playbooks — MultilspyLSP MCP server](https://playbooks.com/mcp/asimihsan-multilspy-lsp), 2025
-- [Kiro — Code Intelligence](https://kiro.dev/docs/cli/code-intelligence/)
+- [jonrad/lsp-mcp](https://github.com/jonrad/lsp-mcp)
+- [Skywork — lsp-mcp bridging MCP and LSP](https://skywork.ai/blog/lsp-mcp-mcp-lsp-bridge/)
 
-### Skills and agent frameworks
+### Upstream
 
-- [IntuitionLabs — Claude Skills vs MCP](https://intuitionlabs.ai/articles/claude-skills-vs-mcp), 2025-10
-- [Skywork — Claude Skills allowed tools](https://skywork.ai/blog/ai-bot/claude-skills-allowed-tools-ultimate-guide/)
-- [Microsoft DevBlog — AI Skills Executor in .NET with Azure OpenAI MCP](https://devblogs.microsoft.com/foundry/dotnet-ai-skills-executor-azure-openai-mcp/), 2025-12
-- [yoloshii/mcp-code-execution-enhanced](https://github.com/yoloshii/mcp-code-execution-enhanced)
+- [danyQe/codebase-mcp](https://github.com/danyQe/codebase-mcp) —
+  original project this fork builds on.
 
-### Semantic code search
+### Libraries
 
-- [Weaviate — Build a Coding Assistant with Weaviate MCP: RAG over Code & Docs](https://weaviate.io/blog/coding-assistant-weaviate-mcp), 2025-12
-- [ceaksan — Local semantic code search MCP](https://ceaksan.com/en/local-semantic-code-search-ai-mcp), 2025
-- [Shamsul Arefin — Building an AI Agent with MCP Code Execution](https://medium.com/@shamsul.arefin/building-an-ai-agent-with-mcp-code-execution-from-confusion-to-clarity-6b13fccc8c4b), 2025-11
-- [Scott Lepper — MCP Servers that don't suck (tokens)](https://medium.com/@scott.lepper/mcp-servers-that-dont-suck-tokens-0d6ea31e7522), 2025-12
+- [LiteLLM](https://github.com/BerriAI/litellm) ·
+  [FAISS](https://github.com/facebookresearch/faiss) ·
+  [sentence-transformers](https://github.com/UKPLab/sentence-transformers) ·
+  [FastAPI](https://fastapi.tiangolo.com/) ·
+  [Pydantic v2](https://docs.pydantic.dev/) ·
+  [D3.js v7](https://d3js.org/) ·
+  [highlight.js](https://highlightjs.org/) ·
+  [Tailwind CSS](https://tailwindcss.com/) ·
+  [tree-sitter](https://tree-sitter.github.io/) ·
+  [cryptography (Fernet)](https://cryptography.io/) ·
+  [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) ·
+  [watchfiles](https://github.com/samuelcolvin/watchfiles)
 
-### Upstream project
-
-- [danyQe/codebase-mcp](https://github.com/danyQe/codebase-mcp) — original project this fork builds on.
-
-### Libraries used
-
-- [LiteLLM](https://github.com/BerriAI/litellm) — multi-provider LLM gateway
-- [FAISS](https://github.com/facebookresearch/faiss) — vector similarity search
-- [sentence-transformers](https://github.com/UKPLab/sentence-transformers) — embeddings (`all-MiniLM-L6-v2`)
-- [FastAPI](https://fastapi.tiangolo.com/) — async HTTP framework
-- [Pydantic v2](https://docs.pydantic.dev/) — data validation
-- [D3.js v7](https://d3js.org/) — call/inheritance graph rendering
-- [highlight.js](https://highlightjs.org/) — syntax colouring in the code-preview modal
-- [Tailwind CSS](https://tailwindcss.com/) — styling
-- [tree-sitter](https://tree-sitter.github.io/) — multi-language AST parsing
-- [cryptography (Fernet)](https://cryptography.io/) — at-rest encryption of API keys
-- [Model Context Protocol Python SDK](https://github.com/modelcontextprotocol/python-sdk) — `mcp.server.fastmcp.FastMCP`
-
-> All third-party trademarks belong to their respective owners. References are listed for attribution; the implementation in this repository is original work paraphrasing the ideas and best practices described in those sources.
+> All third-party trademarks belong to their respective owners.
+> References are listed for attribution; the implementation in this
+> repository is original work paraphrasing the ideas described in
+> those sources.

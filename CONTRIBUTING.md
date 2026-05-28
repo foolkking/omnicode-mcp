@@ -1,105 +1,388 @@
-# Contributing to OmniCode-MCP 🌟
+# Contributing to OmniCode-MCP
 
-首先，非常感谢您对参与 **OmniCode-MCP** 贡献感兴趣！您的参与将使这款基于 MCP 协议的智能代码助手的体验变得更加非凡。
-
----
-
-## 📋 目录 (Table of Contents)
-
-*   [我们的愿景](#-我们的愿景)
-*   [开发环境搭建 (Development Setup)](#-开发环境搭建-development-setup)
-*   [项目结构贡献指南](#-项目结构贡献指南)
-*   [编码与代码规范 (Coding Guidelines)](#-编码与代码规范-coding-guidelines)
-*   [测试与静态检查](#-测试与静态检查)
-*   [提交变更指南 (Pull Request)](#-提交变更指南-pull-request)
+Thanks for considering a contribution. This guide is the developer
+on-ramp; **users** should start at [`README.md`](README.md) and
+[`docs/running.md`](docs/running.md).
 
 ---
 
-## 🌌 我们的愿景
+## Table of contents
 
-`OmniCode-MCP` 旨在打造一款最强健、最懂开发者意图的工程级 Codebase 理解与操作 MCP 服务端。我们通过引入**时空四维感知 (Git Blame & History)**、**跨语言精确语法树分析 (Tree-sitter AST)**、**全厂商模型网关路由器 (LiteLLM Router)** 以及**静默编译级静态分析防护网关 (Proactive Guard)**，极大地拓宽了 AI 在处理大型老旧工程代码时的上下文视野。
+- [Project vision](#project-vision)
+- [Development setup](#development-setup)
+- [Architecture rules](#architecture-rules)
+- [Coding conventions](#coding-conventions)
+- [Tests, lint, and CI](#tests-lint-and-ci)
+- [Submitting a pull request](#submitting-a-pull-request)
+- [Common patterns](#common-patterns)
+- [Where to ask questions](#where-to-ask-questions)
 
 ---
 
-## 🛠️ 开发环境搭建 (Development Setup)
+## Project vision
 
-### 1. 配置前置环境
-*   **Python**: `>= 3.11`
-*   **C++ 编译器**: (在 Windows 上编译 tree-sitter C++ 等解析包时可能需要 VS Build Tools)
+OmniCode-MCP is a **Codebase Intelligence Layer**, not an AI editor.
+We provide primitives — search, impact analysis, safe patch
+operations, memory advisory — that any AI editor (Cursor, Claude
+Code, Continue, Aider, Kiro) calls into. We don't write our own
+chat sidebar.
 
-### 2. 克隆项目与安装
-```powershell
-# 克隆工作区代码
-git clone https://github.com/your-username/omnicode-mcp.git
+If a feature proposal sounds like "OmniCode should also do X"
+where X is something Cursor / Claude Code already does, the answer
+is usually no. The right shape is "OmniCode should expose Y so
+Cursor can do X better".
+
+When in doubt, re-read [`docs/architecture-v2.md`](docs/architecture-v2.md)
+§1, §3, and §17 — those three sections pin the project's identity.
+
+---
+
+## Development setup
+
+### Required
+
+- Python 3.11 (3.12 also works; CI runs both).
+- Git.
+
+### Recommended
+
+- Conda — we use `omnicode-env` as the canonical name throughout
+  scripts and docs.
+- A GitHub fork of <https://github.com/foolkking/omnicode-mcp>.
+
+### One-liner
+
+```bash
+git clone https://github.com/<your-fork>/omnicode-mcp.git
 cd omnicode-mcp
-
-# 初始化 Python 虚拟环境
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-
-# 以本地可编辑状态安装核心包及依赖（依据 pyproject.toml 声明）
-pip install -e .[dev]
+conda create -n omnicode-env python=3.11 -y
+conda activate omnicode-env
+pip install -e ".[dev,llm,agent]"     # dev tools + every optional extra
 ```
 
----
+Verify:
 
-## 📦 项目结构贡献指南
-
-项目采用了全新重构的插件化、模块化包架构。在贡献代码时，请遵循以下模块职能约定：
-
-```
-omnicode-mcp/
-├── omnicode/               # 核心服务包目录
-│   ├── config/             # Pydantic 强类型全局设置
-│   ├── llm/                # 多模型路由、降级重试与 Tiktoken 压缩管理器
-│   │   └── providers/      # 各种云端与本地大模型 Provider
-│   ├── ast_engine/         # Tree-sitter AST 解析引擎与智能分块器
-│   ├── git_context/        # Git Blame 信息收集与 Issue/PR 时空关联
-│   ├── guard/              # mypy/ruff/eslint 静态分析防护与 Feedback 反馈循环
-│   ├── search/             # 混合搜索引擎（FAISS 向量匹配 + BM25 关键词）
-│   └── server/             # MCP stdio 协议核心网关及工具定义
-├── api/                    # 待对接的 FastAPI Web API 路由器接口
-├── core/                   # 依赖注入和 lifespan 管理器（开发中）
-├── templates/              # FastAPI 本地 Dashboard Web UI 模板
-└── pyproject.toml          # 项目构建描述与模块依赖管理
+```bash
+omnicode doctor                       # Python, deps, LSP servers, ports
+python -m pytest tests -q             # ~30 s
 ```
 
-*   **新增 LLM 供应商支持**：请在 `omnicode/llm/providers/` 中创建对应的 provider 类，继承并实现 `BaseLLMProvider`。
-*   **扩展新编程语言语法分析**：请在 `omnicode/ast_engine/` 中配置相应的 `tree-sitter-<language>` 并更新 `parser.py` 与 `chunker.py`。
-*   **添加新静态防御工具**：请在 `omnicode/guard/tools/` 目录下添加您要集成的本地 CLI 编译器检查工具。
+### Editable install + offline embeddings
 
----
+By default the embedding model is downloaded once. If you're
+network-restricted, prime the cache offline:
 
-## 🎨 编码与代码规范 (Coding Guidelines)
-
-我们使用 [ruff](https://github.com/astral-sh/ruff) 来进行代码风格检查与代码格式化。在提交易受审查前，请确保您本地的代码风格规范符合要求：
-*   **类型声明 (Type Hints)**：对于新编写 of `omnicode/` 导出 API 模块，必须提供完整且强类型的 Type Hint 注释。
-*   **单例模式规范**：对于全局共享的 AST 引擎及 LLM 路由，请统一从全局 `core` 注入层中获取，切忌在子类中进行重复实例化。
-
----
-
-## 🧪 测试与静态检查
-
-我们使用 `pytest` 运行单元测试与集成测试，并使用 `ruff` 以及 `mypy` 作静态代码门禁把关。
-
-```powershell
-# 1. 运行代码规范检查
-ruff check omnicode/
-
-# 2. 运行强类型静态分析检查
-mypy omnicode/ --strict
-
-# 3. 运行单元测试
-pytest tests/
+```bash
+HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 \
+  python -c "from sentence_transformers import SentenceTransformer; \
+             SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
 ```
 
----
-
-## 🚀 提交变更指南 (Pull Request)
-
-1.  请确保您的代码百分之百能够通过本地的 `ruff check`、`mypy` 类型验证以及全量单元测试。
-2.  请在您的 PR 描述中清晰说明所作的优化（例如：新增了哪种语言的 tree-sitter AST 支持，或是优化了 LiteLLM 的何种策略）。
-3.  如果引入了破坏性变更（例如修改了核心环境变量的配置键名），请务必同步更新本地的持续构建部署文档 `deployment_build_record.md` 并在 PR 中作出醒目说明。
+The Docker image already does this in the build step.
 
 ---
-*共同构建最智慧的 MCP 开发未来！*
+
+## Architecture rules
+
+These are non-negotiable. Reviewers will reject PRs that violate
+them:
+
+1. **`omnicode_core/` does not depend on Web UI or specific LLM
+   providers.** Adapters call core; never the reverse. New core
+   modules should be importable in a stripped install with no
+   FastAPI / no `litellm` / no templates.
+2. **MCP / HTTP / Web Console are adapters.** They share the same
+   underlying service objects in `core/dependencies.py`; new
+   features go in core first, then get exposed via whichever
+   adapter(s) make sense.
+3. **LLM features are optional.** Anything new in `omnicode/llm/`
+   or `omnicode/pipelines/edit.py` must guard imports so a
+   no-extras install doesn't crash.
+4. **Path inputs go through the sandbox.** Never call `Path.open()`
+   on a caller-supplied string without `validate_file_path` or
+   `ensure_within_workspace` first. See
+   [`docs/security.md`](docs/security.md).
+5. **State writes go through the read-only middleware**. Don't add
+   per-endpoint manual `OMNICODE_READ_ONLY` checks unless you need
+   a non-default behaviour (e.g. `/patch/apply` has its own gate).
+6. **Per-workspace data lives in shards**. New persistent files
+   for a feature go under `<wd>/.data/shards/<id>/`, not the
+   legacy `<wd>/.data/`. The sharding layer auto-migrates legacy
+   layouts on first run.
+7. **Imports stay one-way**:
+
+   ```text
+   adapters → core → standard library / third-party
+   ```
+
+   Tests can import anything; production code can't import from
+   tests.
+
+---
+
+## Coding conventions
+
+### Python
+
+- **Style**: ruff (configured in `pyproject.toml`). Run
+  `ruff check omnicode omnicode_core omnicode_adapters api core tests`
+  before pushing.
+- **Type hints**: required on all public functions. Use
+  `Optional[X]` rather than `X | None` when the file is shared
+  with Python < 3.10 callers; mostly we're on 3.11+ so either
+  works.
+- **Docstrings**: triple-double-quoted, full sentences, explain
+  *why* not *what*. The reader can read the code for what.
+- **Imports**: `isort` order is enforced by ruff (`I001`). Group
+  stdlib → third-party → first-party with blank lines.
+- **Async**: prefer `async def` for I/O paths (HTTP handlers,
+  LSP, file reads). Use `httpx.AsyncClient` not `requests`.
+
+### Frontend (Web Console)
+
+- **Vanilla JS modules + Tailwind**. No React / Vue / Svelte
+  build step. The whole front-end is hand-served from
+  `templates/`.
+- **Naming**: kebab-case for HTML files and CSS classes,
+  camelCase for JavaScript identifiers, snake_case for
+  data-attributes when they map directly to a Python field name.
+- **No new runtime dependencies** without a discussion. We don't
+  bundle, so every script tag is fetched separately; size matters.
+
+### Commit messages
+
+We follow the conventional-commits *spirit* but not the strict
+syntax. Prefixes we use:
+
+- `feat:` — new user-visible behaviour
+- `fix:` — bug fix
+- `chore:` — internal cleanup, gitignore changes, doc renames
+- `docs:` — documentation-only changes
+- `refactor:` — code shape changes with no behaviour change
+- `test:` — test-only changes
+- `perf:` — measurable performance improvement
+
+Multi-line messages are encouraged for non-trivial changes.
+Keep the first line under 72 characters; wrap the body at 78.
+
+---
+
+## Tests, lint, and CI
+
+### Running tests
+
+```bash
+# Full suite (~30 s)
+python -m pytest tests -q
+
+# Just the regressions ring (~12 s) — UI-bug-driven
+python -m pytest tests/integration/test_route_regressions.py -q
+
+# A single file
+python -m pytest tests/unit/test_user_store.py -q
+
+# With coverage
+python -m pytest tests --cov=omnicode_core --cov-report=term-missing
+```
+
+### Adding a test
+
+Pick the right directory:
+
+- `tests/unit/` — pure-Python, no FastAPI, no network. Fast.
+- `tests/integration/` — uses `fastapi.testclient.TestClient`,
+  may stand up the full app. Slower but lets you exercise
+  middleware + routing.
+
+Conventions:
+
+- One file per module (`test_<module>.py`).
+- Use `tmp_path` and `monkeypatch` from pytest, not global state.
+- For middleware-related tests that mutate env vars, **clear
+  `get_settings.cache_clear()` in fixture teardown** — the
+  Pydantic Settings object is `@lru_cache`d and leaks across
+  tests otherwise.
+- Skip tests that need optional binaries with `pytest.importorskip`
+  or `pytest.skip(reason=...)`. Don't make CI red because someone
+  doesn't have `jdtls` installed.
+
+### Linting
+
+```bash
+# Read-only check across the CI scope
+ruff check omnicode omnicode_core omnicode_adapters api core tests
+
+# Auto-fix is allowed everywhere EXCEPT tests/
+ruff check omnicode omnicode_core omnicode_adapters api core --fix
+```
+
+> **Don't run `ruff --fix tests/`.** Historical reason: a previous
+> automation run accidentally deleted the test directory tree. Fix
+> test issues by hand. Yes, it's annoying. The risk is worse.
+
+### CI
+
+`.github/workflows/ci.yml` runs:
+
+1. ruff lint on `omnicode + omnicode_core + omnicode_adapters +
+   api + core + tests`
+2. pytest matrix on Python 3.11 and 3.12
+3. Docker image build smoke (push to `main` only)
+
+Branch protection: PRs cannot merge until lint + tests pass.
+
+---
+
+## Submitting a pull request
+
+1. **Branch**: `git checkout -b feat/<short-name>` off the
+   current head.
+2. **Commit small**: prefer 5 small commits over 1 megacommit. We
+   squash on merge anyway, but reviewers thank you.
+3. **Update docs**:
+   - User-visible API changes → `docs/api-reference.md`
+   - New env var or TOML key → `docs/configuration.md`
+   - Security implications → `docs/security.md`
+   - Architecture changes → `docs/architecture-v2.md` and
+     `docs/features.md`
+4. **Add a regression test** for any UI-visible fix. We've been
+   bitten by the same bugs twice when there isn't one.
+5. **Run `omnicode doctor` + the test suite**. CI will catch you
+   eventually but it's faster to catch it locally.
+6. **Open the PR** with:
+   - A summary of *why*, not just *what*.
+   - A line referring to the docs you updated.
+   - Screenshots / GIFs for UI changes.
+
+Push to `feat/<name>` and open a PR against `main`. Maintainers
+push directly to `main` for trivial fixes; non-maintainer
+contributions go through review.
+
+### What gets merged fast
+
+- Bug fixes with a regression test.
+- Doc improvements.
+- Test additions.
+- Adapter-layer additions (new REST endpoint that wraps an
+  existing core feature).
+
+### What gets pushback
+
+- New core modules without a clear adapter consumer.
+- Anything that adds a runtime dependency.
+- "I added a chat UI to the Web Console". (See
+  [project vision](#project-vision).)
+- PRs that touch >1000 lines without a design doc.
+
+---
+
+## Common patterns
+
+### Adding a new REST endpoint
+
+1. Decide whether the underlying functionality is core or adapter:
+   - If it does code understanding / search / impact / patch /
+     memory → core. Add a method on the relevant
+     `omnicode_core/...` class.
+   - If it's only a Web Console concern (e.g. dashboard
+     aggregator) → adapter only.
+2. Create the endpoint in `api/v1/routers/<topic>.py`. Sandbox
+   any path inputs.
+3. Register the router in `api/v1/routers/__init__.py`'s
+   `all_routers` list.
+4. Test in `tests/integration/test_<topic>_endpoints.py` using
+   `TestClient`.
+5. Document in `docs/api-reference.md`.
+
+### Adding a new MCP tool
+
+For pure routing wrappers (most tools should be), add to
+`omnicode_adapters/mcp_server/high_level_tools.py`:
+
+```python
+@mcp.tool()
+async def omni_my_thing(
+    arg: str,
+    optional: int = 5,
+) -> str:
+    """Short, action-oriented description.
+
+    Detailed paragraph explaining when to use this vs a sibling
+    tool. Mention the underlying REST endpoint(s).
+    """
+    try:
+        res = await make_request(
+            "POST", "/my-endpoint", json={"arg": arg, "optional": optional}
+        )
+        if not res.get("success"):
+            return f"❌ failed: {res.get('error')}"
+        # Render the relevant slice of the result; don't dump everything.
+        return json.dumps(res.get("result", {}), indent=2)
+    except Exception as exc:
+        return f"❌ omni_my_thing failed: {exc}"
+```
+
+Update `discover_tools`'s catalog dict so it shows up in the
+runtime discovery.
+
+### Adding a new env var
+
+1. Add the field to `omnicode/config/settings.py` with a
+   sensible default and a comment explaining what it does.
+2. Add the row to [`docs/configuration.md`](docs/configuration.md)
+   under both the TOML section AND the env-var alphabetical
+   reference.
+3. If it should be configurable via TOML too, add the
+   `(section, key) → env_name` mapping in
+   `omnicode_core/config/toml_loader.py::_SECTION_KEY_MAP` and
+   update `omnicode.example.toml`.
+
+### Adding a new LSP server
+
+One entry in `omnicode_core/lsp/bridge.py::LSP_SERVERS`:
+
+```python
+"my-lang": {
+    "command": ["my-lang-server", "--stdio"],
+    "install_hint": "<package manager> install my-lang-server",
+    "extensions": [".myext"],
+}
+```
+
+Update `omnicode doctor` (`omnicode_adapters/cli/commands/doctor_cmd.py::lsp_servers`).
+Add a row to `docs/features.md` §LSP. Tests in
+`tests/unit/test_lsp_fleet.py` will pick it up automatically (they
+iterate over `LSP_SERVERS`).
+
+### Adding a new Web Console page
+
+1. Create `templates/components/sections/<name>.html`. Self-
+   contained: HTML + inline `<script>` IIFE.
+2. Register in `templates/components/layout/sidebar.html` with a
+   `loadSection('<name>')` button.
+3. If the page calls a new endpoint, add a route helper to
+   `templates/static/js/api/routes.js` first.
+4. Use `data-feature="<flag>"` for any panel that should be
+   off-by-default; `templates/static/js/utils/features.js`
+   handles the toggle.
+
+### Bumping the version
+
+`pyproject.toml` → `version`. We track loosely SemVer; the
+current target is `1.0.0`. Pre-release tags like `1.0.0-rc1` are
+fine while we shake out post-Wave-2 issues.
+
+---
+
+## Where to ask questions
+
+- **Bugs**: open an issue on GitHub with steps to reproduce + the
+  output of `omnicode doctor`.
+- **Architecture proposals**: open a *Discussion* (not an issue)
+  with the rationale + how it fits the
+  [project vision](#project-vision).
+- **Security concerns**: send a private email to the maintainers
+  listed in `pyproject.toml`. Do NOT open a public issue with
+  exploit details.
+
+Thanks for being here.
