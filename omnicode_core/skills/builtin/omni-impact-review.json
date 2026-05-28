@@ -1,0 +1,38 @@
+{
+  "name": "omni-impact-review",
+  "description": "Pull the impact + risk + advisory bundle for a symbol before editing it. The recommended pre-edit ritual.",
+  "version": "1.0.0",
+  "keywords": [
+    "impact", "blast radius", "before edit", "risk", "review", "review change"
+  ],
+  "inputs": [
+    {
+      "name": "symbol",
+      "required": true,
+      "description": "The symbol you're about to modify (function/class/method name)."
+    },
+    {
+      "name": "file",
+      "required": false,
+      "description": "Optional file path for context-aware advisory."
+    }
+  ],
+  "steps": [
+    {
+      "tool": "omni_impact",
+      "args": {"symbol": "${symbol}", "depth": 2},
+      "explain": "Get callers, callees, risk badge, suggested tests."
+    },
+    {
+      "tool": "omni_diagnostics",
+      "args": {"file": "${file}", "severity": "error"},
+      "explain": "Surface any current errors in the target file. Skip if no file given.",
+      "skip_if_missing_input": "file"
+    },
+    {
+      "tool": "omni_memory",
+      "args": {"action": "advisory", "query": "modify ${symbol}"},
+      "explain": "Recall any historical lessons about this symbol or pattern."
+    }
+  ]
+}

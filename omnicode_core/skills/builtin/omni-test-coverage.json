@@ -1,0 +1,32 @@
+{
+  "name": "omni-test-coverage",
+  "description": "Find tests related to a symbol and surface the suggested commands to run them.",
+  "version": "1.0.0",
+  "keywords": [
+    "tests", "coverage", "related tests", "verify", "before merge"
+  ],
+  "inputs": [
+    {
+      "name": "symbol",
+      "required": true,
+      "description": "Symbol to find tests for."
+    }
+  ],
+  "steps": [
+    {
+      "tool": "omni_impact",
+      "args": {"symbol": "${symbol}"},
+      "explain": "Risk badge + 'suggested tests' list (test files + pytest commands)."
+    },
+    {
+      "tool": "omni_search",
+      "args": {
+        "query": "test ${symbol}",
+        "mode": "hybrid",
+        "max_results": 8,
+        "around_file": "tests/"
+      },
+      "explain": "Find test files mentioning the symbol, biased toward the tests/ tree."
+    }
+  ]
+}

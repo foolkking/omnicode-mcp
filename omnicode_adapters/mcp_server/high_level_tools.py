@@ -1399,13 +1399,123 @@ def register_high_level_tools(mcp, make_request):
             return f"❌ omni_intelligence failed: {exc}"
 
     @mcp.tool()
+    async def omni_skill(
+        action: str = "list",
+        name: Optional[str] = None,
+        query: Optional[str] = None,
+    ) -> str:
+        """Discover and inspect packaged workflow recipes (skills).
+
+        Skills are declarative manifests that bundle a sequence of MCP
+        tool calls into a recommended workflow. The OmniCode server
+        does NOT execute them — this tool just shows you the recipe so
+        you can decide whether to follow it.
+
+        Actions:
+          - list:    show every available skill (name + description).
+          - search:  filter skills by ``query`` (matches name / description / keywords).
+          - show:    return the full step-by-step recipe for ``name``.
+
+        First-party skills:
+          - omni-impact-review:  pre-edit blast-radius bundle
+          - omni-safe-refactor:  preview → validate → apply → rollback
+          - omni-test-coverage:  find related tests + suggested commands
+
+        Drop your own skills as JSON or YAML at ``~/.kiro/skills/`` or
+        ``<workspace>/.kiro/skills/``.
+        """
+        try:
+            from omnicode_core.skills import (
+                SkillNotFoundError,
+                get_skill_loader,
+            )
+            loader = get_skill_loader()
+
+            if action == "list":
+                skills = loader.list_skills()
+                if not skills:
+                    return "📦 No skills installed. Drop manifests under ~/.kiro/skills/."
+                lines = [f"📦 {len(skills)} skill(s) available:\n"]
+                for s in skills:
+                    lines.append(f"  • {s.name:<24} v{s.version}")
+                    lines.append(f"      {s.description}")
+                    if s.keywords:
+                        lines.append(f"      keywords: {', '.join(s.keywords[:6])}")
+                    lines.append("")
+                lines.append(
+                    "💡 Use omni_skill(action='show', name=<name>) to see the steps."
+                )
+                return "\n".join(lines)
+
+            if action == "search":
+                if not query:
+                    return "❌ omni_skill search needs a query."
+                skills = loader.search(query, max_results=10)
+                if not skills:
+                    return f"📦 No skills matching '{query}'"
+                lines = [f"🔍 {len(skills)} skill(s) matching '{query}':\n"]
+                for s in skills:
+                    lines.append(f"  • {s.name}: {s.description}")
+                return "\n".join(lines)
+
+            if action == "show":
+                if not name:
+                    return "❌ omni_skill show needs name=<skill-name>."
+                try:
+                    skill = loader.get_skill(name)
+                except SkillNotFoundError:
+                    return f"❌ Skill '{name}' not found. Try omni_skill(action='list')."
+                lines = [
+                    f"📦 {skill.name}  v{skill.version}",
+                    f"   {skill.description}",
+                    "",
+                ]
+                if skill.keywords:
+                    lines.append(f"   Keywords: {', '.join(skill.keywords)}")
+                if skill.inputs:
+                    lines.append("")
+                    lines.append("   Inputs:")
+                    for inp in skill.inputs:
+                        req = "*" if inp.get("required") else " "
+                        lines.append(
+                            f"     {req} {inp.get('name', '?'):<14} "
+                            f"{inp.get('description', '')}"
+                        )
+                lines.append("")
+                lines.append(f"   Steps ({len(skill.steps)}):")
+                for i, step in enumerate(skill.steps, 1):
+                    tool = step.get("tool", "?")
+                    explain = step.get("explain", "")
+                    lines.append(f"     {i}. {tool}  — {explain}")
+                    args = step.get("args", {})
+                    if args:
+                        args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
+                        lines.append(f"        args: {args_str}")
+                lines.append("")
+                lines.append(
+                    f"   Source: {skill.source}\n"
+                    f"   Note: OmniCode does NOT auto-execute skills. Read the\n"
+                    f"   steps and call each tool yourself, interpolating\n"
+                    f"   ${{...}} placeholders from the user's request."
+                )
+                return "\n".join(lines)
+
+            return (
+                f"❌ Unknown omni_skill action: {action}.\n"
+                f"   Use: list, search, show"
+            )
+
+        except Exception as exc:  # noqa: BLE001
+            return f"❌ omni_skill failed: {exc}"
+
+    @mcp.tool()
     async def discover_tools(query: str = "") -> str:
         """Discover available OmniCode tools and their capabilities.
 
         Call with a query to find relevant tools, or empty to list all.
         This is useful when you're not sure which tool to use.
 
-        Eight core tools (recommended):
+        Nine core tools (recommended):
           - omni_search:      search code (auto/semantic/symbol/text/hybrid/references)
           - omni_read:        read files (outline/symbols/full/imports/diagnostics/range)
           - omni_impact:      blast radius — callers / callees / risk / related tests
@@ -1413,6 +1523,7 @@ def register_high_level_tools(mcp, make_request):
           - omni_context:     composer — outline + impact + memory + git in one call
           - omni_memory:      project memory (search/store/advisory)
           - omni_patch:       safe edit (preview / validate / apply / rollback)
+          - omni_skill:       discover packaged workflow recipes (skills)
           - discover_tools:   this tool
 
         Deprecated aliases (still work, prefer the named replacements):
@@ -1428,6 +1539,7 @@ def register_high_level_tools(mcp, make_request):
             "omni_context": "Composer — outline + impact + memory + git in one call",
             "omni_memory": "Project memory (search/store/advisory)",
             "omni_patch": "Safe edit (preview / validate / apply / rollback)",
+            "omni_skill": "Discover packaged workflow recipes (impact-review, safe-refactor, …)",
             "discover_tools": "This tool — find what's available",
         }
 
@@ -1438,12 +1550,13 @@ def register_high_level_tools(mcp, make_request):
             lines.append("")
             lines.append(
                 "💡 Recommended flow before any edit:\n"
-                "   1. omni_context(file=…)                 — get the lay of the land\n"
-                "   2. omni_impact(symbol=…)                — check blast radius\n"
-                "   3. omni_diagnostics(file=…)             — see existing issues\n"
-                "   4. omni_patch(action='preview', …)      — render the diff\n"
-                "   5. omni_patch(action='validate', …)     — run static checks\n"
-                "   6. omni_patch(action='apply', …)        — write + create rollback hook"
+                "   1. omni_skill(action='list')             — see if a recipe exists\n"
+                "   2. omni_context(file=…)                  — get the lay of the land\n"
+                "   3. omni_impact(symbol=…)                 — check blast radius\n"
+                "   4. omni_diagnostics(file=…)              — see existing issues\n"
+                "   5. omni_patch(action='preview', …)       — render the diff\n"
+                "   6. omni_patch(action='validate', …)      — run static checks\n"
+                "   7. omni_patch(action='apply', …)         — write + create rollback hook"
             )
             return "\n".join(lines)
 

@@ -1,0 +1,42 @@
+{
+  "name": "omni-safe-refactor",
+  "description": "Preview / validate / apply / rollback loop for a refactor. Never let an LLM write to disk without review.",
+  "version": "1.0.0",
+  "keywords": [
+    "refactor", "rename", "safe edit", "patch", "preview", "rollback"
+  ],
+  "inputs": [
+    {
+      "name": "file",
+      "required": true,
+      "description": "Path to the file you intend to modify."
+    },
+    {
+      "name": "content",
+      "required": true,
+      "description": "Full new content for the file (the patch is computed as a full replacement)."
+    }
+  ],
+  "steps": [
+    {
+      "tool": "omni_patch",
+      "args": {"action": "preview", "file": "${file}", "content": "${content}"},
+      "explain": "Render a unified diff so the user can confirm the change is what they want."
+    },
+    {
+      "tool": "omni_patch",
+      "args": {"action": "validate", "file": "${file}", "content": "${content}"},
+      "explain": "Run static checks (ruff/eslint/mypy/tsc) on the proposed content."
+    },
+    {
+      "tool": "omni_diagnostics",
+      "args": {"file": "${file}"},
+      "explain": "Show any pre-existing diagnostics so we don't blame the new patch for them."
+    },
+    {
+      "tool": "omni_patch",
+      "args": {"action": "apply", "file": "${file}", "content": "${content}"},
+      "explain": "Write to disk + create snapshot + record EditSession. Returns session_id for rollback."
+    }
+  ]
+}
