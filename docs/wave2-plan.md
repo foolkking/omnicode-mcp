@@ -147,17 +147,23 @@ probes that auto-skip when the server isn't installed locally.
 
 ---
 
-## W2-8 · VS Code extension (very thin)
+## W2-8 · VS Code extension (very thin) ✅ DONE
 
-**Why.** Cursor / Continue / Aider already work via MCP stdio. A
-purpose-built VS Code extension would only need to:
-* Add a "OmniCode: Show Impact" command that calls `/graph/impact`.
-* Add an "OmniCode: Apply Patch" command that calls `/patch/apply`
-  with a confirm prompt.
-* Display the capability fingerprint in the status bar.
+> Shipped under `extensions/vscode/` with its own `package.json` and
+> standalone build (CI doesn't compile it; release manually with
+> `vsce package`).
 
-Strict limit: **no chat UI, no AI editor — that's the rest of the
-ecosystem's job.**
+Three commands — exactly the surface promised in the architecture
+prompt:
+
+| Command | Endpoints used |
+|---|---|
+| `OmniCode: Show Impact` | `/graph/impact`, `/graph/risk`, `/graph/related-tests` |
+| `OmniCode: Apply Patch` | `/patch/preview` → confirm → `/patch/apply` |
+| `OmniCode: Capability Status` | `/capabilities` (also drives the status-bar item) |
+
+Strict limit: **no chat UI, no AI editor.** Built with Node's stdlib
+`http`/`https` so the bundle has zero runtime deps. ~340 LoC TypeScript.
 
 ---
 
@@ -176,20 +182,28 @@ failure, empty input, and identity ordering.
 
 ---
 
-## W2-10 · Multi-tenant FAISS sharding
+## W2-10 · Multi-tenant FAISS sharding ✅ DONE
 
-**Why.** Workspaces today share a single `vector_store.faiss`. The
-workspace registry already has separate IDs; the index should follow
-suit so cloud-mode tenants can't trip over each other's chunks.
+> Shipped in commit `8145535`. See `omnicode_core/index/sharding.py`
+> and the `SearchEngine(working_dir, shard_id=...)` extension.
 
-**Plan.** Per-workspace data dir at `<wd>/.data/wk_<id>/` and a router
-shard cache keyed by workspace id.
+* Per-workspace shard directory: `<wd>/.data/shards/<shard_id>/`
+  (replaces the legacy single `<wd>/.data/`).
+* `auto_migrate_legacy()` runs on first SearchEngine init and moves
+  the four known artefacts (`vector_store.faiss`, `vector_store.db`,
+  `file_tracker.db`, `selections.db`) plus the two known dirs
+  (`snapshots/`, `edit_sessions/`) into `shards/default/`. Idempotent.
+* `drop_shard(workspace_dir, shard_id)` refuses to delete the default
+  shard, used by `DELETE /workspaces/{id}` to keep disk in sync with
+  the registry.
+* 11 unit tests covering create/migrate/drop/list/idempotency.
 
 ---
 
-## Priority ordering
+## Priority ordering — Wave 2 fully complete
 
-Done so far (in chronological order):
+All ten Wave 2 items shipped:
+
 1. **W2-3** HTTPS reverse-proxy & systemd ✅
 2. **W2-5** MCP-over-HTTP auth ✅
 3. **W2-1** TOML config ✅
@@ -198,11 +212,8 @@ Done so far (in chronological order):
 6. **W2-9** Reranker ✅
 7. **W2-4** Master-key + token rotation ✅
 8. **W2-6** Web Console new pages ✅
-
-Still parked:
-9. **W2-10** FAISS sharding (per-workspace shards) — needed before
-   real multi-tenant cloud.
-10. **W2-8** VS Code extension — polish, do last.
+9. **W2-10** FAISS sharding ✅
+10. **W2-8** VS Code extension ✅
 
 ## Out of scope for the foreseeable future
 

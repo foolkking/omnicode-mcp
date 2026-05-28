@@ -124,3 +124,11 @@ _*.json
 # but leave the slot here so future ``ci-baseline.json`` etc. can be
 # whitelisted with a single line).
 # !ci-baseline.json
+
+
+# ---------------------------------------------------------------------------
+# VS Code extension (W2-8)
+# ---------------------------------------------------------------------------
+extensions/vscode/out/
+extensions/vscode/node_modules/
+extensions/vscode/*.vsix

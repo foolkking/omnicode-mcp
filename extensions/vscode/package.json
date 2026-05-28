@@ -1,0 +1,75 @@
+{
+  "name": "omnicode-mcp-vscode",
+  "displayName": "OmniCode-MCP",
+  "description": "Thin VS Code surface for the OmniCode-MCP Codebase Intelligence Layer (impact analysis, safe patch apply, capability fingerprint).",
+  "version": "0.1.0",
+  "publisher": "omnicode",
+  "engines": {
+    "vscode": "^1.82.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "omnicode",
+    "mcp",
+    "codebase",
+    "impact",
+    "ai"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "omnicode.showImpact",
+        "title": "OmniCode: Show Impact",
+        "category": "OmniCode"
+      },
+      {
+        "command": "omnicode.applyPatch",
+        "title": "OmniCode: Apply Patch",
+        "category": "OmniCode"
+      },
+      {
+        "command": "omnicode.capabilityStatus",
+        "title": "OmniCode: Capability Status",
+        "category": "OmniCode"
+      }
+    ],
+    "configuration": {
+      "title": "OmniCode-MCP",
+      "properties": {
+        "omnicode.serverUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:6789",
+          "description": "Base URL of the OmniCode-MCP HTTP server."
+        },
+        "omnicode.apiKey": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Optional API key sent as `X-API-Key`. Required when the server has `OMNICODE_API_KEY` set or any RBAC user exists."
+        },
+        "omnicode.confirmApplyPatch": {
+          "type": "boolean",
+          "default": true,
+          "description": "Ask for confirmation before applying a patch."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/vscode": "^1.82.0",
+    "typescript": "^5.4.0"
+  },
+  "license": "MIT"
+}

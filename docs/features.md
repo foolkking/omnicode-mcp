@@ -402,6 +402,13 @@ omnicode_adapters/
     └── http_auth.py          # MCP-over-HTTP bearer gate (W2-5)
 ```
 
+```
+extensions/
+└── vscode/           # thin VS Code extension (W2-8)
+    ├── package.json  # 3 commands: showImpact / applyPatch / capabilityStatus
+    └── src/          # ~340 LoC TypeScript, zero runtime deps
+```
+
 `omnicode_core` MUST NOT depend on Web UI or specific LLM providers —
 adapters call core, never the reverse.
 
@@ -421,9 +428,9 @@ adapters call core, never the reverse.
 | Wave 2 W2-4 | ✅ done | master-key rotation + token expiry + revoke-by-user |
 | Wave 2 W2-6 | ✅ done | Web Console: edit-sessions / impact viewer / advisory drawer |
 | Wave 2 W2-7 | ✅ done | LSP fleet expansion (ruby / php / java / kotlin / c#) |
+| Wave 2 W2-8 | ✅ done | thin VS Code extension (3 commands, status bar) |
 | Wave 2 W2-9 | ✅ done | cross-encoder reranker (opt-in) |
-| Wave 2 W2-8 | ⏳ planned | thin VS Code extension |
-| Wave 2 W2-10 | ⏳ planned | per-workspace FAISS sharding |
+| Wave 2 W2-10 | ✅ done | per-workspace FAISS sharding + auto-migration |
 | Out of scope | ❌ never | full AI editor, self-built Agent framework, SaaS billing |
 
 ---
