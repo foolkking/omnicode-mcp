@@ -96,13 +96,109 @@ class EditPipeline:
     _SURGICAL_PADDING = 3                # extra lines before/after for context
     _SURGICAL_MAX_SYMBOL_LINES = 200    # if symbol body is bigger, skip surgical
 
-    def __init__(self, write_pipeline: Any = None) -> None:
+    def __init__(self, write_pipeline: Any = None, patch_manager: Any = None) -> None:
+        """Initialize the LLM-driven edit pipeline.
+
+        Parameters
+        ----------
+        write_pipeline:
+            Optional WritePipeline for symbol-aware writes (mostly used
+            by the legacy whole-file flow).
+        patch_manager:
+            Optional :class:`omnicode_core.edit.patch.PatchManager`. When
+            provided, every successful LLM edit goes through
+            ``apply_patch`` so it gets a snapshot, an EditSession entry,
+            and rollback support. When ``None`` we fall back to a direct
+            ``open(..., 'w')`` write for backwards compatibility (dev /
+            test environments without the safe-edit layer wired up).
+
+        The patch_manager-backed flow is the project's safety contract:
+        AI never writes the user's source files without leaving a
+        rollback breadcrumb.
+        """
         self.write_pipeline = write_pipeline
+        self.patch_manager = patch_manager
         self.router = LLMRouter()
         self.guard = ProactiveGuard()
 
     def get_stats(self) -> Dict[str, Any]:
         return {"status": "active", "router": self.router.get_status()}
+
+    def _safe_write(
+        self,
+        *,
+        file_path: str,
+        new_content: str,
+        role: str,
+        request: "EditRequest",
+    ) -> Optional[str]:
+        """Write the LLM output through PatchManager when available.
+
+        Returns the resulting EditSession ``session_id`` so the caller
+        can surface it in the response (and the user can ``rollback``
+        if anything went wrong). When ``patch_manager`` is not wired up
+        (e.g. in narrow unit-test fixtures) we fall back to a direct
+        write so existing call sites don't break — but we log a clear
+        warning so the missing safety layer is visible.
+        """
+        if self.patch_manager is None:
+            logger.warning(
+                "[%s pass] No PatchManager wired; writing %s without "
+                "snapshot/rollback. This is unsafe — wire up "
+                "PatchManager via lifespan.",
+                role, file_path,
+            )
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(new_content)
+            logger.info("[%s pass] Saved %s (no rollback available)", role, file_path)
+            return None
+
+        # PatchManager.apply_patch handles the actual write + snapshot
+        # + EditSession persistence.  We pass the relative path because
+        # PatchManager.workspace_root resolves it; if the caller already
+        # gave us an absolute path inside the workspace, _resolve()
+        # returns it unchanged.
+        rel_path = self._workspace_relative(file_path)
+        result = self.patch_manager.apply_patch(
+            file_path=rel_path,
+            new_content=new_content,
+            source=f"llm_edit:{role}",
+            metadata={
+                "instructions": (request.instructions or "")[:500],
+                "code_edit": (request.code_edit or "")[:500],
+            },
+        )
+        if not result.success:
+            logger.error(
+                "[%s pass] PatchManager.apply_patch failed for %s: %s",
+                role, rel_path, result.message,
+            )
+            return None
+        logger.info(
+            "[%s pass] Saved %s via PatchManager (session=%s, +%d/-%d)",
+            role, rel_path, result.session_id,
+            result.lines_added, result.lines_removed,
+        )
+        return result.session_id
+
+    def _workspace_relative(self, file_path: str) -> str:
+        """Best-effort make ``file_path`` relative to the patch manager's
+        working directory.
+
+        EditPipeline historically receives absolute paths from the API
+        layer (which has already validated them through the sandbox).
+        PatchManager wants relative paths; we trust ``relpath`` here
+        because the sandbox check at the API layer already proved the
+        path is inside the workspace.
+        """
+        if not self.patch_manager:
+            return file_path
+        try:
+            rel = os.path.relpath(file_path, self.patch_manager.working_dir)
+            # Normalise to forward slashes for stable session keys.
+            return rel.replace("\\", "/")
+        except (ValueError, OSError):
+            return file_path
 
     # ------------------------------------------------------------------
     async def process_edit(self, request: EditRequest, save_to_file: bool = True):
@@ -254,6 +350,7 @@ class EditPipeline:
                 self.warnings = first.get("warnings", [])
                 self.token_stats = first.get("token_stats", {})
                 self.role_used = first.get("role_used")
+                self.edit_session_id = first.get("edit_session_id")
                 self.escalated = escalated
                 self.escalation = (
                     {
@@ -686,6 +783,7 @@ class EditPipeline:
             logger.error("[%s pass] LLM call failed: %s", role, exc)
             errors.append(str(exc))
 
+        edit_session_id: Optional[str] = None
         if edit_success and save_to_file:
             # Final safety net: refuse to write if the new content drastically
             # shrinks the file. This catches "LLM emitted only a thinking
@@ -720,9 +818,12 @@ class EditPipeline:
                 final_content = original_content
                 edit_success = False
             else:
-                with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(final_content)
-                logger.info("[%s pass] Saved %s", role, file_path)
+                edit_session_id = self._safe_write(
+                    file_path=file_path,
+                    new_content=final_content,
+                    role=role,
+                    request=request,
+                )
 
         # ---- Guard ------------------------------------------------------------
         guard_result: Optional[GuardResult] = None
@@ -745,6 +846,7 @@ class EditPipeline:
             "role_used": role,
             "attempt": attempt,
             "edit_success": edit_success,
+            "edit_session_id": edit_session_id,
             "errors": errors,
             "final_content": final_content,
             "guard_result": guard_result,

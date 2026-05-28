@@ -161,6 +161,8 @@ async def intelligent_write(request: WriteRequest):
             },
             "errors": result.errors if hasattr(result, "errors") else [],
             "warnings": result.warnings if hasattr(result, "warnings") else [],
+            "edit_session_id": getattr(result, "edit_session_id", None),
+            "rollback_available": bool(getattr(result, "edit_session_id", None)),
         }
 
         if result.success:
@@ -356,6 +358,8 @@ async def intelligent_edit(request: EditRequestAPI):
                 "format_errors": result.format_errors,
                 "warnings": result.warnings,
             },
+            "edit_session_id": getattr(result, "edit_session_id", None),
+            "rollback_available": bool(getattr(result, "edit_session_id", None)),
         }
 
         if result.success:
@@ -830,14 +834,31 @@ async def file_operations(request: FileRequest):
                         f"Write failed: {'; '.join(result.errors)}", 422
                     )
             else:
-                # Fallback to simple write
-                with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(request.content)
+                # Fallback when WritePipeline isn't wired up: still go
+                # through PatchManager so the user gets a snapshot +
+                # rollback. This block historically used a raw
+                # `open(..., "w")` write — that left no audit trail and
+                # silently broke the project's safety contract.
+                from omnicode_core.edit.patch import PatchManager
+                pm = PatchManager(settings.WORKING_DIR)
+                result = pm.apply_patch(
+                    file_path=request.file_path,
+                    new_content=request.content,
+                    source="file_operations:write_fallback",
+                )
+                if not result.success:
+                    return create_error_response(
+                        f"Write failed: {result.message}", 500
+                    )
                 return create_success_response(
                     {
                         "operation": "write",
                         "file_path": request.file_path,
                         "message": "File written (without intelligent processing)",
+                        "edit_session_id": result.session_id,
+                        "rollback_available": result.rollback_available,
+                        "lines_added": result.lines_added,
+                        "lines_removed": result.lines_removed,
                     }
                 )
 
@@ -861,8 +882,27 @@ async def file_operations(request: FileRequest):
                 file_path.parent.mkdir(parents=True, exist_ok=True)
                 content = request.content or ""
 
-                with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(content)
+                # Route through PatchManager so even fresh-file creates
+                # land in EditSessions and get a rollback hook (the
+                # snapshot will simply be empty, which apply_patch
+                # handles cleanly).
+                from omnicode_core.edit.patch import PatchManager
+                pm = PatchManager(settings.WORKING_DIR)
+                result = pm.apply_patch(
+                    file_path=request.file_path,
+                    new_content=content,
+                    source="file_operations:create",
+                )
+                if not result.success:
+                    return create_detailed_error_response(
+                        f"Create error: {result.message}",
+                        500,
+                        "FileCreateError",
+                        {"file_path": request.file_path},
+                        "FileOperations",
+                        "create",
+                        settings.WORKING_DIR,
+                    )
 
                 return create_success_response(
                     {
@@ -871,6 +911,8 @@ async def file_operations(request: FileRequest):
                         "message": "File created successfully",
                         "content_length": len(content),
                         "lines_written": len(content.split("\n")) if content else 0,
+                        "edit_session_id": result.session_id,
+                        "rollback_available": result.rollback_available,
                     }
                 )
             except Exception as e:

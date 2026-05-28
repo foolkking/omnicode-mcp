@@ -126,13 +126,22 @@ async def initialize_services() -> None:
         set_search_engine(search_engine)
         logger.info("✅ Semantic/hybrid search engine initialized")
 
-        # Initialize write pipeline with search engine
-        write_pipeline = WritePipeline(search_engine)
+        # Initialize PatchManager — the safe-edit layer used by both
+        # WritePipeline and EditPipeline. Snapshots + EditSession +
+        # rollback live here. Wiring it into the pipelines means every
+        # LLM-driven write goes through the project's safety contract,
+        # not raw `open(..., "w")`.
+        from omnicode_core.edit.patch import PatchManager
+        patch_manager = PatchManager(working_dir)
+        logger.info("✅ PatchManager initialized (snapshot + rollback layer)")
+
+        # Initialize write pipeline with search engine + patch manager
+        write_pipeline = WritePipeline(search_engine, patch_manager=patch_manager)
         set_write_pipeline(write_pipeline)
         logger.info("✅ Write pipeline initialized")
 
-        # Initialize edit pipeline with write pipeline
-        edit_pipeline = EditPipeline(write_pipeline)
+        # Initialize edit pipeline with write pipeline + patch manager
+        edit_pipeline = EditPipeline(write_pipeline, patch_manager=patch_manager)
         set_edit_pipeline(edit_pipeline)
         logger.info("✅ Edit pipeline initialized")
 

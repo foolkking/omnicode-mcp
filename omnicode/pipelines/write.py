@@ -26,8 +26,26 @@ logger = logging.getLogger(__name__)
 class WritePipeline:
     """Pipeline for handling file writes."""
 
-    def __init__(self, search_engine: Any = None) -> None:
+    def __init__(
+        self,
+        search_engine: Any = None,
+        patch_manager: Any = None,
+    ) -> None:
+        """Initialize the write pipeline.
+
+        Parameters
+        ----------
+        search_engine:
+            Used to incrementally re-index a file after writing.
+        patch_manager:
+            Optional :class:`omnicode_core.edit.patch.PatchManager`. When
+            provided every write goes through ``apply_patch`` so the
+            file gets a snapshot + EditSession + rollback hook. When
+            ``None`` we fall back to a direct write (legacy behaviour;
+            logs a warning).
+        """
         self.search_engine = search_engine
+        self.patch_manager = patch_manager
         self.router = LLMRouter()
         provider = self._pick_provider()
         self.token_manager = TokenManager(provider)
@@ -42,6 +60,52 @@ class WritePipeline:
 
     def get_stats(self) -> Dict[str, Any]:
         return {"status": "active"}
+
+    def _safe_write(self, *, file_path: str, content: str) -> Optional[str]:
+        """Write content via PatchManager when available; fallback to direct write.
+
+        Returns the EditSession id on PatchManager success; ``None``
+        when falling back. The caller can surface the id so the user
+        can rollback this write.
+        """
+        if self.patch_manager is None:
+            logger.warning(
+                "WritePipeline has no PatchManager; writing %s without "
+                "snapshot/rollback. Wire up PatchManager via lifespan.",
+                file_path,
+            )
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            logger.info("Saved file %s (no rollback available)", file_path)
+            return None
+
+        rel_path = self._workspace_relative(file_path)
+        result = self.patch_manager.apply_patch(
+            file_path=rel_path,
+            new_content=content,
+            source="write_pipeline",
+        )
+        if not result.success:
+            logger.error(
+                "WritePipeline.apply_patch failed for %s: %s",
+                rel_path, result.message,
+            )
+            return None
+        logger.info(
+            "Saved %s via PatchManager (session=%s, +%d/-%d)",
+            rel_path, result.session_id,
+            result.lines_added, result.lines_removed,
+        )
+        return result.session_id
+
+    def _workspace_relative(self, file_path: str) -> str:
+        if not self.patch_manager:
+            return file_path
+        try:
+            rel = os.path.relpath(file_path, self.patch_manager.working_dir)
+            return rel.replace("\\", "/")
+        except (ValueError, OSError):
+            return file_path
 
     # ------------------------------------------------------------------
     async def process_write(
@@ -83,11 +147,10 @@ class WritePipeline:
         logger.info("Write content tokens: %s", token_stats)
 
         # ---- Save -----------------------------------------------------------------
+        edit_session_id: Optional[str] = None
         if save_to_file:
             os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(content)
-            logger.info("Saved file %s", file_path)
+            edit_session_id = self._safe_write(file_path=file_path, content=content)
 
         # ---- Index ----------------------------------------------------------------
         if self.search_engine and hasattr(self.search_engine, "update_file"):
@@ -140,5 +203,6 @@ class WritePipeline:
                 self.warnings = FormatResult.warnings
                 self.processing_time_seconds = time.time() - start_time
                 self.token_stats = token_stats
+                self.edit_session_id = edit_session_id
 
         return WriteResult(file_path)
