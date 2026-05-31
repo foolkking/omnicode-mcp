@@ -38,11 +38,10 @@ Tests pinned by this round:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Any
 
 import pytest
 
@@ -50,54 +49,27 @@ from omnicode_adapters.mcp_server import high_level_tools as hlt
 from omnicode_adapters.mcp_server.high_level_tools import (
     _HANDLER_FEATURES,
     _HANDLER_VERSION,
-    register_high_level_tools,
 )
-
-
-# ---------------------------------------------------------------------------
-# FastMCP shim (mirrors the pattern used by tests/unit/test_omni_patch_*.py)
-# ---------------------------------------------------------------------------
-
-
-class _ToolManagerStub:
-    def __init__(self) -> None:
-        self._tools: Dict[str, Callable[..., Any]] = {}
-
-
-class _MCPStub:
-    def __init__(self) -> None:
-        self.tools: Dict[str, Callable[..., Any]] = {}
-        self._tool_manager = _ToolManagerStub()
-
-    def tool(self, *args: Any, **kwargs: Any):
-        def deco(fn: Callable[..., Any]) -> Callable[..., Any]:
-            self.tools[fn.__name__] = fn
-            self._tool_manager._tools[fn.__name__] = fn
-            return fn
-
-        return deco
-
+from tests.unit.mcp_harness import (
+    build_tools_with_route_keys as _build_tools,
+)
+from tests.unit.mcp_harness import (
+    run as _run,
+)
 
 _NEW_FILE_RELPATH = "tests/tmp_r19_new_file.py"
 _EXISTING_FILE_RELPATH = "tests/tmp_r19_existing.py"
 
 
-def _read_route_for_missing() -> Dict[str, Any]:
-    """Scripted /read response that means 'file does not exist'.
-
-    The probe in :func:`_get_backend_file_markers` looks at the
-    ``error`` field for not-found signals (matched against substrings
-    like ``"not found"`` / ``"no such file"`` / ``"does not exist"``).
-    Returning the message under ``error`` is what flips the marker to
-    ``file_exists=False, new_file=True, file_marker_authoritative=True``.
-    """
+def _read_route_for_missing() -> dict[str, Any]:
+    """Scripted /read response that means 'file does not exist'."""
     return {
         "success": False,
         "error": "File not found: x.py",
     }
 
 
-def _read_route_for_existing() -> Dict[str, Any]:
+def _read_route_for_existing() -> dict[str, Any]:
     """Scripted /read response that means 'file exists with content'."""
     return {
         "success": True,
@@ -108,37 +80,6 @@ def _read_route_for_existing() -> Dict[str, Any]:
         "file_path": "/abs/path/to/file.py",
         "workspace_root": "/abs/path/to",
     }
-
-
-def _build_tools(routes: Dict[str, Any]) -> Dict[str, Any]:
-    captured: Dict[str, List[Dict[str, Any]]] = {}
-
-    async def make_request(
-        method: str, endpoint: str, **kwargs: Any
-    ) -> Dict[str, Any]:
-        captured.setdefault(endpoint, []).append(kwargs)
-        if endpoint in routes:
-            payload = routes[endpoint]
-        else:
-            payload = None
-            key = endpoint.rstrip("/").rsplit("/", 1)[-1] or endpoint
-            if key in routes:
-                payload = routes[key]
-        if payload is None:
-            return {"result": {}}
-        if callable(payload):
-            payload = payload(method, endpoint, kwargs)
-        return {"result": payload}
-
-    mcp = _MCPStub()
-    register_high_level_tools(mcp, make_request)
-    tools = dict(mcp.tools)
-    tools["__captured__"] = captured  # type: ignore[assignment]
-    return tools
-
-
-def _run(coro: Any) -> Any:
-    return asyncio.get_event_loop().run_until_complete(coro)
 
 
 @pytest.fixture(autouse=True)

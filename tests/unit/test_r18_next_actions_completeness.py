@@ -19,65 +19,17 @@ Pinned by Round 9 (2 P2 + 2 P3 fixes):
 
 from __future__ import annotations
 
-import asyncio
 import json
-from typing import Any, Callable, Dict, List
-
-import pytest
+from typing import Any, Dict
 
 from omnicode_adapters.mcp_server import high_level_tools as hlt
-from omnicode_adapters.mcp_server.high_level_tools import (
-    _HANDLER_VERSION,
-    register_high_level_tools,
+from tests.unit.mcp_harness import (
+    build_tools,
+    build_tools_from_request,
 )
-
-
-class _ToolManagerStub:
-    def __init__(self) -> None:
-        self._tools: Dict[str, Callable[..., Any]] = {}
-
-
-class _MCPStub:
-    def __init__(self) -> None:
-        self.tools: Dict[str, Callable[..., Any]] = {}
-        self._tool_manager = _ToolManagerStub()
-
-    def tool(self, *args: Any, **kwargs: Any):
-        def deco(fn: Callable[..., Any]) -> Callable[..., Any]:
-            self.tools[fn.__name__] = fn
-            self._tool_manager._tools[fn.__name__] = fn
-            return fn
-
-        return deco
-
-
-def _build_tools(routes: Dict[str, Any]) -> Dict[str, Callable[..., Any]]:
-    captured: Dict[str, List[Dict[str, Any]]] = {}
-
-    async def make_request(
-        method: str, endpoint: str, **kwargs: Any
-    ) -> Dict[str, Any]:
-        captured.setdefault(endpoint, []).append(kwargs)
-        if endpoint in routes:
-            payload = routes[endpoint]
-        else:
-            payload = None
-        if payload is None:
-            return {"result": {}}
-        if callable(payload):
-            payload = payload(method, endpoint, kwargs)
-        return {"result": payload}
-
-    mcp = _MCPStub()
-    register_high_level_tools(mcp, make_request)
-    tools = dict(mcp.tools)
-    tools["__captured__"] = captured  # type: ignore[assignment]
-    return tools
-
-
-def _run(coro: Any) -> Any:
-    return asyncio.get_event_loop().run_until_complete(coro)
-
+from tests.unit.mcp_harness import (
+    run as _run,
+)
 
 # ===========================================================================
 # P2-A — omni_search next_actions
@@ -105,7 +57,7 @@ def test_omni_search_symbol_mode_high_confidence_recommends_read_and_impact() ->
             "total_results": 1,
         },
     }
-    tools = _build_tools(routes)
+    tools = build_tools(routes)
     raw = _run(tools["omni_search"](
         query="_detect_mode", mode="symbol", format="json",
     ))
@@ -138,7 +90,7 @@ def test_omni_search_symbol_mode_fuzzy_only_recovers_to_references() -> None:
             "total_results": 1,
         },
     }
-    tools = _build_tools(routes)
+    tools = build_tools(routes)
     raw = _run(tools["omni_search"](
         query="my_target", mode="symbol", format="json",
     ))
@@ -162,7 +114,7 @@ def test_omni_search_references_mode_recommends_read_and_impact() -> None:
         },
         "/search/text": {"results": []},
     }
-    tools = _build_tools(routes)
+    tools = build_tools(routes)
     raw = _run(tools["omni_search"](
         query="my_func", mode="references", format="json",
     ))
@@ -185,7 +137,7 @@ def test_omni_search_text_mode_recommends_range_read() -> None:
             }],
         },
     }
-    tools = _build_tools(routes)
+    tools = build_tools(routes)
     raw = _run(tools["omni_search"](
         query="foo", mode="text", format="json",
     ))
@@ -199,7 +151,7 @@ def test_omni_search_text_mode_recommends_range_read() -> None:
 def test_omni_search_no_results_recommends_recovery() -> None:
     """Empty result set → recommend mode upgrade (semantic / hybrid)."""
     routes = {"/search/text": {"results": []}}
-    tools = _build_tools(routes)
+    tools = build_tools(routes)
     raw = _run(tools["omni_search"](
         query="zzzz_no_match", mode="text", format="json",
     ))
@@ -231,7 +183,7 @@ def test_omni_memory_advisory_interpolates_symbol_into_next_actions() -> None:
             ],
         },
     }
-    tools = _build_tools(routes)
+    tools = build_tools(routes)
     raw = _run(tools["omni_memory"](
         action="advisory",
         symbol="_detect_mode",
@@ -263,7 +215,7 @@ def test_omni_memory_advisory_no_symbol_falls_back_to_placeholder() -> None:
             ],
         },
     }
-    tools = _build_tools(routes)
+    tools = build_tools(routes)
     raw = _run(tools["omni_memory"](
         action="advisory",
         task="some task",
@@ -289,7 +241,7 @@ def test_omni_memory_advisory_interpolates_file_into_preview_action() -> None:
             ],
         },
     }
-    tools = _build_tools(routes)
+    tools = build_tools(routes)
     raw = _run(tools["omni_memory"](
         action="advisory",
         symbol="my_func",
@@ -373,9 +325,7 @@ def test_omni_diagnostics_with_errors_includes_line_locator(tmp_path) -> None:
             return {"result": {"diagnostics": []}}
         return {"result": {}}
 
-    mcp = _MCPStub()
-    register_high_level_tools(mcp, make_request)
-    tools = mcp.tools
+    tools = build_tools_from_request(make_request)
     raw = _run(tools["omni_diagnostics"](file=str(file), format="json"))
     payload = json.loads(raw)
     assert payload["ok"] is True
@@ -400,9 +350,7 @@ def test_omni_diagnostics_clean_file_no_locator_action(tmp_path) -> None:
             return {"result": {"diagnostics": []}}
         return {"result": {}}
 
-    mcp = _MCPStub()
-    register_high_level_tools(mcp, make_request)
-    tools = mcp.tools
+    tools = build_tools_from_request(make_request)
     raw = _run(tools["omni_diagnostics"](file=str(file), format="json"))
     payload = json.loads(raw)
     blob = " ".join(payload["next_actions"])

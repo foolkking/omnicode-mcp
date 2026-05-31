@@ -35,11 +35,9 @@ Edge cases pinned:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 from pathlib import Path
-from typing import Any, Callable, Dict, List
 
 import pytest
 
@@ -47,68 +45,18 @@ from omnicode_adapters.mcp_server import high_level_tools as hlt
 from omnicode_adapters.mcp_server.high_level_tools import (
     _HANDLER_FEATURES,
     _HANDLER_VERSION,
-    register_high_level_tools,
 )
-
-
-# ---------------------------------------------------------------------------
-# FastMCP shim + scripted backend
-# ---------------------------------------------------------------------------
-
+from tests.unit.mcp_harness import (
+    build_tools_with_route_keys as _build_tools,
+)
+from tests.unit.mcp_harness import (
+    run as _run,
+)
 
 _EMPTY_SHA256_PREFIX = "e3b0c44298fc1c14"
 _NEW_FILE_RELPATH = "tests/tmp_r20_new_file.py"
 _EXISTING_FILE_RELPATH = "tests/tmp_r20_existing.py"
 
-
-class _ToolManagerStub:
-    def __init__(self) -> None:
-        self._tools: Dict[str, Callable[..., Any]] = {}
-
-
-class _MCPStub:
-    def __init__(self) -> None:
-        self.tools: Dict[str, Callable[..., Any]] = {}
-        self._tool_manager = _ToolManagerStub()
-
-    def tool(self, *args: Any, **kwargs: Any):
-        def deco(fn: Callable[..., Any]) -> Callable[..., Any]:
-            self.tools[fn.__name__] = fn
-            self._tool_manager._tools[fn.__name__] = fn
-            return fn
-
-        return deco
-
-
-def _build_tools(routes: Dict[str, Any]) -> Dict[str, Any]:
-    captured: Dict[str, List[Dict[str, Any]]] = {}
-
-    async def make_request(
-        method: str, endpoint: str, **kwargs: Any
-    ) -> Dict[str, Any]:
-        captured.setdefault(endpoint, []).append(kwargs)
-        if endpoint in routes:
-            payload = routes[endpoint]
-        else:
-            payload = None
-            key = endpoint.rstrip("/").rsplit("/", 1)[-1] or endpoint
-            if key in routes:
-                payload = routes[key]
-        if payload is None:
-            return {"result": {}}
-        if callable(payload):
-            payload = payload(method, endpoint, kwargs)
-        return {"result": payload}
-
-    mcp = _MCPStub()
-    register_high_level_tools(mcp, make_request)
-    tools = dict(mcp.tools)
-    tools["__captured__"] = captured  # type: ignore[assignment]
-    return tools
-
-
-def _run(coro: Any) -> Any:
-    return asyncio.get_event_loop().run_until_complete(coro)
 
 
 @pytest.fixture(autouse=True)

@@ -17,70 +17,13 @@ Pinned by the Round 5 audit (3 fixes):
 
 from __future__ import annotations
 
-import asyncio
 import json
-from typing import Any, Callable, Dict, List
-
-import pytest
+from typing import Any, Dict
 
 from omnicode_adapters.mcp_server import high_level_tools as hlt
-from omnicode_adapters.mcp_server.high_level_tools import (
-    _HANDLER_VERSION,
-    register_high_level_tools,
-)
-
-
-# ---------------------------------------------------------------------------
-# FastMCP shim + scripted backend (matches the pattern of prior rounds).
-# ---------------------------------------------------------------------------
-
-
-class _ToolManagerStub:
-    def __init__(self) -> None:
-        self._tools: Dict[str, Callable[..., Any]] = {}
-
-
-class _MCPStub:
-    def __init__(self) -> None:
-        self.tools: Dict[str, Callable[..., Any]] = {}
-        self._tool_manager = _ToolManagerStub()
-
-    def tool(self, *args: Any, **kwargs: Any):
-        def deco(fn: Callable[..., Any]) -> Callable[..., Any]:
-            self.tools[fn.__name__] = fn
-            self._tool_manager._tools[fn.__name__] = fn
-            return fn
-
-        return deco
-
-
-def _build_tools(routes: Dict[str, Any]) -> Dict[str, Callable[..., Any]]:
-    captured: Dict[str, List[Dict[str, Any]]] = {}
-
-    async def make_request(
-        method: str, endpoint: str, **kwargs: Any
-    ) -> Dict[str, Any]:
-        captured.setdefault(endpoint, []).append(kwargs)
-        if endpoint in routes:
-            payload = routes[endpoint]
-        else:
-            payload = None
-        if payload is None:
-            return {"result": {}}
-        if callable(payload):
-            payload = payload(method, endpoint, kwargs)
-        return {"result": payload}
-
-    mcp = _MCPStub()
-    register_high_level_tools(mcp, make_request)
-    tools = dict(mcp.tools)
-    tools["__captured__"] = captured  # type: ignore[assignment]
-    return tools
-
-
-def _run(coro: Any) -> Any:
-    return asyncio.get_event_loop().run_until_complete(coro)
-
+from omnicode_adapters.mcp_server.high_level_tools import _HANDLER_VERSION
+from tests.unit.mcp_harness import build_tools as _build_tools
+from tests.unit.mcp_harness import run as _run
 
 # ===========================================================================
 # P1 — omni_patch rollback error-field alignment
@@ -165,7 +108,7 @@ def test_omni_patch_rollback_success_does_not_inject_error() -> None:
 # ===========================================================================
 
 
-def _omni_context_tools_for_missing_file() -> Dict[str, Callable[..., Any]]:
+def _omni_context_tools_for_missing_file() -> Dict[str[..., Any]]:
     """Backend payloads that simulate a non-existent file:
        /read returns empty (no symbols), /guard/check + /lsp/diagnostics
        report file-not-found via an issues row, /git/status returns

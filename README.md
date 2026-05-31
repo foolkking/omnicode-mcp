@@ -421,7 +421,7 @@ locally.
 
 ## 📚 Documentation
 
-Five docs, no maze:
+Main docs by category:
 
 | Doc | What it covers |
 |---|---|

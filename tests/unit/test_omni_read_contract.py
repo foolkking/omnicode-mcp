@@ -22,67 +22,26 @@ Pinned by the audit:
 
 from __future__ import annotations
 
-import asyncio
 import json
-from typing import Any, Callable, Dict, List
+from typing import Any, Dict, List
 
 import pytest
 
 from omnicode_adapters.mcp_server.high_level_tools import (
+    _CONTRACT_VERSIONS,
+    _HANDLER_VERSION,
+    _READ_VALID_MODES,
     _build_read_payload,
     _emit_read_error,
     _guess_language_from_path,
     _next_actions_for_mode,
-    register_high_level_tools,
 )
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-class _MCPStub:
-    def __init__(self) -> None:
-        self.tools: Dict[str, Callable[..., Any]] = {}
-
-    def tool(self, *args: Any, **kwargs: Any):
-        def deco(fn: Callable[..., Any]) -> Callable[..., Any]:
-            self.tools[fn.__name__] = fn
-            return fn
-
-        return deco
-
-
-def _build_tools(
-    routes: Dict[str, Any],
-) -> Dict[str, Callable[..., Any]]:
-    """Wire the MCP tools up with a scripted ``make_request``.
-
-    ``routes`` keys can be the full endpoint or the trailing path segment;
-    values can be a dict (returned wrapped in ``{"result": …}``) or a
-    callable invoked with (method, endpoint, kwargs).
-    """
-
-    async def make_request(
-        method: str, endpoint: str, **kwargs: Any
-    ) -> Dict[str, Any]:
-        key = endpoint.rstrip("/").rsplit("/", 1)[-1] or endpoint
-        for candidate in (endpoint, key):
-            if candidate in routes:
-                payload = routes[candidate]
-                if callable(payload):
-                    payload = payload(method, endpoint, kwargs)
-                return {"result": payload}
-        return {"result": {}}
-
-    mcp = _MCPStub()
-    register_high_level_tools(mcp, make_request)
-    return mcp.tools
-
-
-def _run(coro: Any) -> Any:
-    return asyncio.get_event_loop().run_until_complete(coro)
-
+from tests.unit.mcp_harness import (
+    build_tools_with_route_keys as _build_tools,
+)
+from tests.unit.mcp_harness import (
+    run as _run,
+)
 
 # ---------------------------------------------------------------------------
 # 1. omni_read(mode="diagnostics") schema must match omni_diagnostics.
@@ -423,16 +382,6 @@ def test_read_full_under_budget_is_not_truncated() -> None:
 # next_actions list on file-not-found, and a structured valid_modes array
 # (mirroring omni_search) on illegal mode. Same goes for omni_diagnostics
 # file-not-found.
-
-from omnicode_adapters.mcp_server.high_level_tools import (  # noqa: E402
-    _CONTRACT_VERSIONS,
-    _HANDLER_VERSION,
-    _READ_VALID_MODES,
-)
-
-
-def _run(coro: Any) -> Any:
-    return asyncio.get_event_loop().run_until_complete(coro)
 
 
 def test_read_file_not_found_includes_next_actions() -> None:

@@ -21,74 +21,21 @@ Pinned by Round 4 contract evaluation:
 
 from __future__ import annotations
 
-import asyncio
 import json
-from typing import Any, Callable, Dict, List
+from typing import Any, Dict
 
 import pytest
 
 from omnicode_adapters.mcp_server import high_level_tools as hlt
-from omnicode_adapters.mcp_server.high_level_tools import (
-    _ALIAS_COMPAT_CONTRACT,
-    _HANDLER_VERSION,
-    register_high_level_tools,
+from tests.unit.mcp_harness import (
+    build_tools_from_request,
 )
-
-
-# ---------------------------------------------------------------------------
-# Reusable shim — same pattern the r13 tests use.
-# ---------------------------------------------------------------------------
-
-
-class _ToolManagerStub:
-    def __init__(self) -> None:
-        self._tools: Dict[str, Callable[..., Any]] = {}
-
-
-class _MCPStub:
-    def __init__(self) -> None:
-        self.tools: Dict[str, Callable[..., Any]] = {}
-        self._tool_manager = _ToolManagerStub()
-
-    def tool(self, *args: Any, **kwargs: Any):
-        def deco(fn: Callable[..., Any]) -> Callable[..., Any]:
-            self.tools[fn.__name__] = fn
-            self._tool_manager._tools[fn.__name__] = fn
-            return fn
-
-        return deco
-
-
-def _build_tools(routes: Dict[str, Any]) -> Dict[str, Callable[..., Any]]:
-    captured: Dict[str, List[Dict[str, Any]]] = {}
-
-    async def make_request(
-        method: str, endpoint: str, **kwargs: Any
-    ) -> Dict[str, Any]:
-        captured.setdefault(endpoint, []).append(kwargs)
-        if endpoint in routes:
-            payload = routes[endpoint]
-        else:
-            payload = None
-        if payload is None:
-            return {"result": {}}
-        if callable(payload):
-            payload = payload(method, endpoint, kwargs)
-        # /intelligence/context expects success at the top level.
-        if endpoint == "/intelligence/context":
-            return {"success": True, "result": payload}
-        return {"result": payload}
-
-    mcp = _MCPStub()
-    register_high_level_tools(mcp, make_request)
-    tools = dict(mcp.tools)
-    tools["__captured__"] = captured  # type: ignore[assignment]
-    return tools
-
-
-def _run(coro: Any) -> Any:
-    return asyncio.get_event_loop().run_until_complete(coro)
-
+from tests.unit.mcp_harness import (
+    build_tools_with_intelligence_context as _build_tools,
+)
+from tests.unit.mcp_harness import (
+    run as _run,
+)
 
 # ===========================================================================
 # P1 — omni_edit error field alignment
@@ -254,9 +201,7 @@ def test_omni_diagnostics_exposes_singular_source(tmp_path) -> None:
             return {"result": {"diagnostics": [], "tools_run": ["guard"]}}
         return {"result": {}}
 
-    mcp = _MCPStub()
-    register_high_level_tools(mcp, make_request)
-    tools = mcp.tools
+    tools = build_tools_from_request(make_request)
     raw = _run(tools["omni_diagnostics"](file=str(file), format="json"))
     payload = json.loads(raw)
     assert payload["ok"] is True

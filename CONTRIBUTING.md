@@ -10,7 +10,7 @@ on-ramp; **users** should start at [`README.md`](README.md) and
 
 - [Project vision](#project-vision)
 - [Development setup](#development-setup)
-- [Architecture rules](#architecture-rules)
+- [Architecture rules](architecture.md-rules)
 - [Coding conventions](#coding-conventions)
 - [Tests, lint, and CI](#tests-lint-and-ci)
 - [Regression matrix](#regression-matrix)
