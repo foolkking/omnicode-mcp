@@ -1,9 +1,25 @@
 {
   "name": "omni-impact-review",
-  "description": "Pull the impact + risk + advisory bundle for a symbol before editing it. The recommended pre-edit ritual.",
-  "version": "1.0.0",
+  "description": "Pull the impact + risk + references + advisory bundle for a symbol before editing it. The recommended pre-edit ritual.",
+  "version": "2.1.0",
+  "when_to_use": "Before any non-trivial edit on an existing symbol — answers 'who depends on this' (graph + line-level), 'what diagnostics already exist on the file', and 'are there past lessons I should remember'.",
+  "tools_used": ["omni_impact", "omni_search", "omni_diagnostics", "omni_memory"],
+  "does_execute": false,
+  "recipe_for_handler_features": [
+    "impact.boundary_contracts",
+    "search.source_confidence",
+    "memory.id_passthrough",
+    "diagnostics.shared_envelope"
+  ],
+  "safety_notes": [
+    "Read-only flow — no step writes to disk.",
+    "omni_memory advisory is a recall, not a record.",
+    "If omni_impact returns risk='unknown' / confidence='low', re-confirm the symbol via omni_search(mode='symbol') before treating any of the bundle as actionable."
+  ],
   "keywords": [
-    "impact", "blast radius", "before edit", "risk", "review", "review change"
+    "impact", "blast radius", "before edit", "risk", "review", "review change",
+    "references", "callers", "callees", "suggested tests",
+    "影响", "影响范围", "改动前", "风险评估", "调用", "引用", "测试推荐"
   ],
   "inputs": [
     {
@@ -14,25 +30,125 @@
     {
       "name": "file",
       "required": false,
-      "description": "Optional file path for context-aware advisory."
+      "description": "Optional file path for context-aware diagnostics + advisory."
+    },
+    {
+      "name": "task",
+      "required": false,
+      "description": "One-line task description used as the memory advisory query."
     }
   ],
   "steps": [
     {
+      "id": "impact",
+      "title": "Get callers, callees, risk badge, suggested tests",
       "tool": "omni_impact",
-      "args": {"symbol": "${symbol}", "depth": 2},
-      "explain": "Get callers, callees, risk badge, suggested tests."
+      "purpose": "Map the blast radius and surface tests that should re-run after the change. impact.v2 returns suggested_tests and suggested_commands when the call graph knows about the symbol; treat suggested_commands as ready-to-run pytest invocations.",
+      "args": {"symbol": "${symbol}", "depth": 2, "format": "json"},
+      "required": true,
+      "condition": "always",
+      "consume_fields": [
+        "risk",
+        "risk_reasons",
+        "callers",
+        "callees",
+        "files_count",
+        "files_involved",
+        "suggested_tests",
+        "suggested_commands",
+        "truncated",
+        "source",
+        "confidence"
+      ],
+      "post_step_guidance": [
+        "If suggested_tests is non-empty, prefer running suggested_commands over a full pytest sweep.",
+        "If suggested_tests is empty AND risk != 'unknown', mark coverage_gap=true and consider the omni-test-coverage recipe.",
+        "If risk='unknown' with confidence='low', the symbol is not in the call graph — re-verify via omni_search(mode='symbol') before continuing."
+      ],
+      "failure_policy": {
+        "on_error": "abort_recipe",
+        "notes": "Without an impact read the rest of this recipe is just guesswork."
+      }
     },
     {
+      "id": "references",
+      "title": "Find line-level references (callsites, fixtures, string mentions)",
+      "tool": "omni_search",
+      "purpose": "omni_impact returns graph-level callers/callees. Use omni_search(mode='references') for line-level and textual references — including tests, fixtures, string-literal mentions, dynamic dispatch sites, and anything the static call graph misses. Each row is tagged with source/confidence so AI editors can rank confidence.",
+      "args": {
+        "query": "${symbol}",
+        "mode": "references",
+        "format": "json",
+        "max_results": 15
+      },
+      "required": true,
+      "condition": "symbol_provided",
+      "consume_fields": [
+        "definition",
+        "definition_candidates",
+        "references",
+        "source",
+        "confidence",
+        "ambiguous"
+      ],
+      "failure_policy": {
+        "on_error": "continue_with_reduced_confidence",
+        "notes": "References is best-effort; a missing references list narrows but does not block the review."
+      }
+    },
+    {
+      "id": "diagnostics",
+      "title": "Surface any current errors in the target file",
       "tool": "omni_diagnostics",
-      "args": {"file": "${file}", "severity": "error"},
-      "explain": "Surface any current errors in the target file. Skip if no file given.",
-      "skip_if_missing_input": "file"
+      "purpose": "Distinguish pre-existing problems from regressions caused by the upcoming change. Re-run after any edit to compare.",
+      "args": {"file": "${file}", "severity": "error", "format": "json"},
+      "required": false,
+      "condition": "file_provided",
+      "skip_if_missing_input": "file",
+      "consume_fields": ["diagnostics", "counts", "total_count", "tools_run", "tools_skipped"],
+      "failure_policy": {
+        "on_error": "continue_with_reduced_confidence",
+        "notes": "If a file isn't provided this step is skipped, not failed."
+      }
     },
     {
+      "id": "memory_advisory",
+      "title": "Recall historical lessons about this symbol",
       "tool": "omni_memory",
-      "args": {"action": "advisory", "query": "modify ${symbol}"},
-      "explain": "Recall any historical lessons about this symbol or pattern."
+      "purpose": "memory.v2 advisory bundles structured action_items + risks + referenced_memories from past mistakes / solutions / architecture decisions on this symbol/file/task. Read action_items BEFORE drafting any edit.",
+      "args": {
+        "action": "advisory",
+        "symbol": "${symbol}",
+        "file": "${file}",
+        "task": "${task}",
+        "format": "json"
+      },
+      "required": true,
+      "condition": "always",
+      "consume_fields": [
+        "advisory.summary",
+        "advisory.action_items",
+        "advisory.risks",
+        "referenced_memories",
+        "memory_count",
+        "confidence"
+      ],
+      "failure_policy": {
+        "on_error": "continue_with_reduced_confidence",
+        "notes": "Memory is advisory — a missing recall doesn't block the review, just leaves it weaker."
+      }
     }
+  ],
+  "success_criteria": [
+    "omni_impact returns source/confidence and a non-empty risk assessment (or risk='unknown' with an explicit re-confirm step recorded)",
+    "omni_search(mode='references') has been checked for line-level references (or skipped because no symbol was provided)",
+    "suggested_tests and suggested_commands are recorded when omni_impact returned them",
+    "memory_advisory action_items have been reviewed (or noted as empty)"
+  ],
+  "next_actions": [
+    "Start with omni_impact(symbol='${symbol}', depth=2, format='json') for the blast radius",
+    "Then omni_search(query='${symbol}', mode='references', format='json') for line-level callsites",
+    "Run omni_memory(action='advisory', symbol='${symbol}', task='${task}', format='json') to surface prior lessons",
+    "If you'll edit the symbol next, hand off to the omni-safe-refactor recipe"
   ]
 }

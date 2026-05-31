@@ -152,16 +152,22 @@ class ImpactAnalyzer:
         test_files = set()
         for edge in graph["edges"]:
             caller = edge.get("caller", "")
+            callee = edge.get("callee", "")
             fp = edge.get("file_path", "")
             if not fp:
                 continue
             rel = os.path.relpath(fp, self.working_dir) if os.path.isabs(fp) else fp
             rel = rel.replace("\\", "/")
 
-            # Is this a test file?
-            if "test" in rel.lower() and (
-                caller.startswith("test_") or caller in callers
-            ):
+            # Test file? Add ONLY when (a) the test actually calls our
+            # symbol or one of its transitive callers, OR (b) the file
+            # name itself references the symbol.  The previous "any test
+            # function counts" rule made every result identical.
+            is_test_file = (
+                "test" in rel.lower()
+                and caller.startswith(("test_", "Test"))
+            )
+            if is_test_file and (callee in callers or caller in callers):
                 test_files.add(rel)
 
         # Also check by filename convention

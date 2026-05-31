@@ -226,13 +226,42 @@ class LSPBridge:
                 return lang
         return None
 
+    def _resolve_lsp_binary(self, cmd: str) -> Optional[str]:
+        """Locate an LSP server executable.
+
+        Probe order:
+          1. ``shutil.which`` (system PATH).
+          2. The ``Scripts`` directory next to the running Python — this
+             lets us pick up tools installed via ``pip install pyright``
+             into a conda env even when the env isn't activated.
+          3. On Windows we also try ``cmd + ".cmd"`` / ``".exe"``.
+        """
+        found = shutil.which(cmd)
+        if found:
+            return found
+        # Conda / venv fallback: <prefix>/Scripts (Windows) or <prefix>/bin.
+        import sys
+        py_dir = os.path.dirname(sys.executable)
+        candidates = [
+            os.path.join(py_dir, cmd),
+            os.path.join(py_dir, "Scripts", cmd),
+            os.path.join(py_dir, "..", "Scripts", cmd),
+            os.path.join(py_dir, "bin", cmd),
+        ]
+        for ext in ("", ".exe", ".cmd", ".bat"):
+            for c in candidates:
+                full = c + ext
+                if os.path.isfile(full):
+                    return full
+        return None
+
     def _is_available(self, language: str) -> bool:
         """Check if the language server binary is installed."""
         info = LSP_SERVERS.get(language)
         if not info:
             return False
         cmd = info["command"][0]
-        return shutil.which(cmd) is not None
+        return self._resolve_lsp_binary(cmd) is not None
 
     async def _get_server(self, language: str) -> Optional["_LSPConnection"]:
         """Get or start a language server for the given language."""
@@ -247,8 +276,14 @@ class LSPBridge:
             return None
 
         info = LSP_SERVERS[language]
+        # Replace the bare binary name with the resolved absolute path
+        # so the subprocess works whether or not the env Scripts dir is
+        # currently on PATH.
+        resolved_cmd = list(info["command"])
+        resolved_first = self._resolve_lsp_binary(resolved_cmd[0]) or resolved_cmd[0]
+        resolved_cmd[0] = resolved_first
         try:
-            conn = _LSPConnection(info["command"], self.working_dir)
+            conn = _LSPConnection(resolved_cmd, self.working_dir)
             await conn.start()
             self._servers[language] = conn
             return conn
@@ -284,6 +319,37 @@ class LSPBridge:
 
         return self._parse_locations(result)
 
+    async def _ensure_open(self, server: "_LSPConnection", file_path: str, language: str) -> None:
+        """Send ``textDocument/didOpen`` for ``file_path`` if not already open.
+
+        Pyright (and many LSP servers) treat a file as unknown until the
+        client explicitly opens it. Without this notification ``definition``,
+        ``references`` and ``hover`` requests resolve nothing for files
+        the user hasn't visited interactively.
+        """
+        uri = self._file_uri(file_path)
+        if uri in getattr(server, "_opened_uris", set()):
+            return
+        full_path = os.path.join(self.working_dir, file_path)
+        try:
+            with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                text = f.read()
+        except Exception:
+            return
+        await server.notify("textDocument/didOpen", {
+            "textDocument": {
+                "uri": uri,
+                "languageId": language,
+                "version": 1,
+                "text": text,
+            },
+        })
+        if not hasattr(server, "_opened_uris"):
+            server._opened_uris = set()  # type: ignore[attr-defined]
+        server._opened_uris.add(uri)  # type: ignore[attr-defined]
+        # Give the server a brief moment to ingest the text.
+        await asyncio.sleep(0.3)
+
     async def find_references(
         self, file_path: str, line: int, col: int, include_declaration: bool = True
     ) -> Dict[str, Any]:
@@ -296,6 +362,8 @@ class LSPBridge:
         if not server:
             hint = LSP_SERVERS[language]["install_hint"]
             return {"error": f"LSP server not available for {language}. Install: {hint}"}
+
+        await self._ensure_open(server, file_path, language)
 
         uri = self._file_uri(file_path)
         result = await server.request("textDocument/references", {
@@ -671,10 +739,18 @@ class _LSPConnection:
         )
         self._reader_task = asyncio.create_task(self._read_loop())
 
-        # Initialize
+        # Initialize.  Pyright (and most modern servers) require both
+        # ``rootUri`` AND ``workspaceFolders``; some refuse to index the
+        # workspace if only the legacy ``rootUri`` is provided.
+        wd_posix = self.working_dir.replace(os.sep, "/")
+        root_uri = f"file:///{wd_posix.lstrip('/')}"
         await self.request("initialize", {
             "processId": os.getpid(),
-            "rootUri": f"file:///{self.working_dir.replace(os.sep, '/')}",
+            "rootUri": root_uri,
+            "rootPath": self.working_dir,
+            "workspaceFolders": [
+                {"uri": root_uri, "name": os.path.basename(self.working_dir) or "workspace"},
+            ],
             "capabilities": {
                 "textDocument": {
                     "definition": {"dynamicRegistration": False},
@@ -685,6 +761,8 @@ class _LSPConnection:
                 },
                 "workspace": {
                     "symbol": {"dynamicRegistration": False},
+                    "workspaceFolders": True,
+                    "configuration": True,
                 },
             },
         })

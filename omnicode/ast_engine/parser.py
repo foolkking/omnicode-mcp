@@ -234,7 +234,10 @@ _GENERIC_FUNC_TYPES = {
     "method_definition",
     "method_declaration",
     "arrow_function",
-    "function",
+    # NOTE: do NOT include the bare type "function" here — in tree-sitter-javascript
+    # that's the leaf keyword token inside a ``function_expression`` and matching
+    # it as a function would create phantom <anonymous> entries when we recurse
+    # into function bodies.
     "function_expression",
     "generator_function_declaration",
 }
@@ -288,9 +291,67 @@ def _find_first_identifier(node: Any) -> Optional[Any]:
     return None
 
 
+def _js_anon_assignment_name(node: Any, src_bytes: bytes) -> Optional[Tuple[str, str]]:
+    """For JS/TS, derive a name for anonymous arrow/function expressions.
+
+    Patterns recognised:
+
+    * ``const foo = () => {}``      → ("foo", "function")
+    * ``var foo = function () {}``  → ("foo", "function")
+    * ``methodName: () => {}``      → ("methodName", "method")  (object literal)
+    * ``methodName: function() {}`` → ("methodName", "method")
+    * ``foo = () => {}``            → ("foo", "function")        (assignment)
+
+    Returns ``(name, kind)`` or ``None`` if the parent shape isn't a known
+    "anonymous-function-with-an-implicit-name" pattern.
+    """
+    parent = getattr(node, "parent", None)
+    if parent is None:
+        return None
+    ptype = parent.type
+
+    # const/let/var foo = () => {}
+    if ptype == "variable_declarator":
+        for child in parent.children:
+            if child.type in ("identifier", "property_identifier"):
+                return _node_text(src_bytes, child), "function"
+
+    # foo = () => {}     (assignment_expression)
+    if ptype == "assignment_expression":
+        for child in parent.children:
+            if child.type in (
+                "identifier",
+                "property_identifier",
+                "member_expression",
+            ):
+                txt = _node_text(src_bytes, child)
+                # member expressions like a.b.c → take last segment
+                clean = txt.split(".")[-1].strip()
+                if clean:
+                    return clean, "function"
+            if child.type == "=":
+                break
+
+    # methodName: () => {} | methodName: function () {}
+    # in tree-sitter-javascript object literals these wrap as `pair`.
+    if ptype in ("pair", "property_signature"):
+        for child in parent.children:
+            if child.type in ("property_identifier", "string", "identifier"):
+                raw = _node_text(src_bytes, child)
+                clean = raw.strip().strip("\"'")
+                if clean:
+                    return clean, "method"
+            if child.type == ":":
+                break
+
+    return None
+
+
 def _generic_extract_symbols(tree: Any, source: str, language: str) -> List[Dict[str, Any]]:
     src_bytes = source.encode("utf-8") if isinstance(source, str) else source
     symbols: List[Dict[str, Any]] = []
+
+    is_js_like = language in ("javascript", "typescript")
 
     def walk(node: Any, parent: Optional[str] = None) -> None:
         ntype = node.type
@@ -312,17 +373,61 @@ def _generic_extract_symbols(tree: Any, source: str, language: str) -> List[Dict
             return
         if ntype in _GENERIC_FUNC_TYPES:
             name_node = _find_first_identifier(node)
-            name = _node_text(src_bytes, name_node) if name_node else "<anonymous>"
+            name = _node_text(src_bytes, name_node) if name_node else ""
+
+            inferred_kind: Optional[str] = None
+            # JS/TS arrow / function expression with no direct identifier
+            # — try to derive a name from the parent declarator/pair.
+            if is_js_like and ntype in ("arrow_function", "function_expression"):
+                # For arrow / function expressions tree-sitter happily
+                # returns the formal parameter as the first identifier
+                # child (``s => f(s)`` would then be named "s"), so we
+                # IGNORE the direct-identifier scan here and rely solely
+                # on the parent-declarator heuristic.  Anonymous lambdas
+                # without an inferable name are intentionally dropped
+                # from the symbol index — they pollute symbol-search
+                # results without giving the AI anything to grep on.
+                guess = _js_anon_assignment_name(node, src_bytes)
+                if guess is not None:
+                    name, inferred_kind = guess
+                else:
+                    # Anonymous callback — don't emit, but DO recurse so
+                    # any named helper defined inside still surfaces.
+                    for child in node.children:
+                        walk(child, parent)
+                    return
+            elif (not name or name == "") and is_js_like:
+                guess = _js_anon_assignment_name(node, src_bytes)
+                if guess is not None:
+                    name, inferred_kind = guess
+
+            if not name:
+                name = "<anonymous>"
+
+            # Filter junk single-character names that always mean
+            # "tree-sitter caught a formal parameter, not a function".
+            if len(name) <= 1 and name != "_":
+                for child in node.children:
+                    walk(child, parent)
+                return
+
+            kind = inferred_kind or ("method" if parent else "function")
             symbols.append(
                 {
                     "name": name,
-                    "type": "method" if parent else "function",
+                    "type": kind,
                     "line_start": node.start_point[0] + 1,
                     "line_end": node.end_point[0] + 1,
                     "parent": parent,
                     "language": language,
                 }
             )
+            # Recurse into the function body so nested helpers
+            # (closures, IIFEs, decorators, MCP-tool inner functions)
+            # still surface in the outline.  We treat the current
+            # function as the parent of any nested symbols.
+            for child in node.children:
+                walk(child, name)
             return
         for child in node.children:
             walk(child, parent)
@@ -340,6 +445,10 @@ def _generic_extract_imports(tree: Any, source: str, language: str) -> List[Dict
         "import_declaration",
         "preproc_include",  # C/C++ #include
     }
+    # Stop recursing once we hit a function / class body — local imports
+    # inside a function (``def foo(): import asyncio``) are noise for the
+    # caller asking "what does this module depend on".
+    BODY_TYPES = _GENERIC_FUNC_TYPES | _GENERIC_CLASS_TYPES
 
     def walk(node: Any) -> None:
         if node.type in IMPORT_TYPES:
@@ -352,6 +461,8 @@ def _generic_extract_imports(tree: Any, source: str, language: str) -> List[Dict
                     "language": language,
                 }
             )
+            return
+        if node.type in BODY_TYPES:
             return
         for child in node.children:
             walk(child)

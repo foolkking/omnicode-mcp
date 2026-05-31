@@ -1,42 +1,343 @@
 {
   "name": "omni-safe-refactor",
-  "description": "Preview / validate / apply / rollback loop for a refactor. Never let an LLM write to disk without review.",
-  "version": "1.0.0",
+  "description": "End-to-end safe refactor pipeline: understand the code, scope the blast radius, recall prior lessons, render a diff, validate, apply, then keep a rollback hook. Never let an LLM write to disk without review.",
+  "version": "2.1.0",
+  "when_to_use": "You have a concrete file/symbol to change and you want the full safety net: pre-edit understanding, blast-radius check, lint/type review, memory advisory, preview-validate-apply, and a rollback path on regret.",
+  "tools_used": [
+    "omni_context",
+    "omni_impact",
+    "omni_diagnostics",
+    "omni_search",
+    "omni_read",
+    "omni_memory",
+    "omni_patch"
+  ],
+  "does_execute": false,
+  "recipe_for_handler_features": [
+    "patch.workspace_path_guard",
+    "patch.apply_validate_gate",
+    "patch.structured_validation",
+    "memory.id_passthrough",
+    "context.composer_v2",
+    "impact.boundary_contracts"
+  ],
+  "safety_notes": [
+    "omni_skill never auto-executes these steps — the AI editor must call each tool itself.",
+    "Every step that hits disk is the AI's explicit decision; omni_skill only reads manifests.",
+    "patch.v2 path guard rejects absolute paths and any '..' segment before any backend write. Files must stay under the workspace root.",
+    "patch.v2 apply has an internal validate gate (apply_validate_gate). Validation cannot be bypassed silently — the explicit validate step is an *advance look* for AI/editor readability.",
+    "force=True is an explicit escape hatch. Only use it with user approval AND a force_reason describing why. The response will carry validation_bypassed=true so the bypass is auditable.",
+    "Do not rollback sessions marked unsafe_legacy_session=true; those are pre-r7 artefacts whose file paths now sit outside the workspace and must be inspected manually.",
+    "Step 10 (rollback) is conditional but must remain visible so the agent always has an undo path."
+  ],
   "keywords": [
-    "refactor", "rename", "safe edit", "patch", "preview", "rollback"
+    "refactor", "rename", "safe edit", "safe refactor", "patch",
+    "preview", "validate", "apply", "rollback", "undo",
+    "安全重构", "安全修改", "重构", "改名", "预览", "验证", "应用", "回滚"
   ],
   "inputs": [
     {
       "name": "file",
       "required": true,
-      "description": "Path to the file you intend to modify."
+      "description": "Workspace-relative path only. patch.v2 path guard rejects absolute paths and any '..' segment; supplying e.g. '/etc/x' or '../../outside.py' returns ok=false without writing to disk."
+    },
+    {
+      "name": "symbol",
+      "required": false,
+      "description": "Symbol you're refactoring (function/class/method). Optional but enables impact + references + memory_advisory steps."
+    },
+    {
+      "name": "task",
+      "required": false,
+      "description": "One-line task description for the context composer and the memory advisory query."
     },
     {
       "name": "content",
       "required": true,
-      "description": "Full new content for the file (the patch is computed as a full replacement)."
+      "description": "Full new content for the file (omni_patch does a full-file replacement)."
+    },
+    {
+      "name": "session_id",
+      "required": false,
+      "description": "Set after the apply step from the apply response; needed only if the rollback step runs."
     }
   ],
   "steps": [
     {
-      "tool": "omni_patch",
-      "args": {"action": "preview", "file": "${file}", "content": "${content}"},
-      "explain": "Render a unified diff so the user can confirm the change is what they want."
+      "id": "context",
+      "title": "Gather minimum-necessary context",
+      "tool": "omni_context",
+      "purpose": "Pull outline + diagnostics + recent git changes + memory hits in one call so the agent isn't editing blind. context.v2 also surfaces symbol_resolution and confidence so you can verify the symbol exists before proceeding.",
+      "args": {
+        "file": "${file}",
+        "symbol": "${symbol}",
+        "task": "${task}",
+        "token_budget": 4000,
+        "format": "json"
+      },
+      "required": true,
+      "condition": "always",
+      "consume_fields": [
+        "symbol_resolution",
+        "confidence",
+        "context.primary_symbols",
+        "context.related_files",
+        "diagnostics_status",
+        "memory_status",
+        "next_actions"
+      ],
+      "failure_policy": {
+        "on_error": "abort_recipe",
+        "notes": "Without context, the rest of the recipe is editing blind."
+      }
     },
     {
-      "tool": "omni_patch",
-      "args": {"action": "validate", "file": "${file}", "content": "${content}"},
-      "explain": "Run static checks (ruff/eslint/mypy/tsc) on the proposed content."
+      "id": "impact",
+      "title": "Check the blast radius",
+      "tool": "omni_impact",
+      "purpose": "Risk badge + callers + callees + suggested tests. impact.v2 returns risk='unknown' with confidence='low' when the symbol isn't in the call graph — treat that as a stop signal and re-confirm the name via omni_search(mode='symbol').",
+      "args": {
+        "symbol": "${symbol}",
+        "depth": 2,
+        "format": "json"
+      },
+      "required": true,
+      "condition": "symbol_provided",
+      "skip_if_missing_input": "symbol",
+      "consume_fields": [
+        "risk",
+        "risk_reasons",
+        "callers",
+        "callees",
+        "files_count",
+        "suggested_tests",
+        "suggested_commands",
+        "truncated",
+        "source",
+        "confidence"
+      ],
+      "failure_policy": {
+        "on_error": "abort_recipe",
+        "notes": "Without a blast-radius read the patch can silently break N callers."
+      }
     },
     {
+      "id": "diagnostics",
+      "title": "Read pre-existing diagnostics",
       "tool": "omni_diagnostics",
-      "args": {"file": "${file}"},
-      "explain": "Show any pre-existing diagnostics so we don't blame the new patch for them."
+      "purpose": "Distinguish issues we'll inherit from issues introduced by the patch. Re-run after apply to confirm no new errors.",
+      "args": {
+        "file": "${file}",
+        "severity": "all",
+        "format": "json"
+      },
+      "required": true,
+      "condition": "always",
+      "consume_fields": [
+        "diagnostics",
+        "counts",
+        "total_count",
+        "tools_run",
+        "tools_skipped"
+      ],
+      "failure_policy": {
+        "on_error": "abort_recipe",
+        "notes": "Need a baseline to compare against post-apply."
+      }
     },
     {
+      "id": "references",
+      "title": "Find every callsite of the symbol (line-level)",
+      "tool": "omni_search",
+      "purpose": "omni_impact returns graph-level callers/callees. Use omni_search(mode='references') for line-level and textual references — including tests, fixtures, string-literal mentions, and dynamic-dispatch sites the static graph misses. Strongly recommended for renames.",
+      "args": {
+        "query": "${symbol}",
+        "mode": "references",
+        "format": "json",
+        "max_results": 20
+      },
+      "required": false,
+      "condition": "symbol_provided",
+      "skip_if_missing_input": "symbol",
+      "consume_fields": [
+        "definition",
+        "references",
+        "source",
+        "confidence",
+        "ambiguous"
+      ],
+      "failure_policy": {
+        "on_error": "continue_with_reduced_confidence",
+        "notes": "References is best-effort; renames without it are riskier but not blocked."
+      }
+    },
+    {
+      "id": "read_target",
+      "title": "Read the symbol or range we're rewriting",
+      "tool": "omni_read",
+      "purpose": "Confirm the AI is rewriting the right body and not a stale version. mode=symbol when a symbol is given, mode=outline otherwise.",
+      "args": {
+        "file": "${file}",
+        "mode": "symbol",
+        "symbol": "${symbol}",
+        "format": "json"
+      },
+      "required": true,
+      "condition": "symbol_provided_else_outline",
+      "consume_fields": ["content", "language", "next_actions"],
+      "failure_policy": {
+        "on_error": "abort_recipe",
+        "notes": "If we can't read the current body, content drafting is unsafe."
+      }
+    },
+    {
+      "id": "memory_advisory",
+      "title": "Recall prior lessons about this symbol/file",
+      "tool": "omni_memory",
+      "purpose": "Use memory.v2 advisory to retrieve structured action_items, risks, and referenced_memories from past mistakes or solutions related to this symbol/file/task. Review action_items BEFORE drafting content — it is the cheapest way to avoid repeating a documented mistake.",
+      "args": {
+        "action": "advisory",
+        "symbol": "${symbol}",
+        "file": "${file}",
+        "task": "${task}",
+        "format": "json"
+      },
+      "required": false,
+      "condition": "symbol_or_task_provided",
+      "consume_fields": [
+        "advisory.summary",
+        "advisory.action_items",
+        "advisory.risks",
+        "referenced_memories",
+        "memory_count",
+        "confidence"
+      ],
+      "failure_policy": {
+        "on_error": "continue_with_reduced_confidence",
+        "notes": "Memory is advisory and should not block a safe edit."
+      }
+    },
+    {
+      "id": "preview",
+      "title": "Render a unified diff",
       "tool": "omni_patch",
-      "args": {"action": "apply", "file": "${file}", "content": "${content}"},
-      "explain": "Write to disk + create snapshot + record EditSession. Returns session_id for rollback."
+      "purpose": "Show the user what would change before any byte hits disk. Triggers the patch.v2 workspace path guard — absolute paths and '..' segments are rejected here without any backend call.",
+      "args": {
+        "action": "preview",
+        "file": "${file}",
+        "content": "${content}",
+        "format": "json"
+      },
+      "required": true,
+      "condition": "always",
+      "consume_fields": [
+        "diff",
+        "lines_added",
+        "lines_removed",
+        "diff_truncated",
+        "diff_total_lines",
+        "newline_normalized",
+        "next_actions"
+      ],
+      "failure_policy": {
+        "on_error": "abort_recipe",
+        "notes": "If preview fails (path-guard or backend error) the apply path won't recover."
+      }
+    },
+    {
+      "id": "validate",
+      "title": "Run static checks on the proposed content (advance look)",
+      "tool": "omni_patch",
+      "purpose": "patch.v2 apply re-runs validation internally before writing (apply_validate_gate). This explicit validate step is an *advance check* for AI/editor readability — it surfaces structured checks[], counts, and tools_run so the agent can fix content before stepping on the gate. Apply will still block writes when validation_passed=false unless force=True is explicitly provided with force_reason.",
+      "args": {
+        "action": "validate",
+        "file": "${file}",
+        "content": "${content}",
+        "format": "json"
+      },
+      "required": true,
+      "condition": "always",
+      "consume_fields": [
+        "validation_passed",
+        "checks",
+        "counts",
+        "tools_run",
+        "tools_skipped",
+        "next_actions"
+      ],
+      "failure_policy": {
+        "on_error": "abort_recipe",
+        "notes": "If validate errored (not just failed) the gate state is unknown — do not proceed."
+      }
+    },
+    {
+      "id": "apply",
+      "title": "Write to disk + create snapshot + record EditSession",
+      "tool": "omni_patch",
+      "purpose": "Performs the actual write. patch.v2 apply re-runs validate internally (apply_validate_gate); when validation_passed=false the call returns ok=false and nothing hits disk. Apply takes a snapshot and returns session_id so the rollback step can undo it. DO NOT pass force=True unless the user has explicitly approved a validation bypass AND you supply force_reason — the response will carry validation_bypassed=true so the override is auditable.",
+      "args": {
+        "action": "apply",
+        "file": "${file}",
+        "content": "${content}",
+        "format": "json"
+      },
+      "required": true,
+      "condition": "validate_passed",
+      "consume_fields": [
+        "session_id",
+        "rollback_available",
+        "validation_passed",
+        "validation_bypassed",
+        "force_reason",
+        "original_hash",
+        "new_hash",
+        "lines_added",
+        "lines_removed",
+        "next_actions"
+      ],
+      "failure_policy": {
+        "on_error": "abort_recipe",
+        "notes": "If apply returned ok=false with validation_passed=false, fix content and retry; do not silently flip force=True."
+      }
+    },
+    {
+      "id": "rollback",
+      "title": "Undo the apply when something downstream fails",
+      "tool": "omni_patch",
+      "purpose": "Restores the pre-patch snapshot. Run only if subsequent tests / type checks regress, or the user rejects the change. patch.v2 will refuse rollback for sessions flagged unsafe_legacy_session=true (pre-r7 path-traversal artefacts) — never blanket-rollback a session list without inspecting that flag.",
+      "args": {
+        "action": "rollback",
+        "session_id": "${session_id}",
+        "format": "json"
+      },
+      "required": false,
+      "condition": "regression_detected_or_user_reject",
+      "consume_fields": [
+        "rolled_back",
+        "previous_hash",
+        "restored_hash",
+        "unsafe_legacy_session",
+        "next_actions"
+      ],
+      "failure_policy": {
+        "on_error": "manual_inspection_required",
+        "notes": "If rollback fails (already_rolled_back or unsafe_legacy_session) ask the user to inspect omni_patch(action='sessions') and the git diff manually."
+      }
     }
+  ],
+  "success_criteria": [
+    "omni_patch(action='apply') returns ok=true with validation_passed=true",
+    "rollback_available=true and session_id is recorded",
+    "post-apply omni_diagnostics returns no new errors on the modified file (compared to the pre-edit baseline from the diagnostics step)",
+    "suggested_tests or targeted commands from omni_impact are run, or explicitly deferred with a reason",
+    "memory_advisory action_items have been reviewed (or skipped with a reason)",
+    "If force=True was used, validation_bypassed=true is captured AND force_reason explains why"
+  ],
+  "next_actions": [
+    "Start with omni_context(file='${file}', symbol='${symbol}', task='${task}', token_budget=4000, format='json') to anchor the workflow",
+    "Then omni_impact(symbol='${symbol}', depth=2, format='json') to read the blast radius",
+    "Run omni_memory(action='advisory', symbol='${symbol}', task='${task}', format='json') and review action_items before drafting content",
+    "After applying, omni_diagnostics(file='${file}', severity='all', format='json') to confirm no regressions",
+    "Optionally omni_memory(action='store', category='solution' or 'mistake', symbol='${symbol}', content='<one-line lesson>') to record what worked"
   ]
 }

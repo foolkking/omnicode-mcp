@@ -1,0 +1,190 @@
+=== code: <module> (firstlineno=1) ===
+  === code: _stamp (firstlineno=492) ===
+  === code: _format_json (firstlineno=510) ===
+  === code: _strip_quotes (firstlineno=579) ===
+  === code: _detect_mode (firstlineno=586) ===
+  === code: _is_backend_error_envelope (firstlineno=664) ===
+  === code: _backend_error_summary (firstlineno=678) ===
+  === code: _BackendUnreachableError (firstlineno=691) ===
+    === code: __init__ (firstlineno=698) ===
+  === code: _backend_unreachable_search_envelope (firstlineno=704) ===
+  === code: _run_semantic (firstlineno=747) ===
+    === code: <listcomp> (firstlineno=780) ===
+    === code: <listcomp> (firstlineno=789) ===
+  === code: _run_symbol (firstlineno=796) ===
+  === code: _run_text (firstlineno=815) ===
+  === code: _run_hybrid (firstlineno=841) ===
+    === code: <listcomp> (firstlineno=862) ===
+  === code: _rrf_fuse (firstlineno=872) ===
+    === code: <lambda> (firstlineno=900) ===
+  === code: _run_references (firstlineno=913) ===
+    === code: <listcomp> (firstlineno=1106) ===
+    === code: <setcomp> (firstlineno=1153) ===
+    === code: _kind_for_line (firstlineno=1162) ===
+  === code: _rerank_by_proximity (firstlineno=1237) ===
+    === code: proximity_score (firstlineno=1246) ===
+    === code: <lambda> (firstlineno=1269) ===
+  === code: _no_results_message (firstlineno=1273) ===
+  === code: _approx_token_count (firstlineno=1315) ===
+  === code: _render_results (firstlineno=1320) ===
+  === code: _infer_source_confidence (firstlineno=1378) ===
+    === code: <listcomp> (firstlineno=1392) ===
+    === code: <genexpr> (firstlineno=1400) ===
+    === code: <genexpr> (firstlineno=1418) ===
+    === code: <setcomp> (firstlineno=1423) ===
+  === code: _to_structured (firstlineno=1440) ===
+  === code: _render_one_result (firstlineno=1491) ===
+  === code: _emit_read_error (firstlineno=1550) ===
+  === code: _read_illegal_mode_envelope (firstlineno=1585) ===
+  === code: _truncate_with_lines (firstlineno=1614) ===
+  === code: _build_read_payload (firstlineno=1634) ===
+  === code: _guess_language_from_path (firstlineno=1882) ===
+  === code: _next_actions_for_mode (firstlineno=1893) ===
+  === code: _extract_lexical_terms (firstlineno=1986) ===
+    === code: _add (firstlineno=2000) ===
+  === code: _next_actions_for_context (firstlineno=2025) ===
+  === code: _extract_memory_id (firstlineno=2088) ===
+  === code: _is_dedup_response (firstlineno=2114) ===
+  === code: _normalise_memory_row (firstlineno=2147) ===
+  === code: _synthesise_advisory (firstlineno=2194) ===
+    === code: <listcomp> (firstlineno=2210) ===
+    === code: <listcomp> (firstlineno=2211) ===
+    === code: <listcomp> (firstlineno=2212) ===
+    === code: <listcomp> (firstlineno=2213) ===
+    === code: <genexpr> (firstlineno=2220) ===
+    === code: _first_sentence (firstlineno=2242) ===
+    === code: <listcomp> (firstlineno=2269) ===
+    === code: <genexpr> (firstlineno=2296) ===
+  === code: _next_actions_for_memory (firstlineno=2322) ===
+  === code: _get_workspace_root (firstlineno=2426) ===
+  === code: _resolve_workspace_path (firstlineno=2488) ===
+  === code: _normalise_diff_text (firstlineno=2535) ===
+  === code: _patch_path_guard_error (firstlineno=2569) ===
+  === code: _alias_envelope (firstlineno=2590) ===
+  === code: _alias_path_guard_error (firstlineno=2624) ===
+  === code: _format_outline_text (firstlineno=2643) ===
+  TUPLE[8] cjk=8: ['上下文', '理解', '梳理', '概览', '先看', '了解', '调研', '起点']
+  TUPLE[13] cjk=13: ['搜索', '查找', '找到', '定位', '符号', '函数', '方法', '类', '引用', '使用', '调用方', '查找', '搜寻']
+  TUPLE[10] cjk=10: ['读取', '查看', '打开', '显示', '概要', '结构', '签名', '导入', '实现', '函数体']
+  TUPLE[10] cjk=10: ['影响', '影响范围', '风险', '调用方', '依赖', '评估', '改动前', '修改前', '回归', '波及']
+  TUPLE[10] cjk=9: ['检查', '诊断', 'lint', '类型', '类型错误', '静态分析', '错误', '警告', '问题', '类型检查']
+  TUPLE[9] cjk=9: ['记忆', '回忆', '历史', '经验', '教训', '记下', '保存', '建议', '记录']
+  TUPLE[14] cjk=14: ['修改', '编辑', '改动', '重构', '修复', '预览', '验证', '应用', '回滚', '撤销', '安全修改', '改写', '落盘', '差异']
+  TUPLE[7] cjk=7: ['流程', '配方', '工作流', '指南', '最佳实践', '套路', '模板']
+  TUPLE[3] cjk=3: ['发现', '工具', '有哪些']
+  TUPLE[8] cjk=8: ['安全修改', '安全编辑', '预览', '验证', '回滚', '撤销', '落盘前', '改完回滚']
+  TUPLE[6] cjk=6: ['预览', '验证', '应用', '回滚', '撤销', '差异']
+  TUPLE[9] cjk=9: ['查找引用', '查找所有引用', '所有引用', '调用了', '在哪里使用', '在哪里被调用', '谁调用了', '跨文件引用', '调用点']
+  TUPLE[4] cjk=4: ['引用', '调用方', '使用处', '调用点']
+  TUPLE[10] cjk=10: ['影响范围', '影响分析', '风险评估', '改动前', '修改前', '改之前', '波及范围', '依赖分析', '改了会影响', '影响和风险']
+  TUPLE[5] cjk=5: ['影响', '风险', '依赖', '波及', '调用方']
+  TUPLE[12] cjk=12: ['理解这个函数', '先理解', '先了解', '理解代码', '修改前先', '在修改前', '修改函数前', '了解一下', '搞清楚', '弄清楚', '这个函数做什么', '这个方法做什么']
+  TUPLE[8] cjk=8: ['理解', '了解', '调研', '上下文', '函数', '方法', '类', '符号']
+  TUPLE[15] cjk=14: ['lint', '类型错误', '静态分析', '类型检查', 'lint错误', 'lint 错误', 'lint 或 类型', 'lint或类型', 'lint 或 类型错误', '有没有错误', '有没有警告', '有没有问题', '检查错误', '检查文件', '检查这个文件']
+  TUPLE[8] cjk=7: ['检查', '诊断', '类型', '错误', '警告', '问题', 'lint', '类型检查']
+  TUPLE[8] cjk=8: ['记得', '回忆', '之前的', '以前的', '经验', '教训', '建议', '历史上']
+  TUPLE[5] cjk=5: ['记忆', '回忆', '经验', '历史', '建议']
+  TUPLE[5] cjk=5: ['最佳实践', '推荐流程', '怎么做', '套路', '工作流']
+  TUPLE[5] cjk=5: ['流程', '套路', '工作流', '配方', '指南']
+  === code: _tokenise_query (firstlineno=3089) ===
+    === code: <listcomp> (firstlineno=3091) ===
+  === code: _phrase_in_query (firstlineno=3094) ===
+    === code: <genexpr> (firstlineno=3107) ===
+  === code: _recommend_tools_payload (firstlineno=3115) ===
+    === code: <listcomp> (firstlineno=3146) ===
+    === code: <listcomp> (firstlineno=3153) ===
+    === code: <listcomp> (firstlineno=3183) ===
+    === code: <listcomp> (firstlineno=3184) ===
+    === code: <genexpr> (firstlineno=3188) ===
+    === code: <lambda> (firstlineno=3194) ===
+    === code: <listcomp> (firstlineno=3195) ===
+    === code: <listcomp> (firstlineno=3199) ===
+    === code: <listcomp> (firstlineno=3200) ===
+    === code: <genexpr> (firstlineno=3216) ===
+    === code: <listcomp> (firstlineno=3234) ===
+    === code: <lambda> (firstlineno=3247) ===
+    === code: <dictcomp> (firstlineno=3248) ===
+  === code: _recommend_tools (firstlineno=3297) ===
+    === code: <listcomp> (firstlineno=3310) ===
+    === code: <listcomp> (firstlineno=3346) ===
+    === code: <listcomp> (firstlineno=3347) ===
+    === code: <genexpr> (firstlineno=3351) ===
+    === code: <lambda> (firstlineno=3357) ===
+    === code: <listcomp> (firstlineno=3359) ===
+    === code: <listcomp> (firstlineno=3364) ===
+    === code: <listcomp> (firstlineno=3365) ===
+    === code: <genexpr> (firstlineno=3383) ===
+    === code: <lambda> (firstlineno=3411) ===
+    === code: <dictcomp> (firstlineno=3412) ===
+  === code: _render_read_payload_text (firstlineno=3442) ===
+  === code: register_high_level_tools (firstlineno=3481) ===
+    === code: _collect_diagnostics_payload (firstlineno=3489) ===
+      === code: <setcomp> (firstlineno=3518) ===
+      === code: <genexpr> (firstlineno=3649) ===
+      === code: <listcomp> (firstlineno=3691) ===
+      === code: <lambda> (firstlineno=3698) ===
+      === code: <genexpr> (firstlineno=3704) ===
+      === code: <genexpr> (firstlineno=3708) ===
+      === code: <genexpr> (firstlineno=3712) ===
+    === code: _get_backend_file_markers (firstlineno=3748) ===
+      === code: <genexpr> (firstlineno=3825) ===
+    === code: _do_validate (firstlineno=3877) ===
+      === code: <genexpr> (firstlineno=3939) ===
+      === code: <genexpr> (firstlineno=3940) ===
+      === code: <genexpr> (firstlineno=3944) ===
+    === code: _collect_advisory_payload (firstlineno=3966) ===
+      === code: <listcomp> (firstlineno=3998) ===
+      === code: _rank (firstlineno=4022) ===
+    === code: omni_search (firstlineno=4046) ===
+      === code: <listcomp> (firstlineno=4197) ===
+      === code: <listcomp> (firstlineno=4229) ===
+      === code: <listcomp> (firstlineno=4230) ===
+      === code: <setcomp> (firstlineno=4231) ===
+      === code: <listcomp> (firstlineno=4232) ===
+      === code: <lambda> (firstlineno=4240) ===
+      === code: <genexpr> (firstlineno=4289) ===
+    === code: omni_read (firstlineno=4513) ===
+    === code: omni_impact (firstlineno=4713) ===
+      === code: _safe (firstlineno=4826) ===
+      === code: <listcomp> (firstlineno=4906) ===
+    === code: omni_diagnostics (firstlineno=5079) ===
+    === code: omni_patch (firstlineno=5265) ===
+      === code: _err (firstlineno=5310) ===
+        === code: <listcomp> (firstlineno=5318) ===
+      === code: <dictcomp> (firstlineno=5356) ===
+      === code: _marker_fields (firstlineno=5376) ===
+      === code: <listcomp> (firstlineno=5445) ===
+    === code: omni_analyze (firstlineno=6062) ===
+      === code: _alias_json (firstlineno=6081) ===
+    === code: omni_memory (firstlineno=6275) ===
+      === code: _err (firstlineno=6304) ===
+        === code: <listcomp> (firstlineno=6312) ===
+      === code: <listcomp> (firstlineno=6331) ===
+      === code: <listcomp> (firstlineno=6347) ===
+      === code: <listcomp> (firstlineno=6370) ===
+    === code: omni_context (firstlineno=6676) ===
+      === code: _spend (firstlineno=6772) ===
+      === code: _add_truncation_reason (firstlineno=6788) ===
+      === code: <listcomp> (firstlineno=6810) ===
+      === code: _safe (firstlineno=6965) ===
+      === code: <lambda> (firstlineno=7063) ===
+      === code: <listcomp> (firstlineno=7121) ===
+      === code: _accept_related (firstlineno=7155) ===
+      === code: <genexpr> (firstlineno=7379) ===
+      === code: <listcomp> (firstlineno=7402) ===
+    === code: omni_edit (firstlineno=7584) ===
+      === code: _alias_text (firstlineno=7626) ===
+      === code: _alias_json (firstlineno=7633) ===
+    === code: omni_intelligence (firstlineno=8091) ===
+      === code: <genexpr> (firstlineno=8122) ===
+      === code: <listcomp> (firstlineno=8211) ===
+    === code: omni_skill (firstlineno=8316) ===
+      === code: _err (firstlineno=8346) ===
+      === code: <listcomp> (firstlineno=8384) ===
+      === code: <listcomp> (firstlineno=8414) ===
+      === code: <genexpr> (firstlineno=8509) ===
+    === code: omni_status (firstlineno=8529) ===
+      === code: <genexpr> (firstlineno=8634) ===
+      === code: <listcomp> (firstlineno=8640) ===
+      === code: <listcomp> (firstlineno=8652) ===
+    === code: discover_tools (firstlineno=8752) ===

@@ -1,23 +1,23 @@
-"""
-High-level MCP tools — the eight-tool core surface.
+﻿"""
+High-level MCP tools 鈥?the eight-tool core surface.
 
 These eight tools are designed so an external AI editor can map the
 "what do I want to do" question to a single tool with one ``mode`` /
-``action`` parameter — no need to navigate 25 fine-grained tools and
+``action`` parameter 鈥?no need to navigate 25 fine-grained tools and
 spend 10k tokens on schema descriptions.
 
-Token savings: ~10k schema tokens → ~3.5k. Tool descriptions kept short.
+Token savings: ~10k schema tokens 鈫?~3.5k. Tool descriptions kept short.
 
 Tool roster:
 
-  omni_search       — semantic / symbol / text / hybrid / references
-  omni_read         — outline / symbols / full / range / imports / diagnostics
-  omni_impact       — callers / callees / risk / related tests
-  omni_diagnostics  — lint / type / security checks for a file or workspace
-  omni_context      — composer: outline + impact + memory + git in one call
-  omni_memory       — store / search / advisory
-  omni_patch        — preview / validate / apply / rollback (safe edit)
-  discover_tools    — discovery + capability listing
+  omni_search       鈥?semantic / symbol / text / hybrid / references
+  omni_read         鈥?outline / symbols / full / range / imports / diagnostics
+  omni_impact       鈥?callers / callees / risk / related tests
+  omni_diagnostics  鈥?lint / type / security checks for a file or workspace
+  omni_context      鈥?composer: outline + impact + memory + git in one call
+  omni_memory       鈥?store / search / advisory
+  omni_patch        鈥?preview / validate / apply / rollback (safe edit)
+  discover_tools    鈥?discovery + capability listing
 
 Backwards compatibility: ``omni_analyze``, ``omni_edit``,
 ``omni_intelligence`` are kept as deprecated aliases that delegate to
@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 # but omni_read didn't); the omni_status tool reads this constant so the
 # next round can verify which build is actually serving traffic.
 # ---------------------------------------------------------------------------
-_HANDLER_VERSION = "2026.05.29.audit-bundle.r20"
+_HANDLER_VERSION = "2026.05.29.audit-bundle.r21"
 _HANDLER_FEATURES: Tuple[str, ...] = (
     "search.source_confidence",       # omni_search row stamping
     "read.diagnostics_aligned",       # omni_read[diagnostics] uses _collect_diagnostics_payload
@@ -65,7 +65,7 @@ _HANDLER_FEATURES: Tuple[str, ...] = (
                                       # (the same helper omni_memory v2 uses)
                                       # so memory_id + memory_count match
                                       # end-to-end. Schema unchanged from
-                                      # context.v2 — values are now correct.
+                                      # context.v2 鈥?values are now correct.
     "patch.workspace_path_guard",     # omni_patch: reject ../, absolute,
                                       # and symlink-escape paths in
                                       # preview / validate / apply / rollback.
@@ -76,7 +76,7 @@ _HANDLER_FEATURES: Tuple[str, ...] = (
                                       # diagnostics-shaped checks[] +
                                       # counts + tools_run/tools_skipped.
     "skill.recipes_2_1",              # omni_skill: bundled recipes upgraded
-                                      # to 2.1.0 — safe-refactor adds memory
+                                      # to 2.1.0 鈥?safe-refactor adds memory
                                       # advisory step + patch.v2 path-guard /
                                       # validate-gate / force=True notes;
                                       # impact-review adds references step;
@@ -84,7 +84,7 @@ _HANDLER_FEATURES: Tuple[str, ...] = (
                                       # every recipe carries success_criteria
                                       # + next_actions + per-step
                                       # failure_policy. contract_version
-                                      # stays skill.v2 — manifest-only update.
+                                      # stays skill.v2 鈥?manifest-only update.
     "skill.workflow_contract_alignment",
                                       # Each recipe lists the handler features
                                       # it was authored against
@@ -161,7 +161,7 @@ _HANDLER_FEATURES: Tuple[str, ...] = (
                                       # force / force_reason params; force
                                       # apply records validation_bypassed=
                                       # true + force_reason and prepends a
-                                      # ⚠️ warning to next_actions, parity
+                                      # 鈿狅笍 warning to next_actions, parity
                                       # with omni_patch's force visibility.
     "alias.edit_json_ai_edit",        # audit-bundle.r13 (P1-E close):
                                       # omni_edit(action='ai_edit',
@@ -385,6 +385,35 @@ _HANDLER_FEATURES: Tuple[str, ...] = (
                                       # for unlinked new-file
                                       # rollbacks) instead of returning
                                       # stale post-apply content.
+    "search.backend_unreachable_transparency",
+                                      # audit-bundle.r21 (P1 close):
+                                      # omni_search now distinguishes
+                                      # between "backend says zero
+                                      # hits" and "backend was
+                                      # unreachable / 5xx". The latter
+                                      # surfaces as ok=False with
+                                      # backend_status='degraded' and
+                                      # a structured error envelope
+                                      # rather than the misleading
+                                      # ``total=0, count=0`` empty
+                                      # result. Internal advisory
+                                      # callers (omni_context /
+                                      # omni_impact) still degrade
+                                      # gracefully via try/except.
+    "diagnostics.backend_unreachable_transparency",
+                                      # audit-bundle.r21 (P1 close):
+                                      # omni_diagnostics now classifies
+                                      # backend HTTP error responses as
+                                      # tools_skipped (not tools_run)
+                                      # and returns ok=False with
+                                      # backend_status='degraded' when
+                                      # every requested source failed,
+                                      # instead of pretending the file
+                                      # is clean with counts={0,0,0,0}.
+                                      # The same fix flows through
+                                      # omni_read[mode='diagnostics']
+                                      # and omni_context's diagnostics
+                                      # subsection.
 )
 _PROCESS_START_TIME = None  # set lazily on first omni_status call
 
@@ -395,7 +424,7 @@ _PROCESS_START_TIME = None  # set lazily on first omni_status call
 # Bumped whenever a tool's JSON envelope changes shape. Every flagship
 # tool injects ``handler_version`` + ``contract_version`` into its
 # ``format="json"`` payload so a caller can detect a stale FastMCP
-# binding even when the module-level checks in omni_status pass — the
+# binding even when the module-level checks in omni_status pass 鈥?the
 # audit failure mode we hit was *exactly* "module helpers loaded but
 # omni_read's registered handler still pointed at the old closure".
 # Putting the stamp on the response forces the registered handler
@@ -443,7 +472,7 @@ _ALIAS_REPLACEMENTS: Dict[str, str] = {
 }
 
 # Flagship tools that support JSON-mode stamping. Any tool listed in
-# _CONTRACT_VERSIONS but missing here is treated as text-only — omni_status
+# _CONTRACT_VERSIONS but missing here is treated as text-only 鈥?omni_status
 # will emit a json_stamp_unsupported:<tool> warning so audits can refuse
 # to validate the runtime against an under-instrumented tool.
 _TOOLS_WITH_JSON_STAMP: Tuple[str, ...] = (
@@ -467,7 +496,7 @@ def _stamp(payload: Any, *, tool: str) -> Any:
     forwarding an already-stamped envelope) we don't overwrite them so
     nested tools can still tell who originated the payload.
 
-    Non-dict payloads are returned unchanged — version stamping a list
+    Non-dict payloads are returned unchanged 鈥?version stamping a list
     or a primitive doesn't make sense and would break the public
     contract for those tools that already return non-dict JSON.
     """
@@ -559,19 +588,19 @@ def _detect_mode(query: str) -> str:
 
     Heuristics, ordered by confidence:
 
-    1. Empty / whitespace → ``semantic`` (caller will get a no-results hint).
-    2. Quoted literal ``"foo bar"`` → ``text`` (caller wants the literal).
-    3. Length ≤ 2 or stop-word-only token → ``text`` (no useful symbol/embed).
-    4. Exact ALL_CAPS_IDENTIFIER → ``text``  (env vars, constants).
-    5. Dotted / underscored identifier (no spaces, < 60 chars) → ``symbol``.
-    6. Short natural-language query (≤ 3 words) → ``hybrid``.
-    7. Anything else → ``semantic``.
+    1. Empty / whitespace 鈫?``semantic`` (caller will get a no-results hint).
+    2. Quoted literal ``"foo bar"`` 鈫?``text`` (caller wants the literal).
+    3. Length 鈮?2 or stop-word-only token 鈫?``text`` (no useful symbol/embed).
+    4. Exact ALL_CAPS_IDENTIFIER 鈫?``text``  (env vars, constants).
+    5. Dotted / underscored identifier (no spaces, < 60 chars) 鈫?``symbol``.
+    6. Short natural-language query (鈮?3 words) 鈫?``hybrid``.
+    7. Anything else 鈫?``semantic``.
     """
     q = query.strip()
     if not q:
         return "semantic"
 
-    # 2. Quoted literal — caller is asking for the string verbatim.
+    # 2. Quoted literal 鈥?caller is asking for the string verbatim.
     if _QUOTED_RE.fullmatch(q):
         return "text"
     # Always strip outer quotes for the remaining heuristics so a user
@@ -600,6 +629,121 @@ def _detect_mode(query: str) -> str:
     return "semantic"
 
 
+# ---------------------------------------------------------------------------
+# audit-bundle.r21 鈥?Backend-unreachable transparency
+#
+# ``make_request`` (mcp_server.py) returns a structured error dict like
+# ``{"error": ..., "error_type": "ConnectionError"|"HTTPError"|...,
+# "status_code": 5xx}`` whenever the FastAPI backend is down, times out,
+# or returns a 5xx. Pre-r21 the search dispatchers and the diagnostics
+# collector treated this dict as ordinary backend data, fell into
+# ``data.get("results", [])`` / ``data.get("issues", [])``, and returned
+# silent empty rows. AI editors then saw ``total=0`` (search) or
+# ``counts={0,0,0,0}`` (diagnostics) and incorrectly concluded the
+# workspace had nothing to find / nothing to lint.
+#
+# r21 fixes this with three primitives:
+#
+# 1. :func:`_is_backend_error_envelope` 鈥?recognise the make_request
+#    error dict shape (``"error"`` key + no ``"result"``).
+# 2. :class:`_BackendUnreachableError` 鈥?sentinel exception that the
+#    search dispatchers raise so callers can decide whether to bubble
+#    (omni_search top-level) or degrade (advisory consumers like
+#    omni_context / omni_impact that already wrap their probe calls in
+#    try/except).
+# 3. ``backend_status='degraded'`` field added to the public error
+#    envelope when every requested source failed, plus a list of the
+#    failed labels with their HTTP status codes when available.
+#
+# Handler features that pin the contract:
+#   ``search.backend_unreachable_transparency``
+#   ``diagnostics.backend_unreachable_transparency``
+# ---------------------------------------------------------------------------
+
+
+def _is_backend_error_envelope(raw: Any) -> bool:
+    """Return True iff ``raw`` is the make_request error envelope.
+
+    The wrapper in ``mcp_server.make_request`` returns dicts of the
+    shape ``{"error": str, "error_type": str, "status_code": int?, ...}``
+    on every HTTP/connection failure (no ``result`` key). Successful
+    backend responses always carry ``result`` 鈥?even when the backend
+    itself reported ``success=False`` inside ``result``.
+    """
+    if not isinstance(raw, dict):
+        return False
+    return "error" in raw and "result" not in raw
+
+
+def _backend_error_summary(raw: Any) -> str:
+    """Extract a short single-line error summary from the make_request
+    error envelope. Used in ``error`` / ``tools_skipped`` reasons."""
+    if not _is_backend_error_envelope(raw):
+        return ""
+    err = str(raw.get("error") or "").strip()
+    code = raw.get("status_code")
+    et = raw.get("error_type") or "BackendError"
+    if code:
+        return f"{et} ({code}): {err}" if err else f"{et} ({code})"
+    return f"{et}: {err}" if err else et
+
+
+class _BackendUnreachableError(Exception):
+    """Raised by search dispatchers when the FastAPI backend is
+    unreachable (HTTP 5xx, timeout, connection error). Caught at the
+    omni_search top level to surface a structured ``ok=False`` envelope
+    with ``backend_status='degraded'``; advisory callers
+    (omni_context, omni_impact) catch it and degrade gracefully."""
+
+    def __init__(self, summary: str, *, label: str = "search"):
+        super().__init__(summary)
+        self.summary = summary
+        self.label = label
+
+
+def _backend_unreachable_search_envelope(
+    *,
+    query: str,
+    requested_mode: str,
+    resolved_mode: str,
+    exc: "_BackendUnreachableError",
+    is_json: bool,
+) -> str:
+    """Build the structured ``ok=False`` envelope for omni_search when
+    the backend is unreachable. Stamped with handler_version and
+    contract_version so audits can confirm the path was honoured."""
+    payload: Dict[str, Any] = {
+        "ok": False,
+        "query": query,
+        "requested_mode": requested_mode,
+        "resolved_mode": resolved_mode,
+        "error": (
+            f"search blocked: backend unreachable ({exc.label}: "
+            f"{exc.summary})"
+        ),
+        "backend_status": "degraded",
+        "failed_dispatcher": exc.label,
+        "total": 0,
+        "count": 0,
+        "results": [],
+        "next_actions": [
+            "Check the FastAPI backend is running and reachable; the "
+            "search dispatcher could not retrieve any results.",
+            "omni_status() to inspect the host process and confirm the "
+            "issue is on the backend side, not the MCP host.",
+            "Retry once after the backend has recovered.",
+        ],
+    }
+    _stamp(payload, tool="omni_search")
+    if is_json:
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+    return (
+        f"鉂?search blocked: backend unreachable\n"
+        f"   query={query!r}  mode={resolved_mode}\n"
+        f"   {exc.summary}"
+    )
+
+
 async def _run_semantic(
     make_request, query: str, file_pattern: Optional[str], max_results: int, rerank: bool
 ) -> Tuple[List[Dict[str, Any]], int]:
@@ -617,6 +761,10 @@ async def _run_semantic(
         payload["file_pattern"] = file_pattern.strip()
 
     raw = await make_request("POST", "/search", json=payload)
+    if _is_backend_error_envelope(raw):
+        raise _BackendUnreachableError(
+            _backend_error_summary(raw), label="semantic",
+        )
     data = raw.get("result", raw) if isinstance(raw, dict) else {}
     results = list(data.get("results", []))
 
@@ -627,7 +775,7 @@ async def _run_semantic(
         for r in results:
             why = list(r.get("why_matched", []) or [])
             # Strip the legacy ``reranker:requested`` artefact that older
-            # indexed chunks may carry — we always want the canonical
+            # indexed chunks may carry 鈥?we always want the canonical
             # ``reranker:on`` (or no tag at all when ``rerank=False``).
             why = [w for w in why if w != "reranker:requested"]
             if "reranker:on" not in why:
@@ -651,10 +799,14 @@ async def _run_symbol(
     """Fuzzy symbol-name search."""
     params = {"query": query, "fuzzy": True, "max_results": max_results}
     if file_pattern:
-        # Backend supports a comma-separated glob list — forward whole.
+        # Backend supports a comma-separated glob list 鈥?forward whole.
         params["file_pattern"] = file_pattern.strip()
 
     raw = await make_request("POST", "/search/symbols", params=params)
+    if _is_backend_error_envelope(raw):
+        raise _BackendUnreachableError(
+            _backend_error_summary(raw), label="symbol",
+        )
     data = raw.get("result", raw) if isinstance(raw, dict) else {}
     results = list(data.get("results", []))
     return results, data.get("total_results", len(results))
@@ -677,6 +829,10 @@ async def _run_text(
         "merge_adjacent": (not flat),
     }
     raw = await make_request("POST", "/search/text", params=params)
+    if _is_backend_error_envelope(raw):
+        raise _BackendUnreachableError(
+            _backend_error_summary(raw), label="text",
+        )
     data = raw.get("result", raw) if isinstance(raw, dict) else {}
     results = list(data.get("results", []))
     return results, data.get("total_results", len(results))
@@ -761,14 +917,14 @@ async def _run_references(
 
     Pipeline:
 
-    1. **LSP** — ``workspace/symbol`` + ``textDocument/references``.
+    1. **LSP** 鈥?``workspace/symbol`` + ``textDocument/references``.
        Yields the highest-confidence ``source=lsp`` rows with
        ``kind`` distinguishing ``definition`` and ``call``.
-    2. **AST exact** — when LSP isn't running, we ask the AST symbol
+    2. **AST exact** 鈥?when LSP isn't running, we ask the AST symbol
        index for an *exact-name* match so the anchor (a single
        definition) is unambiguous.  ``source=ast_symbol``,
        ``confidence=medium``.
-    3. **Word-boundary text grep** for cross-file callsites — only
+    3. **Word-boundary text grep** for cross-file callsites 鈥?only
        fired *after* an anchor was found in step 2, so callers see
        both the definition AND the usages on machines without LSP.
        ``source=text_grep``, ``confidence=low``, ``kind=call``.
@@ -777,7 +933,7 @@ async def _run_references(
 
     * **No more fuzzy fallback** for ``mode=references``.  A
       reference query for ``foo`` should NEVER return ``foobar``,
-      ``foozz`` etc. — that produces the "same-name confusion"
+      ``foozz`` etc. 鈥?that produces the "same-name confusion"
       anti-pattern the audit flagged.
     * **Ambiguous definitions are tagged** so the caller can warn the
       user (think two unrelated ``set`` methods in different files).
@@ -844,7 +1000,7 @@ async def _run_references(
         anchor_line = rng.get("line", 0)
         anchor_col = rng.get("character", 0)
     elif lsp_available:
-        # ``workspace/symbol`` returned empty — pyright might just not
+        # ``workspace/symbol`` returned empty 鈥?pyright might just not
         # have indexed the file yet (it lazy-loads). Use AST symbol
         # search to anchor on a real declaration so we can still try
         # ``textDocument/references`` (which does ``didOpen`` first).
@@ -945,7 +1101,7 @@ async def _run_references(
         sym_results = []
 
     # Keep ONLY exact-name matches. Fuzzy / contains / prefix matches are
-    # the cause of the same-name confusion bug — a reference query for
+    # the cause of the same-name confusion bug 鈥?a reference query for
     # ``foo`` must never surface ``foobar``.
     exact_defs = [
         r for r in sym_results
@@ -953,7 +1109,7 @@ async def _run_references(
     ]
 
     if not exact_defs:
-        # No definition we can be confident about → return nothing.
+        # No definition we can be confident about 鈫?return nothing.
         # The caller will see ``total=0`` and can fall back to a different
         # mode (semantic / text) if they actually want fuzzy matches.
         meta["fallback_used"] = "none"
@@ -974,8 +1130,20 @@ async def _run_references(
                 "file_pattern": _DEFAULT_TEXT_GLOBS,
             }
             raw = await make_request("POST", "/search/text", params=grep_params)
-            gdata = raw.get("result", raw) if isinstance(raw, dict) else {}
-            grep_results = list(gdata.get("results", []) or [])
+            if _is_backend_error_envelope(raw):
+                # audit-bundle.r21 鈥?degrade gracefully when the
+                # text grep backend is unavailable; references may
+                # still surface partial AST-only data.
+                grep_results = []
+                meta.setdefault("fallback_reason", "")
+                err_summary = _backend_error_summary(raw)
+                if meta["fallback_reason"]:
+                    meta["fallback_reason"] += f"; grep skipped: {err_summary}"
+                else:
+                    meta["fallback_reason"] = f"grep skipped: {err_summary}"
+            else:
+                gdata = raw.get("result", raw) if isinstance(raw, dict) else {}
+                grep_results = list(gdata.get("results", []) or [])
         except Exception as exc:
             logger.debug("Text-grep callsite scan failed for %r: %s", query, exc)
             grep_results = []
@@ -1031,7 +1199,7 @@ async def _run_references(
             }
         )
 
-    # 3b) Callsites — anything in grep_results that ISN'T already a def.
+    # 3b) Callsites 鈥?anything in grep_results that ISN'T already a def.
     for r in grep_results:
         fp = (r.get("file_path") or "").replace("\\", "/")
         ln = r.get("line_number") or r.get("line_start") or 0
@@ -1106,13 +1274,13 @@ def _no_results_message(query: str, resolved_mode: str, requested_mode: str) -> 
     """Render an actionable hint when search came back empty."""
     suggestions = []
     if resolved_mode != "text":
-        suggestions.append("• `mode=text`   — line-level grep on the literal string")
+        suggestions.append("鈥?`mode=text`   鈥?line-level grep on the literal string")
     if resolved_mode != "symbol":
-        suggestions.append("• `mode=symbol` — fuzzy match on function/class names")
+        suggestions.append("鈥?`mode=symbol` 鈥?fuzzy match on function/class names")
     if resolved_mode != "semantic":
-        suggestions.append("• `mode=semantic` — natural-language → code")
+        suggestions.append("鈥?`mode=semantic` 鈥?natural-language 鈫?code")
     if resolved_mode != "hybrid":
-        suggestions.append("• `mode=hybrid` — fuse symbol + semantic via RRF")
+        suggestions.append("鈥?`mode=hybrid` 鈥?fuse symbol + semantic via RRF")
 
     # Lightweight query-rewrite suggestions.
     rewrites: List[str] = []
@@ -1123,12 +1291,12 @@ def _no_results_message(query: str, resolved_mode: str, requested_mode: str) -> 
     if "_" in q and " " not in q:
         rewrites.append(f"`{q.replace('_', ' ')}`  (treat underscores as spaces)")
     if len(q) > 30:
-        rewrites.append(f"`{' '.join(q.split()[:3])}…`  (shorter, focus on core terms)")
+        rewrites.append(f"`{' '.join(q.split()[:3])}鈥  (shorter, focus on core terms)")
 
     if requested_mode == "auto":
-        header = f"🔍 No results for '{query}' (mode=auto→{resolved_mode})"
+        header = f"馃攳 No results for '{query}' (mode=auto鈫抺resolved_mode})"
     else:
-        header = f"🔍 No results for '{query}' (mode={resolved_mode})"
+        header = f"馃攳 No results for '{query}' (mode={resolved_mode})"
 
     lines = [header, ""]
     if suggestions:
@@ -1138,14 +1306,14 @@ def _no_results_message(query: str, resolved_mode: str, requested_mode: str) -> 
     if rewrites:
         lines.append("Or rewrite the query:")
         for r in rewrites:
-            lines.append(f"• {r}")
+            lines.append(f"鈥?{r}")
         lines.append("")
     lines.append("Common misses: case sensitivity, language filter (try `file_pattern='*'`).")
     return "\n".join(lines)
 
 
 def _approx_token_count(text: str) -> int:
-    """Rough estimator — every 4 chars is ~1 token. Good enough for budget gates."""
+    """Rough estimator 鈥?every 4 chars is ~1 token. Good enough for budget gates."""
     return max(1, len(text) // 4)
 
 
@@ -1166,9 +1334,9 @@ def _render_results(
     """
     header_mode = (
         f"mode={requested_mode}" if requested_mode == resolved_mode
-        else f"mode={requested_mode}→{resolved_mode}"
+        else f"mode={requested_mode}鈫抺resolved_mode}"
     )
-    header = f"🔍 {total} result(s) for '{query}' ({header_mode})\n"
+    header = f"馃攳 {total} result(s) for '{query}' ({header_mode})\n"
 
     verbose = [header]
     for i, r in enumerate(results, 1):
@@ -1179,7 +1347,7 @@ def _render_results(
     if token_budget <= 0 or _approx_token_count(full) <= token_budget:
         return full
 
-    # Compact pass — drop snippets / context.
+    # Compact pass 鈥?drop snippets / context.
     compact = [header]
     for i, r in enumerate(results, 1):
         compact.extend(_render_one_result(i, r, with_snippet=False))
@@ -1198,7 +1366,7 @@ def _render_results(
 # row, derive confidence from why_matched tags + score thresholds.
 # ---------------------------------------------------------------------------
 
-# Score thresholds — tuned to keep a fresh BM25 / embedding hit at "medium"
+# Score thresholds 鈥?tuned to keep a fresh BM25 / embedding hit at "medium"
 # by default. We only escalate to "high" when there's a decisive signal
 # (reranker + strong score, multi-source hybrid hit, or symbol:exact).
 _SEMANTIC_HIGH = 0.70
@@ -1216,10 +1384,10 @@ def _infer_source_confidence(
     already self-tagged by :func:`_run_references` and skipped by the
     caller. The returned strings follow the public contract:
 
-      source ∈ {symbol_index, symbol_index_fuzzy, vector_index,
+      source 鈭?{symbol_index, symbol_index_fuzzy, vector_index,
                 vector_index+reranker, text_index,
                 hybrid:<labels>, lsp, ast_symbol, text_grep, mixed}
-      confidence ∈ {high, medium, low}
+      confidence 鈭?{high, medium, low}
     """
     why = [str(w).lower() for w in (row.get("why_matched") or [])]
     score = float(row.get("relevance_score", 0) or 0)
@@ -1259,13 +1427,13 @@ def _infer_source_confidence(
         })
         src = "hybrid:" + "+".join(labels) if labels else "hybrid"
         if len(labels) >= 2:
-            # Found by both symbol AND semantic — strongest hybrid signal.
+            # Found by both symbol AND semantic 鈥?strongest hybrid signal.
             return src, "high"
         if score >= _HYBRID_DECISIVE:
             return src, "medium"
         return src, "low"
 
-    # Defensive: references / unknown — preserve whatever the row carries.
+    # Defensive: references / unknown 鈥?preserve whatever the row carries.
     return row.get("source") or "", row.get("confidence") or ""
 
 
@@ -1321,7 +1489,7 @@ def _to_structured(r: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _render_one_result(idx: int, r: Dict[str, Any], *, with_snippet: bool) -> List[str]:
-    """Format a single hit — works for symbol / semantic / text / reference."""
+    """Format a single hit 鈥?works for symbol / semantic / text / reference."""
     file = r.get("file_path", "")
     line_no = (
         r.get("line_number")
@@ -1339,39 +1507,39 @@ def _render_one_result(idx: int, r: Dict[str, Any], *, with_snippet: bool) -> Li
 
     out = [f"{idx}. {name}"]
     if file:
-        out.append(f"   📄 {file}:{line_no}")
+        out.append(f"   馃搫 {file}:{line_no}")
     if kind or why:
         tail = f"score={score:.2f}" if isinstance(score, (int, float)) else ""
         if why:
             tail += f"  why={','.join(why[:4])}"
-        out.append(f"   🏷️ {kind}  {tail}".rstrip())
+        out.append(f"   馃彿锔?{kind}  {tail}".rstrip())
 
     if not with_snippet:
         out.append("")
         return out
 
     if line_content:
-        # Text-mode hit: render ±N lines context.
+        # Text-mode hit: render 卤N lines context.
         merged_extra = r.get("merged_lines") or []
         if merged_extra:
             out.append(
-                f"   📜 snippet (+ {len(merged_extra)} adjacent match"
+                f"   馃摐 snippet (+ {len(merged_extra)} adjacent match"
                 f"{'es' if len(merged_extra) != 1 else ''}):"
             )
         else:
-            out.append("   📜 snippet:")
+            out.append("   馃摐 snippet:")
         start_line = line_no - len(ctx_before)
         merged_set = set(merged_extra)
         for offset, raw_line in enumerate(ctx_before + [line_content] + ctx_after):
             n = start_line + offset
             if n == line_no or n in merged_set:
-                marker = "►"
+                marker = "鈻?
             else:
                 marker = " "
             out.append(f"      {marker} {n:>4} | {raw_line}")
     elif sig:
         # Symbol/semantic hit: render the signature.
-        out.append(f"   ✏️ {sig[:160]}")
+        out.append(f"   鉁忥笍 {sig[:160]}")
     out.append("")
     return out
 
@@ -1379,58 +1547,6 @@ def _render_one_result(idx: int, r: Dict[str, Any], *, with_snippet: bool) -> Li
 # ---------------------------------------------------------------------------
 # omni_read helpers
 # ---------------------------------------------------------------------------
-def _path_looks_unsafe(file: str) -> bool:
-    """Return True when a requested path is outside workspace-relative form."""
-    raw = file or ""
-    normalised = raw.replace("\\", "/")
-    parts = [p for p in normalised.split("/") if p]
-    return (
-        normalised.startswith("/")
-        or re.match(r"^[A-Za-z]:[\\/]", raw) is not None
-        or ".." in parts
-    )
-
-
-def _path_has_parent_reference(file: str) -> bool:
-    normalised = (file or "").replace("\\", "/")
-    return ".." in [p for p in normalised.split("/") if p]
-
-
-def _is_path_guard_error(error: str) -> bool:
-    """Classify read/diagnostics errors caused by workspace-boundary checks."""
-    err_lower = (error or "").lower()
-    return any(
-        marker in err_lower
-        for marker in (
-            "access denied",
-            "path escapes workspace",
-            "outside workspace",
-            "absolute path",
-            "path traversal",
-            "workspace-relative path",
-        )
-    )
-
-
-def _safe_path_search_query(file: str) -> str:
-    """Use only a basename for follow-up search hints after path rejection."""
-    normalised = (file or "").replace("\\", "/").rstrip("/")
-    basename = normalised.rsplit("/", 1)[-1] if normalised else ""
-    return basename or "target file"
-
-
-def _path_guard_next_actions(file: str) -> List[str]:
-    safe_query = _safe_path_search_query(file)
-    safe_query_lit = json.dumps(safe_query, ensure_ascii=False)
-    return [
-        "Use a workspace-relative path inside the active workspace; "
-        "do not retry '..' or absolute paths.",
-        "omni_status() to inspect workspace_root and backend_workspace_root.",
-        f"omni_search(query={safe_query_lit}, mode='text', format='json') "
-        "to locate the intended file.",
-    ]
-
-
 def _emit_read_error(*, file: str, mode: str, error: str, fmt: str) -> str:
     """Render a structured error in the requested format.
 
@@ -1446,9 +1562,7 @@ def _emit_read_error(*, file: str, mode: str, error: str, fmt: str) -> str:
         "error": error,
     }
     err_lower = (error or "").lower()
-    if _is_path_guard_error(error) or _path_looks_unsafe(file):
-        payload["next_actions"] = _path_guard_next_actions(file)
-    elif "file not found" in err_lower or "not found" in err_lower:
+    if "file not found" in err_lower or "not found" in err_lower:
         payload["next_actions"] = [
             "Check the workspace-relative path and retry.",
             f"omni_search(query='{file}', mode='text', format='json') "
@@ -1464,7 +1578,7 @@ def _emit_read_error(*, file: str, mode: str, error: str, fmt: str) -> str:
         ]
     _stamp(payload, tool="omni_read")
     if (fmt or "json").lower() == "text":
-        return f"❌ omni_read[{mode}] {file}: {error}"
+        return f"鉂?omni_read[{mode}] {file}: {error}"
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
@@ -1478,7 +1592,7 @@ def _read_illegal_mode_envelope(*, file: str, requested_mode: str, fmt: str) -> 
     """
     if (fmt or "json").lower() == "text":
         return (
-            f"❌ Unknown read mode: '{requested_mode}'. "
+            f"鉂?Unknown read mode: '{requested_mode}'. "
             f"Valid modes: {', '.join(_READ_VALID_MODES)}"
         )
     payload: Dict[str, Any] = {
@@ -1507,7 +1621,7 @@ def _truncate_with_lines(content: str, max_tokens: int) -> Tuple[str, bool, int]
         return content, False, content.count("\n") + 1
     if _approx_token_count(content) <= max_tokens:
         return content, False, content.count("\n") + 1
-    # Approx: 4 chars per token → keep first 4*max_tokens chars on a line
+    # Approx: 4 chars per token 鈫?keep first 4*max_tokens chars on a line
     # boundary.
     approx_chars = max_tokens * 4
     cut = content[:approx_chars]
@@ -1569,7 +1683,7 @@ def _build_read_payload(
 
     elif mode == "diagnostics":
         # NOTE: omni_read[diagnostics] now delegates to the same code
-        # path as omni_diagnostics — this branch only runs as a defensive
+        # path as omni_diagnostics 鈥?this branch only runs as a defensive
         # fallback if the dispatcher is bypassed. The richer envelope
         # (counts/total_count/severity_filter/sources/tools_run/
         # tools_skipped/truncated) is added by the caller.
@@ -1613,9 +1727,9 @@ def _build_read_payload(
         content = json.dumps(payload["candidate_test_files"])
 
     else:
-        # full / range / symbol → backend returns a content blob.
+        # full / range / symbol 鈫?backend returns a content blob.
         raw_content = data.get("content", "") or ""
-        # Range / symbol carry their resolved range — surface it.
+        # Range / symbol carry their resolved range 鈥?surface it.
         if "start_line" in data:
             payload["start_line"] = data.get("start_line")
         if "end_line" in data:
@@ -1647,7 +1761,7 @@ def _build_read_payload(
         payload["truncation_hint"] = truncate_note
 
     # ------------------------------------------------------------------
-    # Language fallback — guarantee a non-empty `language` for callers.
+    # Language fallback 鈥?guarantee a non-empty `language` for callers.
     # The backend fills this for outline / symbols / imports today, but
     # leaves it blank for symbol / range / full / diagnostics. Filling
     # from the file extension keeps the public schema consistent.
@@ -1656,7 +1770,7 @@ def _build_read_payload(
         payload["language"] = _guess_language_from_path(file)
 
     # ------------------------------------------------------------------
-    # next_actions — keep the agent moving regardless of which mode ran.
+    # next_actions 鈥?keep the agent moving regardless of which mode ran.
     # ------------------------------------------------------------------
     payload["next_actions"] = _next_actions_for_mode(
         mode=mode,
@@ -1671,18 +1785,18 @@ def _build_read_payload(
     # omni_read previously omitted source/confidence on the grounds
     # that "the file content is the truth". That's correct for
     # raw-content modes (full/range/symbol/symbols/outline/imports
-    # — the bytes are authoritative) but the contract should still
+    # 鈥?the bytes are authoritative) but the contract should still
     # carry the same surface fields the rest of the toolkit emits,
     # so AI editors can reason uniformly. We stamp:
     #
-    #   * source        — which subsystem produced the response:
+    #   * source        鈥?which subsystem produced the response:
     #                     ``ast`` (outline / symbols / imports / symbol),
-    #                     ``raw_file`` (full / range — straight bytes),
+    #                     ``raw_file`` (full / range 鈥?straight bytes),
     #                     ``vector`` (relevant_chunks),
-    #                     ``guard+lsp`` (diagnostics — same as
+    #                     ``guard+lsp`` (diagnostics 鈥?same as
     #                       omni_diagnostics for parity),
-    #                     ``graph`` (tests — call-graph suggested tests)
-    #   * confidence    — high when the source is authoritative
+    #                     ``graph`` (tests 鈥?call-graph suggested tests)
+    #   * confidence    鈥?high when the source is authoritative
     #                     (raw bytes / AST exact match / linter rules
     #                     / call-graph definitive), medium when it's
     #                     a best-effort retrieval (vector chunks),
@@ -1721,7 +1835,7 @@ def _build_read_payload(
     payload["source"] = _read_source
     payload["confidence"] = _read_conf
 
-    # Version stamp — last so the registered handler itself carries the
+    # Version stamp 鈥?last so the registered handler itself carries the
     # current contract_version in every successful payload.
     _stamp(payload, tool="omni_read")
 
@@ -1729,13 +1843,13 @@ def _build_read_payload(
 
 
 # ---------------------------------------------------------------------------
-# Mode → next_actions table.
+# Mode 鈫?next_actions table.
 #
 # Every omni_read response now ships a short list of recommended next
 # moves so the AI editor knows where to go without re-reading the docs.
 # ---------------------------------------------------------------------------
 
-# File extension → language. Mirrors the backend detector but works on
+# File extension 鈫?language. Mirrors the backend detector but works on
 # pure path heuristics so it never blocks on the backend filling the
 # field. Anything unknown stays empty.
 _EXT_TO_LANGUAGE = {
@@ -1919,7 +2033,7 @@ def _next_actions_for_context(
 ) -> List[str]:
     """Build mode-aware next_actions for omni_context responses.
 
-    Symbol mode is the noisiest one — there are five obvious follow-ups
+    Symbol mode is the noisiest one 鈥?there are five obvious follow-ups
     (read, impact, references, diagnostics, patch preview); we list all
     five so the agent can pick. File and task modes get a smaller set.
     """
@@ -2014,7 +2128,7 @@ def _is_dedup_response(
     if not isinstance(ts, str):
         return False, None
     try:
-        # ISO-8601 without TZ → assume UTC for comparison sanity.
+        # ISO-8601 without TZ 鈫?assume UTC for comparison sanity.
         parsed = _dt.datetime.fromisoformat(ts)
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=_dt.timezone.utc)
@@ -2025,7 +2139,7 @@ def _is_dedup_response(
     if age > dedup_window_seconds:
         return True, (
             f"timestamp_age:{age:.1f}s (>{dedup_window_seconds:.0f}s "
-            f"window → existing row reused)"
+            f"window 鈫?existing row reused)"
         )
     return False, None
 
@@ -2089,7 +2203,7 @@ def _synthesise_advisory(
     Pure local synthesis (no LLM call): we group memories by category
     and weave them into a short summary + ``action_items`` + ``risks``
     list. The text is also flattened into ``advisory_text`` for callers
-    that want a single string — emoji-free in JSON mode (callers
+    that want a single string 鈥?emoji-free in JSON mode (callers
     rendering for humans add their own emoji).
     """
     target = symbol or file or task or "the upcoming change"
@@ -2101,7 +2215,7 @@ def _synthesise_advisory(
         if (m.get("category") or "") in ("architecture", "integration")
     ]
 
-    # Headline summary — names the target + top categories present.
+    # Headline summary 鈥?names the target + top categories present.
     if memories:
         cat_summary = ", ".join(
             f"{len(c)} {label}"
@@ -2291,7 +2405,7 @@ def _next_actions_for_memory(
             )
             return actions
         return [
-            "No relevant memories — omni_memory(action='store', ...) "
+            "No relevant memories 鈥?omni_memory(action='store', ...) "
             "after this edit so the next agent benefits.",
         ]
     return []
@@ -2313,9 +2427,9 @@ def _get_workspace_root() -> Tuple[Path, str, List[str]]:
     """Return ``(root, source, warnings)`` for the canonical workspace root.
 
     audit-bundle.r11 (workspace.root_alignment): every path-sensitive
-    helper in this module — :func:`_resolve_workspace_path`, omni_patch's
+    helper in this module 鈥?:func:`_resolve_workspace_path`, omni_patch's
     file_exists/new_file markers, the omni_edit alias guard, and the
-    sessions ``unsafe_legacy_session`` annotation — must agree with the
+    sessions ``unsafe_legacy_session`` annotation 鈥?must agree with the
     *backend's* file-IO root. Before r11 we used :func:`pathlib.Path.cwd`,
     which silently disagrees when the MCP host is launched from a
     different cwd than the backend's ``Settings.WORKING_DIR``.
@@ -2323,11 +2437,11 @@ def _get_workspace_root() -> Tuple[Path, str, List[str]]:
     Resolution order (most authoritative first):
 
     1. ``omnicode_core.workspace.get_workspace_registry().get_active_path()``
-       — the user-configured active workspace bookmark (persisted JSON).
-    2. ``omnicode.config.settings.get_settings().WORKING_DIR`` — the env
+       鈥?the user-configured active workspace bookmark (persisted JSON).
+    2. ``omnicode.config.settings.get_settings().WORKING_DIR`` 鈥?the env
        var ``WORKING_DIR`` (loaded once at process start) or its
        ``os.getcwd()`` default.
-    3. ``Path.cwd()`` fallback — emits ``workspace_root_fallback_to_cwd``
+    3. ``Path.cwd()`` fallback 鈥?emits ``workspace_root_fallback_to_cwd``
        in the returned warnings list so omni_status can surface it.
 
     Returns
@@ -2342,7 +2456,7 @@ def _get_workspace_root() -> Tuple[Path, str, List[str]]:
     """
     warnings: List[str] = []
 
-    # 1. Workspace registry — user-configured active bookmark.
+    # 1. Workspace registry 鈥?user-configured active bookmark.
     try:
         from omnicode_core.workspace import get_workspace_registry
         active = get_workspace_registry().get_active_path()
@@ -2355,7 +2469,7 @@ def _get_workspace_root() -> Tuple[Path, str, List[str]]:
         # fall through to the next source.
         pass
 
-    # 2. Settings.WORKING_DIR — pydantic-settings reads env then cwd.
+    # 2. Settings.WORKING_DIR 鈥?pydantic-settings reads env then cwd.
     try:
         from omnicode.config.settings import get_settings
         wd = get_settings().WORKING_DIR
@@ -2388,7 +2502,7 @@ def _resolve_workspace_path(
     response. The resolved path is returned to the caller for any
     downstream filesystem operation that needs the absolute form.
 
-    Empty / whitespace input also raises — patch tools must not silently
+    Empty / whitespace input also raises 鈥?patch tools must not silently
     accept "no file".
     """
     if not file or not str(file).strip():
@@ -2399,7 +2513,7 @@ def _resolve_workspace_path(
             f"absolute paths are not allowed: {file!r}. "
             "Use a workspace-relative path."
         )
-    # Reject ``..`` in any path component before resolving — resolve()
+    # Reject ``..`` in any path component before resolving 鈥?resolve()
     # would canonicalise it away and we'd lose the intent.
     if ".." in raw.parts:
         raise ValueError(
@@ -2431,7 +2545,7 @@ def _normalise_diff_text(diff: str) -> Tuple[str, bool]:
     if not diff:
         return "", False
     original = diff
-    # Step 1: CRLF → LF.
+    # Step 1: CRLF 鈫?LF.
     out = diff.replace("\r\n", "\n").replace("\r", "\n")
     # Step 2: collapse any run of >=2 blank lines that appears
     # *between* diff body lines into a single blank line. We never want
@@ -2512,7 +2626,7 @@ def _alias_path_guard_error(alias: str, file: str, exc: ValueError) -> Dict[str,
     deprecated alias (currently only omni_edit writes to disk). Reuses
     the same ValueError raised by :func:`_resolve_workspace_path` so the
     alias layer enforces the *exact* same workspace boundary as
-    omni_patch v2 — the alias can never be a bypass around the guard."""
+    omni_patch v2 鈥?the alias can never be a bypass around the guard."""
     replacement = _ALIAS_REPLACEMENTS.get(alias, "omni_patch")
     return _alias_envelope(alias, {
         "ok": False,
@@ -2535,7 +2649,7 @@ def _format_outline_text(
 ) -> str:
     """Compact text rendering of outline/symbols, used both for ``format=text``
     and for computing a representative token estimate."""
-    out = [f"📄 {file} ({total_lines} lines, {language})"]
+    out = [f"馃搫 {file} ({total_lines} lines, {language})"]
     for s in symbols:
         name = s.get("name", "?")
         kind = s.get("kind") or s.get("type") or "symbol"
@@ -2545,7 +2659,7 @@ def _format_outline_text(
             sl = s.get("line_start", 0)
             el = s.get("line_end", 0)
         parent = s.get("parent") or ""
-        prefix = "  └─ " if parent else ""
+        prefix = "  鈹斺攢 " if parent else ""
         out.append(f"{prefix}{kind} {name}  [L{sl}-{el}]")
         if mode == "outline":
             sig = (s.get("signature") or "")[:150]
@@ -2553,21 +2667,21 @@ def _format_outline_text(
             if sig:
                 out.append(f"     {sig}")
             if doc:
-                out.append(f"     📝 {doc}")
+                out.append(f"     馃摑 {doc}")
     return "\n".join(out)
 
 
 # ---------------------------------------------------------------------------
-# discover_tools — Tool Intent Registry
+# discover_tools 鈥?Tool Intent Registry
 # ---------------------------------------------------------------------------
 #
 # Two-layer matcher used by ``discover_tools``:
 #
-# 1. **Tool catalogue** — name + one-line description + scenario string +
+# 1. **Tool catalogue** 鈥?name + one-line description + scenario string +
 #    EN/ZH keyword lists + deprecation flag.  Keyword tokens score the
 #    tool when they appear in the (tokenised) query.
 #
-# 2. **Intent registry** — small, language-agnostic intent records.  Each
+# 2. **Intent registry** 鈥?small, language-agnostic intent records.  Each
 #    intent has a stable ID, recommended tools, language-specific
 #    pattern lists (``patterns.en`` / ``patterns.zh``), and a suggested
 #    pipeline rendered after a top match.  Intents fire when at least
@@ -2581,7 +2695,7 @@ def _format_outline_text(
 _TOOL_CATALOGUE: List[Dict[str, Any]] = [
     {
         "name": "omni_context",
-        "desc": "Composer — outline + impact + memory + git in one call",
+        "desc": "Composer 鈥?outline + impact + memory + git in one call",
         "scenario": (
             "First call when starting a task; aggregates outline / impact / "
             "memory / git into one response with a token_budget."
@@ -2592,8 +2706,8 @@ _TOOL_CATALOGUE: List[Dict[str, Any]] = [
             "investigate", "explore", "what does",
         ],
         "keywords_zh": [
-            "上下文", "理解", "梳理", "概览", "先看",
-            "了解", "调研", "起点",
+            "涓婁笅鏂?, "鐞嗚В", "姊崇悊", "姒傝", "鍏堢湅",
+            "浜嗚В", "璋冪爺", "璧风偣",
         ],
         "deprecated": False,
     },
@@ -2611,8 +2725,8 @@ _TOOL_CATALOGUE: List[Dict[str, Any]] = [
             "semantic", "hybrid", "rrf", "fuzzy", "text",
         ],
         "keywords_zh": [
-            "搜索", "查找", "找到", "定位", "符号", "函数", "方法",
-            "类", "引用", "使用", "调用方", "查找", "搜寻",
+            "鎼滅储", "鏌ユ壘", "鎵惧埌", "瀹氫綅", "绗﹀彿", "鍑芥暟", "鏂规硶",
+            "绫?, "寮曠敤", "浣跨敤", "璋冪敤鏂?, "鏌ユ壘", "鎼滃",
         ],
         "deprecated": False,
     },
@@ -2633,14 +2747,14 @@ _TOOL_CATALOGUE: List[Dict[str, Any]] = [
             "definition", "what does", "implementation",
         ],
         "keywords_zh": [
-            "读取", "查看", "打开", "显示", "概要", "结构",
-            "签名", "导入", "实现", "函数体",
+            "璇诲彇", "鏌ョ湅", "鎵撳紑", "鏄剧ず", "姒傝", "缁撴瀯",
+            "绛惧悕", "瀵煎叆", "瀹炵幇", "鍑芥暟浣?,
         ],
         "deprecated": False,
     },
     {
         "name": "omni_impact",
-        "desc": "Blast radius — callers/callees/risk/suggested tests",
+        "desc": "Blast radius 鈥?callers/callees/risk/suggested tests",
         "scenario": (
             "Before any non-trivial edit; reports risk level + callers + "
             "callees + recommended tests."
@@ -2652,8 +2766,8 @@ _TOOL_CATALOGUE: List[Dict[str, Any]] = [
             "safe to change", "ripple", "graph",
         ],
         "keywords_zh": [
-            "影响", "影响范围", "风险", "调用方", "依赖",
-            "评估", "改动前", "修改前", "回归", "波及",
+            "褰卞搷", "褰卞搷鑼冨洿", "椋庨櫓", "璋冪敤鏂?, "渚濊禆",
+            "璇勪及", "鏀瑰姩鍓?, "淇敼鍓?, "鍥炲綊", "娉㈠強",
         ],
         "deprecated": False,
     },
@@ -2671,8 +2785,8 @@ _TOOL_CATALOGUE: List[Dict[str, Any]] = [
             "issues", "problems",
         ],
         "keywords_zh": [
-            "检查", "诊断", "lint", "类型", "类型错误",
-            "静态分析", "错误", "警告", "问题", "类型检查",
+            "妫€鏌?, "璇婃柇", "lint", "绫诲瀷", "绫诲瀷閿欒",
+            "闈欐€佸垎鏋?, "閿欒", "璀﹀憡", "闂", "绫诲瀷妫€鏌?,
         ],
         "deprecated": False,
     },
@@ -2689,8 +2803,8 @@ _TOOL_CATALOGUE: List[Dict[str, Any]] = [
             "store", "save", "note",
         ],
         "keywords_zh": [
-            "记忆", "回忆", "历史", "经验", "教训",
-            "记下", "保存", "建议", "记录",
+            "璁板繂", "鍥炲繂", "鍘嗗彶", "缁忛獙", "鏁欒",
+            "璁颁笅", "淇濆瓨", "寤鸿", "璁板綍",
         ],
         "deprecated": False,
     },
@@ -2698,7 +2812,7 @@ _TOOL_CATALOGUE: List[Dict[str, Any]] = [
         "name": "omni_patch",
         "desc": "Safe edit (preview / validate / apply / rollback / sessions)",
         "scenario": (
-            "Never write to disk directly; always go preview → validate → "
+            "Never write to disk directly; always go preview 鈫?validate 鈫?"
             "apply, keep session_id for rollback."
         ),
         "keywords_en": [
@@ -2708,17 +2822,17 @@ _TOOL_CATALOGUE: List[Dict[str, Any]] = [
             "undo", "safely", "safe edit",
         ],
         "keywords_zh": [
-            "修改", "编辑", "改动", "重构", "修复",
-            "预览", "验证", "应用", "回滚", "撤销",
-            "安全修改", "改写", "落盘", "差异",
+            "淇敼", "缂栬緫", "鏀瑰姩", "閲嶆瀯", "淇",
+            "棰勮", "楠岃瘉", "搴旂敤", "鍥炴粴", "鎾ら攢",
+            "瀹夊叏淇敼", "鏀瑰啓", "钀界洏", "宸紓",
         ],
         "deprecated": False,
     },
     {
         "name": "omni_skill",
-        "desc": "Discover packaged workflow recipes (impact-review, safe-refactor, …)",
+        "desc": "Discover packaged workflow recipes (impact-review, safe-refactor, 鈥?",
         "scenario": (
-            "Look up a multi-step recipe before improvising — recipes "
+            "Look up a multi-step recipe before improvising 鈥?recipes "
             "bundle the right tool sequence."
         ),
         "keywords_en": [
@@ -2726,20 +2840,20 @@ _TOOL_CATALOGUE: List[Dict[str, Any]] = [
             "how to", "best practice", "pipeline",
         ],
         "keywords_zh": [
-            "流程", "配方", "工作流", "指南", "最佳实践",
-            "套路", "模板",
+            "娴佺▼", "閰嶆柟", "宸ヤ綔娴?, "鎸囧崡", "鏈€浣冲疄璺?,
+            "濂楄矾", "妯℃澘",
         ],
         "deprecated": False,
     },
     {
         "name": "discover_tools",
-        "desc": "Find what's available — keyword + intent based",
+        "desc": "Find what's available 鈥?keyword + intent based",
         "scenario": "When unsure which tool fits the task.",
         "keywords_en": ["discover", "tools", "what tools", "available"],
-        "keywords_zh": ["发现", "工具", "有哪些"],
+        "keywords_zh": ["鍙戠幇", "宸ュ叿", "鏈夊摢浜?],
         "deprecated": False,
     },
-    # Deprecated aliases — only matched when user names them explicitly.
+    # Deprecated aliases 鈥?only matched when user names them explicitly.
     {
         "name": "omni_analyze",
         "desc": "[deprecated alias] Use omni_impact",
@@ -2781,13 +2895,13 @@ _INTENT_REGISTRY: List[Dict[str, Any]] = [
             "preview the diff", "rollback", "undo",
         ],
         "patterns_zh": [
-            "安全修改", "安全编辑", "预览", "验证", "回滚",
-            "撤销", "落盘前", "改完回滚",
+            "瀹夊叏淇敼", "瀹夊叏缂栬緫", "棰勮", "楠岃瘉", "鍥炴粴",
+            "鎾ら攢", "钀界洏鍓?, "鏀瑰畬鍥炴粴",
         ],
         "keywords_en": [
             "preview", "validate", "apply", "rollback", "diff", "revert", "undo",
         ],
-        "keywords_zh": ["预览", "验证", "应用", "回滚", "撤销", "差异"],
+        "keywords_zh": ["棰勮", "楠岃瘉", "搴旂敤", "鍥炴粴", "鎾ら攢", "宸紓"],
         "why_label": "intent:safe_patch_flow",
         "suggested_pipeline_kind": "safe_patch",
     },
@@ -2801,12 +2915,12 @@ _INTENT_REGISTRY: List[Dict[str, Any]] = [
             "callsites of", "all callers", "cross-file references",
         ],
         "patterns_zh": [
-            "查找引用", "查找所有引用", "所有引用",
-            "调用了", "在哪里使用", "在哪里被调用",
-            "谁调用了", "跨文件引用", "调用点",
+            "鏌ユ壘寮曠敤", "鏌ユ壘鎵€鏈夊紩鐢?, "鎵€鏈夊紩鐢?,
+            "璋冪敤浜?, "鍦ㄥ摢閲屼娇鐢?, "鍦ㄥ摢閲岃璋冪敤",
+            "璋佽皟鐢ㄤ簡", "璺ㄦ枃浠跺紩鐢?, "璋冪敤鐐?,
         ],
         "keywords_en": ["references", "usages", "callsites", "callsite"],
-        "keywords_zh": ["引用", "调用方", "使用处", "调用点"],
+        "keywords_zh": ["寮曠敤", "璋冪敤鏂?, "浣跨敤澶?, "璋冪敤鐐?],
         "why_label": "intent:find_references",
         "suggested_pipeline_kind": "understanding",
     },
@@ -2820,15 +2934,15 @@ _INTENT_REGISTRY: List[Dict[str, Any]] = [
             "what will break", "who depends on",
         ],
         "patterns_zh": [
-            "影响范围", "影响分析", "风险评估", "改动前",
-            "修改前", "改之前", "波及范围", "依赖分析",
-            "改了会影响", "影响和风险",
+            "褰卞搷鑼冨洿", "褰卞搷鍒嗘瀽", "椋庨櫓璇勪及", "鏀瑰姩鍓?,
+            "淇敼鍓?, "鏀逛箣鍓?, "娉㈠強鑼冨洿", "渚濊禆鍒嗘瀽",
+            "鏀逛簡浼氬奖鍝?, "褰卞搷鍜岄闄?,
         ],
         "keywords_en": [
             "risk", "impact", "blast", "radius", "callers", "callees",
             "affected", "ripple", "depend",
         ],
-        "keywords_zh": ["影响", "风险", "依赖", "波及", "调用方"],
+        "keywords_zh": ["褰卞搷", "椋庨櫓", "渚濊禆", "娉㈠強", "璋冪敤鏂?],
         "why_label": "intent:risk_analysis",
         "suggested_pipeline_kind": "understanding",
     },
@@ -2843,18 +2957,18 @@ _INTENT_REGISTRY: List[Dict[str, Any]] = [
             "what does this function do", "investigate the file",
         ],
         "patterns_zh": [
-            "理解这个函数", "先理解", "先了解", "理解代码",
-            "修改前先", "在修改前", "修改函数前",
-            "了解一下", "搞清楚", "弄清楚",
-            "这个函数做什么", "这个方法做什么",
+            "鐞嗚В杩欎釜鍑芥暟", "鍏堢悊瑙?, "鍏堜簡瑙?, "鐞嗚В浠ｇ爜",
+            "淇敼鍓嶅厛", "鍦ㄤ慨鏀瑰墠", "淇敼鍑芥暟鍓?,
+            "浜嗚В涓€涓?, "鎼炴竻妤?, "寮勬竻妤?,
+            "杩欎釜鍑芥暟鍋氫粈涔?, "杩欎釜鏂规硶鍋氫粈涔?,
         ],
         "keywords_en": [
             "understand", "investigate", "explore", "context",
             "function", "method", "class", "symbol", "code", "file",
         ],
         "keywords_zh": [
-            "理解", "了解", "调研", "上下文", "函数",
-            "方法", "类", "符号",
+            "鐞嗚В", "浜嗚В", "璋冪爺", "涓婁笅鏂?, "鍑芥暟",
+            "鏂规硶", "绫?, "绗﹀彿",
         ],
         "why_label": "intent:understand_before_edit",
         "suggested_pipeline_kind": "understanding",
@@ -2869,19 +2983,19 @@ _INTENT_REGISTRY: List[Dict[str, Any]] = [
             "any errors", "any warnings",
         ],
         "patterns_zh": [
-            "lint", "类型错误", "静态分析", "类型检查",
-            "lint错误", "lint 错误", "lint 或 类型",
-            "lint或类型", "lint 或 类型错误",
-            "有没有错误", "有没有警告", "有没有问题",
-            "检查错误", "检查文件", "检查这个文件",
+            "lint", "绫诲瀷閿欒", "闈欐€佸垎鏋?, "绫诲瀷妫€鏌?,
+            "lint閿欒", "lint 閿欒", "lint 鎴?绫诲瀷",
+            "lint鎴栫被鍨?, "lint 鎴?绫诲瀷閿欒",
+            "鏈夋病鏈夐敊璇?, "鏈夋病鏈夎鍛?, "鏈夋病鏈夐棶棰?,
+            "妫€鏌ラ敊璇?, "妫€鏌ユ枃浠?, "妫€鏌ヨ繖涓枃浠?,
         ],
         "keywords_en": [
             "diagnostics", "lint", "linter", "type", "typecheck",
             "mypy", "ruff", "eslint", "tsc", "errors", "warnings", "issues",
         ],
         "keywords_zh": [
-            "检查", "诊断", "类型", "错误", "警告", "问题",
-            "lint", "类型检查",
+            "妫€鏌?, "璇婃柇", "绫诲瀷", "閿欒", "璀﹀憡", "闂",
+            "lint", "绫诲瀷妫€鏌?,
         ],
         "why_label": "intent:diagnostics_check",
         "suggested_pipeline_kind": None,
@@ -2895,14 +3009,14 @@ _INTENT_REGISTRY: List[Dict[str, Any]] = [
             "remember", "advisory", "recall",
         ],
         "patterns_zh": [
-            "记得", "回忆", "之前的", "以前的", "经验",
-            "教训", "建议", "历史上",
+            "璁板緱", "鍥炲繂", "涔嬪墠鐨?, "浠ュ墠鐨?, "缁忛獙",
+            "鏁欒", "寤鸿", "鍘嗗彶涓?,
         ],
         "keywords_en": [
             "memory", "recall", "remember", "lesson", "advisory",
             "history", "past", "previous",
         ],
-        "keywords_zh": ["记忆", "回忆", "经验", "历史", "建议"],
+        "keywords_zh": ["璁板繂", "鍥炲繂", "缁忛獙", "鍘嗗彶", "寤鸿"],
         "why_label": "intent:memory_advisory",
         "suggested_pipeline_kind": None,
     },
@@ -2915,10 +3029,10 @@ _INTENT_REGISTRY: List[Dict[str, Any]] = [
             "how should i", "playbook",
         ],
         "patterns_zh": [
-            "最佳实践", "推荐流程", "怎么做", "套路", "工作流",
+            "鏈€浣冲疄璺?, "鎺ㄨ崘娴佺▼", "鎬庝箞鍋?, "濂楄矾", "宸ヤ綔娴?,
         ],
         "keywords_en": ["recipe", "workflow", "playbook", "skill"],
-        "keywords_zh": ["流程", "套路", "工作流", "配方", "指南"],
+        "keywords_zh": ["娴佺▼", "濂楄矾", "宸ヤ綔娴?, "閰嶆柟", "鎸囧崡"],
         "why_label": "intent:workflow_recipe",
         "suggested_pipeline_kind": None,
     },
@@ -2926,29 +3040,29 @@ _INTENT_REGISTRY: List[Dict[str, Any]] = [
 
 
 _DEFAULT_PIPELINE = [
-    "1. omni_skill(action='list')             — see if a recipe exists",
-    "2. omni_context(file=… or task=…)       — gather outline + impact + memory + git",
-    "3. omni_impact(symbol=…)                — check blast radius before editing",
-    "4. omni_diagnostics(file=…)             — see existing lint/type issues",
-    "5. omni_search(mode='references', …)    — find every callsite of the symbol",
-    "6. omni_patch(action='preview', …)      — render the diff",
-    "7. omni_patch(action='validate', …)     — run static checks on the patch",
-    "8. omni_patch(action='apply', …)        — write + create rollback hook",
-    "9. omni_patch(action='rollback', session_id=…)  — undo on regret",
+    "1. omni_skill(action='list')             鈥?see if a recipe exists",
+    "2. omni_context(file=鈥?or task=鈥?       鈥?gather outline + impact + memory + git",
+    "3. omni_impact(symbol=鈥?                鈥?check blast radius before editing",
+    "4. omni_diagnostics(file=鈥?             鈥?see existing lint/type issues",
+    "5. omni_search(mode='references', 鈥?    鈥?find every callsite of the symbol",
+    "6. omni_patch(action='preview', 鈥?      鈥?render the diff",
+    "7. omni_patch(action='validate', 鈥?     鈥?run static checks on the patch",
+    "8. omni_patch(action='apply', 鈥?        鈥?write + create rollback hook",
+    "9. omni_patch(action='rollback', session_id=鈥?  鈥?undo on regret",
 ]
 
 _SAFE_PATCH_PIPELINE = [
-    "1. omni_patch(action='preview', file=…, content=…)",
-    "2. omni_patch(action='validate', file=…, content=…)",
-    "3. omni_patch(action='apply', file=…, content=…)",
-    "4. omni_patch(action='rollback', session_id=…)  # if needed",
+    "1. omni_patch(action='preview', file=鈥? content=鈥?",
+    "2. omni_patch(action='validate', file=鈥? content=鈥?",
+    "3. omni_patch(action='apply', file=鈥? content=鈥?",
+    "4. omni_patch(action='rollback', session_id=鈥?  # if needed",
 ]
 
 _UNDERSTANDING_PIPELINE = [
-    "1. omni_context(task=… or file=…)",
-    "2. omni_search(mode='references', query=…)",
-    "3. omni_read(file=…, mode='symbol', symbol=…)",
-    "4. omni_impact(symbol=…)",
+    "1. omni_context(task=鈥?or file=鈥?",
+    "2. omni_search(mode='references', query=鈥?",
+    "3. omni_read(file=鈥? mode='symbol', symbol=鈥?",
+    "4. omni_impact(symbol=鈥?",
 ]
 
 # Stop-words for tokenisation. EN + a small set of CN stop characters /
@@ -2961,8 +3075,8 @@ _DISCOVER_STOPWORDS = {
     "has", "had", "but", "so", "as", "at", "by", "from", "into",
     "what", "which", "how",
     # Chinese function words (each entry will be tested whole, not as substring)
-    "我", "想", "要", "在", "的", "了", "有", "和", "与",
-    "请", "把", "让", "对", "这", "那", "它",
+    "鎴?, "鎯?, "瑕?, "鍦?, "鐨?, "浜?, "鏈?, "鍜?, "涓?,
+    "璇?, "鎶?, "璁?, "瀵?, "杩?, "閭?, "瀹?,
 }
 
 
@@ -2981,7 +3095,7 @@ def _phrase_in_query(phrase: str, query_lower: str) -> bool:
     """Whether ``phrase`` appears verbatim in the lower-cased query.
 
     For CJK phrases we additionally try a whitespace-stripped form so
-    casual typing like ``查找  这个 函数`` still matches ``查找这个函数``.
+    casual typing like ``鏌ユ壘  杩欎釜 鍑芥暟`` still matches ``鏌ユ壘杩欎釜鍑芥暟``.
     """
     p = phrase.lower().strip()
     if not p:
@@ -3027,7 +3141,7 @@ def _recommend_tools_payload(
             "falling back to rule-based matching."
         )
 
-    # Empty / whitespace-only query → default listing.
+    # Empty / whitespace-only query 鈫?default listing.
     if not (query and query.strip()):
         non_deprecated = [t for t in _TOOL_CATALOGUE if not t["deprecated"]]
         return {
@@ -3183,7 +3297,7 @@ def _recommend_tools_payload(
 def _recommend_tools(query: str, *, matcher: str = "rule") -> str:
     """Return the rendered ``discover_tools`` response for ``query``.
 
-    Pure function — easy to unit test.  The MCP tool wrapper just
+    Pure function 鈥?easy to unit test.  The MCP tool wrapper just
     forwards to this helper.
 
     ``matcher='rule'`` (the default) is the only implemented backend
@@ -3191,14 +3305,14 @@ def _recommend_tools(query: str, *, matcher: str = "rule") -> str:
     semantic backend can plug in without changing the call surface;
     requesting it falls back to ``rule`` with a note in the response.
     """
-    # Empty / whitespace-only query → unchanged default listing.
+    # Empty / whitespace-only query 鈫?unchanged default listing.
     if not (query and query.strip()):
         non_deprecated = [t for t in _TOOL_CATALOGUE if not t["deprecated"]]
-        lines = ["📦 OmniCode tools:\n"]
+        lines = ["馃摝 OmniCode tools:\n"]
         for t in non_deprecated:
-            lines.append(f"  • {t['name']:<18} {t['desc']}")
+            lines.append(f"  鈥?{t['name']:<18} {t['desc']}")
         lines.append("")
-        lines.append("💡 Recommended flow before any edit:")
+        lines.append("馃挕 Recommended flow before any edit:")
         for step in _DEFAULT_PIPELINE:
             lines.append(f"   {step}")
         return "\n".join(lines)
@@ -3206,7 +3320,7 @@ def _recommend_tools(query: str, *, matcher: str = "rule") -> str:
     matcher_note = ""
     if matcher and matcher.lower() == "embedding":
         matcher_note = (
-            "\n\n📝 Note: matcher='embedding' is reserved for a future "
+            "\n\n馃摑 Note: matcher='embedding' is reserved for a future "
             "backend; falling back to rule-based matching."
         )
 
@@ -3279,30 +3393,30 @@ def _recommend_tools(query: str, *, matcher: str = "rule") -> str:
     # ---- 4) Zero match fallback ----------------------------------------
     if not scores:
         lines = [
-            f"🔍 No direct keyword match for '{query}'.",
+            f"馃攳 No direct keyword match for '{query}'.",
             "",
-            "📦 Showing default tool listing — pick one of:",
+            "馃摝 Showing default tool listing 鈥?pick one of:",
             "",
         ]
         for t in _TOOL_CATALOGUE:
             if t["deprecated"]:
                 continue
-            lines.append(f"  • {t['name']:<18} {t['desc']}")
+            lines.append(f"  鈥?{t['name']:<18} {t['desc']}")
         lines.append("")
-        lines.append("💡 Default workflow before any edit:")
+        lines.append("馃挕 Default workflow before any edit:")
         for step in _DEFAULT_PIPELINE:
             lines.append(f"   {step}")
         return "\n".join(lines) + matcher_note
 
     ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
     info_by_name = {t["name"]: t for t in _TOOL_CATALOGUE}
-    lines = [f"🔍 Tools matching '{query}' (ranked):\n"]
+    lines = [f"馃攳 Tools matching '{query}' (ranked):\n"]
     for name, score in ranked[:6]:
         info = info_by_name[name]
-        tag = " ⚠️ deprecated alias" if info.get("deprecated") else ""
-        lines.append(f"  • {name}{tag}  (score={score})")
+        tag = " 鈿狅笍 deprecated alias" if info.get("deprecated") else ""
+        lines.append(f"  鈥?{name}{tag}  (score={score})")
         lines.append(f"      {info['desc']}")
-        lines.append(f"      ↳ {info['scenario']}")
+        lines.append(f"      鈫?{info['scenario']}")
         if why.get(name):
             shown = ", ".join(why[name][:4])
             lines.append(f"      why_matched: {shown}")
@@ -3312,13 +3426,13 @@ def _recommend_tools(query: str, *, matcher: str = "rule") -> str:
     top_name = ranked[0][0]
     pipeline_kind = pipeline_for_top.get(top_name)
     if pipeline_kind == "safe_patch" or top_name == "omni_patch":
-        lines.append("💡 Safe edit pipeline:")
+        lines.append("馃挕 Safe edit pipeline:")
         for step in _SAFE_PATCH_PIPELINE:
             lines.append(f"   {step}")
     elif pipeline_kind == "understanding" or top_name in (
         "omni_context", "omni_impact", "omni_read", "omni_search",
     ):
-        lines.append("💡 Pre-edit understanding pipeline:")
+        lines.append("馃挕 Pre-edit understanding pipeline:")
         for step in _UNDERSTANDING_PIPELINE:
             lines.append(f"   {step}")
 
@@ -3333,26 +3447,26 @@ def _render_read_payload_text(payload: Dict[str, Any]) -> str:
     total = payload.get("total_lines", "?")
 
     if not payload.get("ok", True):
-        return f"❌ omni_read[{mode}] {file}: {payload.get('error', '')}"
+        return f"鉂?omni_read[{mode}] {file}: {payload.get('error', '')}"
 
     if mode in ("outline", "symbols"):
         return payload.get("content") or _format_outline_text(
             file, lang, total, payload.get("symbols") or [], mode,
         )
 
-    header = f"📄 {file}  [mode={mode}, {total} lines, {lang}]"
+    header = f"馃搫 {file}  [mode={mode}, {total} lines, {lang}]"
     if payload.get("truncated"):
-        header += "  ⚠️ truncated"
+        header += "  鈿狅笍 truncated"
     body = payload.get("content", "") or ""
     if mode == "diagnostics":
         diags = payload.get("diagnostics") or []
         if not diags:
-            return f"{header}\n✅ no diagnostics"
+            return f"{header}\n鉁?no diagnostics"
         body_lines = [header, ""]
         for d in diags[:30]:
             sev = (d.get("severity") or "").lower()
-            emoji = {"error": "❌", "warning": "⚠️", "info": "ℹ️", "hint": "💡"}.get(
-                sev, "•"
+            emoji = {"error": "鉂?, "warning": "鈿狅笍", "info": "鈩癸笍", "hint": "馃挕"}.get(
+                sev, "鈥?
             )
             anchor = f"L{d.get('line')}" if d.get("line") else "?"
             body_lines.append(
@@ -3403,17 +3517,6 @@ def register_high_level_tools(mcp, make_request):
 
         wanted = {s.strip() for s in (sources or "").split(",") if s.strip()}
 
-        if _path_has_parent_reference(file):
-            return {
-                "ok": False,
-                "file": file,
-                "error": (
-                    f"path-guard: path traversal is not allowed: {file!r}. "
-                    "Use a workspace-relative path without '..'."
-                ),
-                "next_actions": _path_guard_next_actions(file),
-            }
-
         tasks = []
         labels = []
         if "guard" in wanted:
@@ -3439,11 +3542,43 @@ def register_high_level_tools(mcp, make_request):
         all_issues: List[Dict[str, Any]] = []
         tools_run: List[str] = []
         tools_skipped: List[str] = []
+        # audit-bundle.r21 (P1): per-tool failure reasons. Pre-r21 the
+        # dispatcher silently appended a label to ``tools_run`` even
+        # when the backend returned an HTTP 5xx envelope, because the
+        # check ``isinstance(raw, Exception)`` only matched true Python
+        # exceptions and missed make_request's structured error dict.
+        # That made omni_diagnostics report ``counts={0,0,0,0}`` /
+        # "file is clean" while the backend was actually down. We now
+        # classify each tool result and refuse to fabricate a clean
+        # report when every requested source failed.
+        backend_failure_reasons: List[Dict[str, Any]] = []
         file_missing = False
 
         for label, raw in zip(labels, raws, strict=False):
             if isinstance(raw, Exception):
                 tools_skipped.append(label)
+                backend_failure_reasons.append({
+                    "tool": label,
+                    "reason": (
+                        f"{raw.__class__.__name__}: {raw}"
+                    ),
+                })
+                continue
+            # audit-bundle.r21: detect make_request's HTTP-error
+            # envelope. The wrapper returns dicts of shape
+            # {"error": ..., "error_type": ..., "status_code": 5xx} on
+            # connection failures and 5xx responses, never raises. The
+            # legacy ``isinstance(raw, Exception)`` branch above did
+            # not catch this, so the loop fell through and treated the
+            # error dict as ordinary data 鈥?appending the tool to
+            # tools_run with no issues.
+            if _is_backend_error_envelope(raw):
+                tools_skipped.append(label)
+                backend_failure_reasons.append({
+                    "tool": label,
+                    "reason": _backend_error_summary(raw),
+                    "status_code": raw.get("status_code"),
+                })
                 continue
             data = raw.get("result", raw) if isinstance(raw, dict) else {}
             if label == "guard":
@@ -3500,6 +3635,50 @@ def register_high_level_tools(mcp, make_request):
                 "error": f"File not found: {file}",
             }
 
+        # audit-bundle.r21 (P1 close, diagnostics.backend_unreachable_transparency):
+        # if every requested source failed (and the backend didn't tell
+        # us the file is missing), refuse to fabricate a "0 errors"
+        # report. The caller needs to know the diagnostics surface is
+        # unreliable right now.
+        if (
+            backend_failure_reasons
+            and not tools_run
+            and not all_issues
+            and labels  # at least one tool was attempted
+        ):
+            failed_summary = ", ".join(
+                f"{r['tool']}={r['reason']}"
+                for r in backend_failure_reasons
+            )
+            return {
+                "ok": False,
+                "file": file,
+                "error": (
+                    f"diagnostics blocked: backend unreachable "
+                    f"({failed_summary})"
+                ),
+                "backend_status": "degraded",
+                "severity_filter": severity,
+                "sources": list(wanted),
+                "source": list(wanted),
+                "tools_run": [],
+                "tools_skipped": list(tools_skipped),
+                "backend_failure_reasons": backend_failure_reasons,
+                "diagnostics": [],
+                "counts": {"error": 0, "warning": 0, "info": 0, "total": 0},
+                "truncated": False,
+                "total_count": 0,
+                "next_actions": [
+                    "Check the FastAPI backend is running and reachable; "
+                    "the diagnostics dispatcher could not run any of the "
+                    "requested sources.",
+                    "omni_status() to confirm the issue is on the backend "
+                    "side, not the MCP host.",
+                    "Retry once the backend has recovered; partial "
+                    "results are NOT trustworthy until then.",
+                ],
+            }
+
         # Filter by severity.
         sev = (severity or "all").lower().strip()
         if sev not in ("all", ""):
@@ -3546,11 +3725,20 @@ def register_high_level_tools(mcp, make_request):
             "severity_filter": severity,
             "sources": list(wanted),
             # ``source`` (singular) added in audit-bundle.r14 for contract
-            # parity with omni_search / omni_impact / omni_patch — the
+            # parity with omni_search / omni_impact / omni_patch 鈥?the
             # plural ``sources`` is kept for back-compat. Same value.
             "source": list(wanted),
             "tools_run": tools_run,
             "tools_skipped": tools_skipped,
+            # audit-bundle.r21: surface partial-degradation context too.
+            # When at least one tool succeeded but another failed, the
+            # caller should know the report is incomplete.
+            "backend_failure_reasons": backend_failure_reasons,
+            "backend_status": (
+                "partial_degraded"
+                if backend_failure_reasons and tools_run
+                else "ok"
+            ),
             "diagnostics": shown,
             "counts": counts,
             "truncated": truncated,
@@ -3565,7 +3753,7 @@ def register_high_level_tools(mcp, make_request):
         a path resolved against ``_get_workspace_root()``. r11 live
         verification proved the MCP host's workspace root and the FastAPI
         backend's CWD can differ (host launched from one dir, backend
-        started from another) — in that case the local stat lied:
+        started from another) 鈥?in that case the local stat lied:
         ``omni_read`` happily read a file the markers reported as missing.
 
         This helper asks the *backend* whether it can see the file. We
@@ -3607,7 +3795,7 @@ def register_high_level_tools(mcp, make_request):
             envelope["file_marker_warning"] = "backend returned non-dict result"
             return envelope
 
-        # Option B passthrough — if a future backend cooperates and returns
+        # Option B passthrough 鈥?if a future backend cooperates and returns
         # explicit existence markers, prefer them over the success-flag
         # heuristic. Look for any of these keys on the response.
         explicit = None
@@ -3621,10 +3809,10 @@ def register_high_level_tools(mcp, make_request):
             envelope["new_file"] = not explicit
             envelope["file_marker_authoritative"] = True
         else:
-            # Option A — read-probe heuristic. The most robust signal is
+            # Option A 鈥?read-probe heuristic. The most robust signal is
             # "did the backend return readable content/structure for this
             # file?". If yes, it exists. If we got an explicit not-found
-            # error message, it doesn't exist. Anything else → null.
+            # error message, it doesn't exist. Anything else 鈫?null.
             success = data.get("success")
             error_msg = (data.get("error") or "").lower()
             has_payload = bool(
@@ -3639,7 +3827,7 @@ def register_high_level_tools(mcp, make_request):
                 "file not found",
             ))
             if has_payload:
-                # Backend returned a payload describing the file → exists.
+                # Backend returned a payload describing the file 鈫?exists.
                 # We accept this even when ``success`` is missing or
                 # explicitly false (some backends return success=false on
                 # outline when an optional symbol-index is unavailable
@@ -3654,7 +3842,7 @@ def register_high_level_tools(mcp, make_request):
                 envelope["file_marker_authoritative"] = True
                 envelope["file_marker_source"] = "backend_read_probe"
             elif success is True:
-                # success=True with no payload — file exists but is empty
+                # success=True with no payload 鈥?file exists but is empty
                 # or backend stripped the body. Still exists.
                 envelope["file_exists"] = True
                 envelope["new_file"] = False
@@ -3666,7 +3854,7 @@ def register_high_level_tools(mcp, make_request):
                     f"(success={success!r}, error={error_msg or 'none'!r})"
                 )
 
-        # Best-effort backend-root passthrough — if the backend exposes
+        # Best-effort backend-root passthrough 鈥?if the backend exposes
         # its resolved path or root anywhere on the response, surface it
         # so callers can spot a host/backend cwd mismatch.
         for key in (
@@ -3692,7 +3880,7 @@ def register_high_level_tools(mcp, make_request):
         audit-bundle.r13: lifted from inside ``omni_patch`` to the
         register-scope so deprecated aliases (currently only
         ``omni_edit``) can reuse the exact same validate logic and
-        contract that ``omni_patch`` enforces — no parallel implementation,
+        contract that ``omni_patch`` enforces 鈥?no parallel implementation,
         no semantic drift.
 
         Always returns a dict with at least:
@@ -3872,9 +4060,9 @@ def register_high_level_tools(mcp, make_request):
         Modes:
           - auto:       rule-based pick across {symbol, text, hybrid, semantic}
           - hybrid:     run symbol + semantic in parallel, fuse with RRF
-          - semantic:   natural language → code (FAISS bi-encoder + optional rerank)
+          - semantic:   natural language 鈫?code (FAISS bi-encoder + optional rerank)
           - symbol:     fuzzy symbol-name matching across functions/classes/methods
-          - text:       line-level grep (returns real line numbers + ±2 lines context)
+          - text:       line-level grep (returns real line numbers + 卤2 lines context)
           - references: find definitions and usages of a symbol. Uses LSP
                         when available; falls back to AST symbol index and
                         text grep when LSP is unavailable. Each result
@@ -3900,7 +4088,7 @@ def register_high_level_tools(mcp, make_request):
                            rows so AI editors can parse the result programmatically.
 
         Returns plain text in a structured layout: per-result file + line, kind,
-        score, why_matched tags, and (when budget allows) ±2 lines of code.
+        score, why_matched tags, and (when budget allows) 卤2 lines of code.
 
         On 0 hits the tool suggests alternative modes and broader queries.
         """
@@ -3929,12 +4117,12 @@ def register_high_level_tools(mcp, make_request):
                     _stamp(payload, tool="omni_search")
                     return json.dumps(payload, ensure_ascii=False, default=str)
                 return (
-                    f"❌ Unknown search mode: {mode}.\n"
+                    f"鉂?Unknown search mode: {mode}.\n"
                     f"   Use one of: {', '.join(_SEARCH_VALID_MODES)}"
                 )
 
             # Strip a single matching pair of outer quotes for backends that
-            # treat ``"foo"`` as a literal — text/symbol/semantic all want the
+            # treat ``"foo"`` as a literal 鈥?text/symbol/semantic all want the
             # bare phrase. We keep the original ``query`` for rendering so the
             # user still sees their literal in the header.
             effective_query = _strip_quotes(query.strip()).strip() if query else query
@@ -3945,26 +4133,56 @@ def register_high_level_tools(mcp, make_request):
             _references_meta: Dict[str, Any] = {}
 
             if resolved_mode == "hybrid":
-                results, total = await _run_hybrid(
-                    make_request, effective_query, file_pattern, max_results, rerank
-                )
+                try:
+                    results, total = await _run_hybrid(
+                        make_request, effective_query, file_pattern, max_results, rerank
+                    )
+                except _BackendUnreachableError as exc:
+                    return _backend_unreachable_search_envelope(
+                        query=query, requested_mode=mode,
+                        resolved_mode=resolved_mode, exc=exc, is_json=(fmt == 'json'),
+                    )
             elif resolved_mode == "semantic":
-                results, total = await _run_semantic(
-                    make_request, effective_query, file_pattern, max_results, rerank
-                )
+                try:
+                    results, total = await _run_semantic(
+                        make_request, effective_query, file_pattern, max_results, rerank
+                    )
+                except _BackendUnreachableError as exc:
+                    return _backend_unreachable_search_envelope(
+                        query=query, requested_mode=mode,
+                        resolved_mode=resolved_mode, exc=exc, is_json=(fmt == 'json'),
+                    )
             elif resolved_mode == "symbol":
-                results, total = await _run_symbol(
-                    make_request, effective_query, file_pattern, max_results
-                )
+                try:
+                    results, total = await _run_symbol(
+                        make_request, effective_query, file_pattern, max_results
+                    )
+                except _BackendUnreachableError as exc:
+                    return _backend_unreachable_search_envelope(
+                        query=query, requested_mode=mode,
+                        resolved_mode=resolved_mode, exc=exc, is_json=(fmt == 'json'),
+                    )
             elif resolved_mode == "text":
-                results, total = await _run_text(
-                    make_request, effective_query, file_pattern, max_results,
-                    flat=flat,
-                )
+                try:
+                    results, total = await _run_text(
+                        make_request, effective_query, file_pattern, max_results,
+                        flat=flat,
+                    )
+                except _BackendUnreachableError as exc:
+                    return _backend_unreachable_search_envelope(
+                        query=query, requested_mode=mode,
+                        resolved_mode=resolved_mode, exc=exc, is_json=(fmt == 'json'),
+                    )
             elif resolved_mode == "references":
-                results, total, _ref_meta = await _run_references(
-                    make_request, effective_query, max_results
-                )
+                try:
+                    results, total, _ref_meta = await _run_references(
+                        make_request, effective_query, max_results
+                    )
+                except _BackendUnreachableError as exc:
+                    return _backend_unreachable_search_envelope(
+                        query=query, requested_mode=mode,
+                        resolved_mode=resolved_mode, exc=exc, is_json=(fmt == 'json'),
+                    )
                 # Stash for the JSON envelope below.
                 _references_meta = _ref_meta
             else:  # pragma: no cover - guarded by the up-front mode check
@@ -3985,7 +4203,7 @@ def register_high_level_tools(mcp, make_request):
                 if resolved_mode != "references":
                     for orig, out in zip(results[:max_results], structured, strict=False):
                         # _to_structured already copies source/confidence
-                        # if the backend filled them — only synthesize when
+                        # if the backend filled them 鈥?only synthesize when
                         # they are blank, so a backend that does its own
                         # tagging (e.g. future LSP-aware text search) wins.
                         if not out.get("source") or not out.get("confidence"):
@@ -4033,7 +4251,7 @@ def register_high_level_tools(mcp, make_request):
                     # ---- audit-bundle.r16 (P3-B): LSP probe transparency.
                     # Surface what was tried and why we fell back, so AI
                     # editors don't mistake "text_grep low" for "LSP not
-                    # tried" — we *did* try LSP.
+                    # tried" 鈥?we *did* try LSP.
                     if _references_meta:
                         payload["lsp_attempted"] = bool(
                             _references_meta.get("lsp_attempted")
@@ -4059,7 +4277,7 @@ def register_high_level_tools(mcp, make_request):
 
                 # ---- audit-bundle.r18 (P2): next_actions for the
                 # search success path. Pre-r18 the JSON envelope had no
-                # ``next_actions`` — Round 9 found that the only tool
+                # ``next_actions`` 鈥?Round 9 found that the only tool
                 # in the eight-tool surface without a follow-up nudge.
                 # We branch on the resolved mode and the quality of the
                 # top-scoring hit so the AI editor sees the most useful
@@ -4110,7 +4328,7 @@ def register_high_level_tools(mcp, make_request):
                             % top_symbol
                         )
                     elif fuzzy_count and structured:
-                        # Mostly fuzzy hits → caller probably mis-typed
+                        # Mostly fuzzy hits 鈫?caller probably mis-typed
                         # the symbol. Suggest references / text fallback.
                         next_actions.append(
                             "Top hits are fuzzy matches; if you meant the "
@@ -4192,16 +4410,16 @@ def register_high_level_tools(mcp, make_request):
 
                 # ---- audit-bundle.r17 (P1): token budget honesty.
                 # Pre-r17 the JSON path silently ignored ``token_budget``
-                # — it only affected text rendering. AI editors had no
+                # 鈥?it only affected text rendering. AI editors had no
                 # signal that a 20-result response was about to blow
                 # their budget. Now every JSON envelope carries:
                 #
-                #   * token_estimate — _approx_token_count of the
+                #   * token_estimate 鈥?_approx_token_count of the
                 #                      currently-assembled payload.
-                #   * truncated      — True iff token_budget > 0 and
+                #   * truncated      鈥?True iff token_budget > 0 and
                 #                      we trimmed any results to fit
                 #                      (NOT the post-trim estimate
-                #                      vs budget — once we trim, the
+                #                      vs budget 鈥?once we trim, the
                 #                      response IS truncated even if
                 #                      the new estimate fits).
                 #
@@ -4209,7 +4427,7 @@ def register_high_level_tools(mcp, make_request):
                 # we trim ``results`` (and the references-mode
                 # ``references[]`` mirror) from the lowest-relevance
                 # tail until we fit. The ``definition`` row is never
-                # dropped — losing the anchor would leave the caller
+                # dropped 鈥?losing the anchor would leave the caller
                 # without a usable result.
                 est_text = json.dumps(payload, ensure_ascii=False, default=str)
                 token_estimate = _approx_token_count(est_text)
@@ -4263,7 +4481,7 @@ def register_high_level_tools(mcp, make_request):
                             "or max_results=<smaller> to avoid trimming.",
                         ] + (existing_actions if isinstance(existing_actions, list) else [])
                 payload["token_estimate"] = token_estimate
-                # ``truncated`` reflects whether we actually trimmed —
+                # ``truncated`` reflects whether we actually trimmed 鈥?
                 # not the post-trim fit, which would lie about it.
                 payload["truncated"] = bool(
                     was_truncated
@@ -4290,7 +4508,7 @@ def register_high_level_tools(mcp, make_request):
             )
 
         except Exception as e:
-            return f"❌ Search failed: {e}"
+            return f"鉂?Search failed: {e}"
 
     @mcp.tool()
     async def omni_read(
@@ -4307,13 +4525,13 @@ def register_high_level_tools(mcp, make_request):
 
         Modes:
           - outline:          signatures + first docstring line (~90% token savings)
-          - symbols:          structured symbol list (name, kind, lines) — no code
+          - symbols:          structured symbol list (name, kind, lines) 鈥?no code
           - full:             complete file content (auto-truncated above ``max_tokens``)
           - imports:          import / require / use lines (AST-driven where possible)
           - diagnostics:      lint / type / static-analysis issues for this file
           - range:            slice ``[start_line .. end_line]`` (start_line REQUIRED)
           - symbol:           read a specific symbol by name
-          - relevant_chunks:  semantic top-K chunks of THIS file vs ``query`` —
+          - relevant_chunks:  semantic top-K chunks of THIS file vs ``query`` 鈥?
                               "RAG inside one file" (``query`` REQUIRED)
 
         Args:
@@ -4499,14 +4717,14 @@ def register_high_level_tools(mcp, make_request):
         max_files: int = 200,
         format: str = "json",
     ) -> str:
-        """Assess the blast radius of changing a symbol — required reading
+        """Assess the blast radius of changing a symbol 鈥?required reading
         before any non-trivial edit.
 
         Returns:
-          • risk level (low / medium / high / unknown) with the reasons,
-          • direct callers and callees,
-          • files affected,
-          • recommended tests to run after the change.
+          鈥?risk level (low / medium / high / unknown) with the reasons,
+          鈥?direct callers and callees,
+          鈥?files affected,
+          鈥?recommended tests to run after the change.
 
         Note on semantics:
           ``callers`` and ``callees`` are graph-level function
@@ -4516,16 +4734,16 @@ def register_high_level_tools(mcp, make_request):
           ``omni_search(mode='references')`` instead.
 
         Edge cases:
-          * Empty / whitespace ``symbol`` → structured ``ok=false``
+          * Empty / whitespace ``symbol`` 鈫?structured ``ok=false``
             error with a hint to call ``omni_search(mode='symbol')``
             first; no fake test list is returned.
-          * Symbol not found in the call graph → ``risk='unknown'``,
+          * Symbol not found in the call graph 鈫?``risk='unknown'``,
             ``confidence='low'``, empty caller/callee lists, and a
             note explaining why. We never inherit ``risk='low'`` from
             "no test coverage" for a symbol that isn't in the graph.
           * ``max_files`` smaller than the backend minimum is clamped
             up for the request and the response is truncated back to
-            the caller's value with ``truncated=true`` plus a note —
+            the caller's value with ``truncated=true`` plus a note 鈥?
             the public surface never leaks an HTTP 422.
 
         Combines /graph/impact + /graph/risk + /graph/related-tests in
@@ -4568,7 +4786,7 @@ def register_high_level_tools(mcp, make_request):
             return (
                 json.dumps(err, ensure_ascii=False, indent=2)
                 if (format or "json").lower() != "text"
-                else f"❌ {err['error']}"
+                else f"鉂?{err['error']}"
             )
 
         try:
@@ -4645,7 +4863,7 @@ def register_high_level_tools(mcp, make_request):
             # When the call graph yielded nothing, we MUST NOT inherit
             # risk='low' from the /graph/risk endpoint (which interprets
             # "no test coverage" as "low risk"). A symbol that isn't in
-            # the graph is genuinely unknown — pretending otherwise is
+            # the graph is genuinely unknown 鈥?pretending otherwise is
             # the dishonesty the audit flagged. ``confidence='low'``
             # plus ``risk='unknown'`` plus the note tells the agent to
             # confirm the symbol exists before trusting anything.
@@ -4676,10 +4894,10 @@ def register_high_level_tools(mcp, make_request):
                 # beyond what an AI editor can verify. Honest contract:
                 #
                 #   * tight + clean graph (<25 files, no builtin callees)
-                #     → ``high`` (we trust the graph)
-                #   * medium graph or some builtin noise → ``medium``
+                #     鈫?``high`` (we trust the graph)
+                #   * medium graph or some builtin noise 鈫?``medium``
                 #   * wide / noisy graph (>=50 files, OR many builtins)
-                #     → ``medium`` with a caveat string, NOT ``high``
+                #     鈫?``medium`` with a caveat string, NOT ``high``
                 #
                 # ``high`` should only be used when the graph result is
                 # the right precision for an AI editor to act on without
@@ -4810,20 +5028,20 @@ def register_high_level_tools(mcp, make_request):
                 return json.dumps(payload, ensure_ascii=False, indent=2)
 
             # ---------- text rendering (unchanged surface) ------------
-            badge = {"low": "🟢", "medium": "🟡", "high": "🔴"}.get(risk_level, "⚪")
-            lines = [f"💥 Impact: {symbol}\n"]
+            badge = {"low": "馃煝", "medium": "馃煛", "high": "馃敶"}.get(risk_level, "鈿?)
+            lines = [f"馃挜 Impact: {symbol}\n"]
             lines.append(f"   {badge} Risk: {risk_level}  (confidence: {confidence})")
             for reason in risk_reasons[:6]:
-                lines.append(f"      • {reason}")
+                lines.append(f"      鈥?{reason}")
 
             lines.append("")
-            lines.append(f"   ⬇️  Callees affected:  {len(callees)}")
+            lines.append(f"   猬囷笍  Callees affected:  {len(callees)}")
             for n in list(callees)[:8]:
-                lines.append(f"      → {n}")
-            lines.append(f"   ⬆️  Callers depending: {len(callers)}")
+                lines.append(f"      鈫?{n}")
+            lines.append(f"   猬嗭笍  Callers depending: {len(callers)}")
             for n in list(callers)[:8]:
-                lines.append(f"      ← {n}")
-            lines.append(f"   📁  Files in blast radius: {files_count}")
+                lines.append(f"      鈫?{n}")
+            lines.append(f"   馃搧  Files in blast radius: {files_count}")
             if files_truncated:
                 lines.append(
                     f"      (showing first {len(displayed_files)} of {files_count})"
@@ -4831,14 +5049,14 @@ def register_high_level_tools(mcp, make_request):
 
             if test_files:
                 lines.append("")
-                lines.append(f"   🧪 Suggested tests ({len(test_files)}):")
+                lines.append(f"   馃И Suggested tests ({len(test_files)}):")
                 for t in test_files[:6]:
-                    lines.append(f"      • {t}")
+                    lines.append(f"      鈥?{t}")
                 for cmd in suggested_cmds[:3]:
                     lines.append(f"      $ {cmd}")
             if impact_note:
                 lines.append("")
-                lines.append(f"   ⚠️  {impact_note}")
+                lines.append(f"   鈿狅笍  {impact_note}")
             return "\n".join(lines)
 
         except Exception as e:
@@ -4855,7 +5073,7 @@ def register_high_level_tools(mcp, make_request):
             return (
                 json.dumps(err, ensure_ascii=False, indent=2)
                 if (format or "json").lower() != "text"
-                else f"❌ omni_impact failed: {e}"
+                else f"鉂?omni_impact failed: {e}"
             )
 
     @mcp.tool()
@@ -4895,8 +5113,8 @@ def register_high_level_tools(mcp, make_request):
                 json.dumps(err, ensure_ascii=False, indent=2)
                 if (format or "json").lower() != "text"
                 else (
-                    "❌ omni_diagnostics requires a file path.\n"
-                    "   Workspace-wide aggregation is on the roadmap — "
+                    "鉂?omni_diagnostics requires a file path.\n"
+                    "   Workspace-wide aggregation is on the roadmap 鈥?"
                     "for now scope to a single file."
                 )
             )
@@ -4912,9 +5130,7 @@ def register_high_level_tools(mcp, make_request):
                 # can act without parsing the message string.
                 if "next_actions" not in payload:
                     err_lower = err_msg.lower()
-                    if _is_path_guard_error(err_msg) or _path_looks_unsafe(file):
-                        payload["next_actions"] = _path_guard_next_actions(file)
-                    elif "file not found" in err_lower or "not found" in err_lower:
+                    if "file not found" in err_lower or "not found" in err_lower:
                         payload["next_actions"] = [
                             "Check the workspace-relative path and retry.",
                             f"omni_read(file='{file}', mode='outline', format='json') "
@@ -4932,7 +5148,7 @@ def register_high_level_tools(mcp, make_request):
                 _stamp(payload, tool="omni_diagnostics")
                 if (format or "json").lower() != "text":
                     return json.dumps(payload, ensure_ascii=False, indent=2)
-                return f"❌ {err_msg}"
+                return f"鉂?{err_msg}"
 
             # ---------- audit-bundle.r14 (P2): top-level next_actions
             # Different next steps depending on whether issues were
@@ -4964,7 +5180,7 @@ def register_high_level_tools(mcp, make_request):
             next_actions: List[str] = []
             if error_count > 0:
                 next_actions.append(
-                    "Fix the listed errors first — they block omni_patch "
+                    "Fix the listed errors first 鈥?they block omni_patch "
                     "validate/apply if you try to write to this file."
                 )
                 if first_error_line:
@@ -4977,7 +5193,7 @@ def register_high_level_tools(mcp, make_request):
                     )
             elif warning_count > 0:
                 next_actions.append(
-                    "Address warnings opportunistically — they don't block "
+                    "Address warnings opportunistically 鈥?they don't block "
                     "omni_patch but are worth recording in omni_memory."
                 )
                 if first_error_line:
@@ -4995,7 +5211,7 @@ def register_high_level_tools(mcp, make_request):
                 )
             if diag_truncated:
                 next_actions.append(
-                    "Result truncated to first 25 issues — re-run with "
+                    "Result truncated to first 25 issues 鈥?re-run with "
                     "severity='error' to focus on blockers."
                 )
             next_actions.append(
@@ -5012,16 +5228,16 @@ def register_high_level_tools(mcp, make_request):
             total = payload.get("total_count", 0)
             truncated = payload.get("truncated", False)
             if not shown:
-                return f"✅ {file} — no diagnostics ({severity}, sources={sources})"
+                return f"鉁?{file} 鈥?no diagnostics ({severity}, sources={sources})"
             lines = [
-                f"🩺 Diagnostics for {file} "
+                f"馃┖ Diagnostics for {file} "
                 f"({total} issue{'' if total == 1 else 's'})\n"
             ]
             for it in shown:
                 emoji = {
-                    "error": "❌", "warning": "⚠️", "warn": "⚠️",
-                    "info": "ℹ️", "hint": "💡",
-                }.get((it.get("severity") or "").lower(), "•")
+                    "error": "鉂?, "warning": "鈿狅笍", "warn": "鈿狅笍",
+                    "info": "鈩癸笍", "hint": "馃挕",
+                }.get((it.get("severity") or "").lower(), "鈥?)
                 line_no = it.get("line")
                 col = it.get("column")
                 anchor = f"L{line_no}" if line_no else "?"
@@ -5043,7 +5259,7 @@ def register_high_level_tools(mcp, make_request):
             return (
                 json.dumps(err, ensure_ascii=False, indent=2)
                 if (format or "json").lower() != "text"
-                else f"❌ omni_diagnostics failed: {e}"
+                else f"鉂?omni_diagnostics failed: {e}"
             )
 
     @mcp.tool()
@@ -5056,7 +5272,7 @@ def register_high_level_tools(mcp, make_request):
         force: bool = False,
         force_reason: Optional[str] = None,
     ) -> str:
-        """Safe edit operations — never let an LLM write to disk directly.
+        """Safe edit operations 鈥?never let an LLM write to disk directly.
 
         Actions:
           - preview:   show a unified diff of what would change
@@ -5080,13 +5296,13 @@ def register_high_level_tools(mcp, make_request):
           ``apply`` runs the same backend ``/patch/validate`` that
           ``action='validate'`` calls. If it reports errors, apply
           short-circuits with ``ok=false``, ``validation_passed=false``
-          and the structured ``checks[]`` list — nothing hits disk.
+          and the structured ``checks[]`` list 鈥?nothing hits disk.
           Set ``force=True`` (with ``force_reason``) to override; the
           response then includes ``validation_bypassed=true`` and a
           warning in ``next_actions``.
 
         The recommended flow before any AI-driven edit is:
-        preview → validate → apply, then keep the returned session_id
+        preview 鈫?validate 鈫?apply, then keep the returned session_id
         in case you need to rollback.
         """
         is_json = (format or "json").lower() != "text"
@@ -5107,7 +5323,7 @@ def register_high_level_tools(mcp, make_request):
             return (
                 json.dumps(payload, ensure_ascii=False, indent=2)
                 if is_json
-                else f"❌ {msg}"
+                else f"鉂?{msg}"
             )
 
         # ---- Internal helpers (closures over make_request / _err) -------
@@ -5149,7 +5365,7 @@ def register_high_level_tools(mcp, make_request):
             # showed those two roots can differ when the host CWD and
             # the backend CWD are different processes; the backend probe
             # always agrees with what apply / read will actually see on
-            # disk. Markers are advisory — apply still creates files when
+            # disk. Markers are advisory 鈥?apply still creates files when
             # needed, the path guard above is the actual safety boundary.
             new_file: Optional[bool] = None
             marker_envelope: Optional[Dict[str, Any]] = None
@@ -5220,7 +5436,7 @@ def register_high_level_tools(mcp, make_request):
                         # downstream tools (validators, viewers) can
                         # treat it identically to a backend-rendered
                         # diff. The line count below counts content
-                        # lines only — the header is metadata, not a
+                        # lines only 鈥?the header is metadata, not a
                         # change.
                         synth_lines = [
                             "--- /dev/null",
@@ -5264,7 +5480,7 @@ def register_high_level_tools(mcp, make_request):
                             f"\n... ({len(synth_lines) - 80} more diff lines)"
                         )
                         return (
-                            f"📋 Preview (new file): {file}\n"
+                            f"馃搵 Preview (new file): {file}\n"
                             f"   +{len(content_lines)} / -0 lines "
                             f"(synthesized)\n\n"
                             f"{synth_diff}{tail}"
@@ -5312,7 +5528,7 @@ def register_high_level_tools(mcp, make_request):
                     f"\n... ({len(diff_lines) - 80} more diff lines)"
                 )
                 return (
-                    f"📋 Preview: {file}\n"
+                    f"馃搵 Preview: {file}\n"
                     f"   +{added} / -{removed} lines\n\n"
                     f"{diff}{tail}"
                 )
@@ -5356,7 +5572,7 @@ def register_high_level_tools(mcp, make_request):
                 if is_json:
                     return json.dumps(payload, ensure_ascii=False, indent=2)
                 lines = [
-                    f"{'✅' if v['validation_passed'] else '❌'} Validate: {file}",
+                    f"{'鉁? if v['validation_passed'] else '鉂?} Validate: {file}",
                 ]
                 if v["message"]:
                     lines.append(f"   {v['message']}")
@@ -5364,7 +5580,7 @@ def register_high_level_tools(mcp, make_request):
                     line_no = c.get("line")
                     anchor = f"L{line_no}" if line_no else "?"
                     lines.append(
-                        f"   • [{c.get('severity', '?')}] {anchor} "
+                        f"   鈥?[{c.get('severity', '?')}] {anchor} "
                         f"{c.get('source', '?')}/{c.get('rule', '-') or '-'}: "
                         f"{c.get('message', '')}"
                     )
@@ -5377,7 +5593,7 @@ def register_high_level_tools(mcp, make_request):
                 if not file or content is None:
                     return _err("omni_patch apply needs both file and content.")
 
-                # Validate gate — runs by default, refuses on errors
+                # Validate gate 鈥?runs by default, refuses on errors
                 # unless the caller set force=True with a reason.
                 v = await _do_validate(file, content)
                 if not v["validation_passed"] and not force:
@@ -5408,7 +5624,7 @@ def register_high_level_tools(mcp, make_request):
                     if is_json:
                         return json.dumps(err_payload, ensure_ascii=False, indent=2)
                     return (
-                        f"❌ Apply blocked: validation failed "
+                        f"鉂?Apply blocked: validation failed "
                         f"({v['counts']['error']} error(s), "
                         f"{v['counts']['warning']} warning(s)). "
                         f"Fix and retry."
@@ -5456,19 +5672,19 @@ def register_high_level_tools(mcp, make_request):
                 }
                 if not v["validation_passed"] and force:
                     payload["next_actions"].insert(0, (
-                        "⚠️ Validation was bypassed via force=True. "
+                        "鈿狅笍 Validation was bypassed via force=True. "
                         "Re-run omni_diagnostics + tests immediately."
                     ))
                 _stamp(payload, tool="omni_patch")
                 if is_json:
                     return json.dumps(payload, ensure_ascii=False, indent=2)
                 bypass_tag = (
-                    "  ⚠️ validation bypassed"
+                    "  鈿狅笍 validation bypassed"
                     if (not v["validation_passed"] and force)
                     else ""
                 )
                 return (
-                    f"✅ Applied: {file}{bypass_tag}\n"
+                    f"鉁?Applied: {file}{bypass_tag}\n"
                     f"   +{added} / -{removed} lines\n"
                     f"   session_id: {sid}\n"
                     f"   rollback_available: {rb}\n"
@@ -5497,6 +5713,7 @@ def register_high_level_tools(mcp, make_request):
                 unsafe_legacy = False
                 legacy_path: Optional[str] = None
                 session_was_new_file = False
+                session_already_rolled_back = False
                 try:
                     sess_raw = await make_request(
                         "GET", "/patch/sessions", params={"limit": 50},
@@ -5518,6 +5735,9 @@ def register_high_level_tools(mcp, make_request):
                             session_was_new_file = (
                                 (s.get("original_hash") or "")
                                 == _EMPTY_CONTENT_SHA256_PREFIX
+                            )
+                            session_already_rolled_back = bool(
+                                s.get("rolled_back")
                             )
                             break
                 except Exception:
@@ -5545,7 +5765,7 @@ def register_high_level_tools(mcp, make_request):
                     if is_json:
                         return json.dumps(err_payload, ensure_ascii=False, indent=2)
                     return (
-                        f"❌ Rollback refused: session {session_id} targets "
+                        f"鉂?Rollback refused: session {session_id} targets "
                         f"path outside the workspace ({legacy_path!r})."
                     )
 
@@ -5573,7 +5793,7 @@ def register_high_level_tools(mcp, make_request):
                 #   3. project root derived from this module's __file__
                 # Reason: when the host runs from a different working
                 # dir than the project (Kiro MCP host runs from
-                # ``E:\Kiro`` while the project lives elsewhere — the
+                # ``E:\Kiro`` while the project lives elsewhere 鈥?the
                 # documented ``workspace.backend_root_visibility``
                 # backlog item), the host workspace_root and cwd point
                 # at the wrong place. Candidate 3 always finds the
@@ -5610,7 +5830,7 @@ def register_high_level_tools(mcp, make_request):
                         except ValueError:
                             pass
                         # Candidate 3: project root inferred from this
-                        # module's __file__ — robust to host/backend
+                        # module's __file__ 鈥?robust to host/backend
                         # cwd mismatch. Walk up until we find the
                         # project marker (the ``omnicode_adapters``
                         # package containing this module).
@@ -5657,11 +5877,11 @@ def register_high_level_tools(mcp, make_request):
                                 )
                         else:
                             new_file_unlink_warning = (
-                                "new-file rollback could not locate the "
-                                "file at any candidate root "
-                                "(workspace_root, cwd, project_root); "
-                                "the backend may have written elsewhere. "
-                                "Manual cleanup may be required."
+                                f"new-file rollback could not locate the "
+                                f"file at any candidate root "
+                                f"(workspace_root, cwd, project_root); "
+                                f"the backend may have written elsewhere. "
+                                f"Manual cleanup may be required."
                             )
                     except Exception as exc:
                         new_file_unlink_warning = (
@@ -5677,13 +5897,13 @@ def register_high_level_tools(mcp, make_request):
                 # the current disk state. The file marker probe used by
                 # omni_patch already does an outline read, which is the
                 # cheapest way to refresh whatever cache the backend
-                # carries. The result is intentionally discarded — this
+                # carries. The result is intentionally discarded 鈥?this
                 # is purely a side-effect call.
                 if ok and legacy_path and not unsafe_legacy:
                     try:
                         await _get_backend_file_markers(legacy_path)
                     except Exception:
-                        # Best-effort — never fail the rollback because
+                        # Best-effort 鈥?never fail the rollback because
                         # the cache-warm probe errored.
                         pass
 
@@ -5732,13 +5952,13 @@ def register_high_level_tools(mcp, make_request):
                         ] + payload["next_actions"]
                     elif "already" in low and "rolled" in low:
                         payload["next_actions"] = [
-                            "Session already rolled back — no further action "
+                            "Session already rolled back 鈥?no further action "
                             "needed. Verify with omni_read.",
                         ] + payload["next_actions"]
                 _stamp(payload, tool="omni_patch")
                 if is_json:
                     return json.dumps(payload, ensure_ascii=False, indent=2)
-                return f"{'✅' if ok else '❌'} Rollback: {msg}"
+                return f"{'鉁? if ok else '鉂?} Rollback: {msg}"
 
             # =========================================================
             #                          sessions
@@ -5763,7 +5983,7 @@ def register_high_level_tools(mcp, make_request):
                     backend_total and backend_total > _SESSIONS_LIMIT
                 ) or len(sessions) > _SESSIONS_LIMIT
                 # Annotate each session with whether it's still inside
-                # the workspace — AI editors can use this to avoid
+                # the workspace 鈥?AI editors can use this to avoid
                 # offering rollback on legacy unsafe sessions.
                 annotated: List[Dict[str, Any]] = []
                 for s in sessions[:_SESSIONS_LIMIT]:
@@ -5786,7 +6006,7 @@ def register_high_level_tools(mcp, make_request):
                 if truncated:
                     next_actions.insert(
                         0,
-                        "Result truncated to %d of %s sessions — older "
+                        "Result truncated to %d of %s sessions 鈥?older "
                         "rows are not shown."
                         % (_SESSIONS_LIMIT, backend_total),
                     )
@@ -5804,12 +6024,12 @@ def register_high_level_tools(mcp, make_request):
                 if is_json:
                     return json.dumps(payload, ensure_ascii=False, indent=2)
                 if not annotated:
-                    return "📜 No recent EditSessions."
+                    return "馃摐 No recent EditSessions."
                 tail = (
                     f"  (truncated, {backend_total} total)" if truncated else ""
                 )
                 lines = [
-                    f"📜 Recent EditSessions ({len(annotated)}){tail}:\n"
+                    f"馃摐 Recent EditSessions ({len(annotated)}){tail}:\n"
                 ]
                 for s in annotated:
                     sid = s.get("session_id", "?")
@@ -5818,13 +6038,13 @@ def register_high_level_tools(mcp, make_request):
                     src = s.get("source", "?")
                     a = s.get("lines_added", 0)
                     r = s.get("lines_removed", 0)
-                    flag = " ⚠️unsafe-legacy" if s.get("unsafe_legacy_session") else ""
+                    flag = " 鈿狅笍unsafe-legacy" if s.get("unsafe_legacy_session") else ""
                     lines.append(
                         f"  {sid}  {ts}  {fp}  +{a}/-{r}  ({src}){flag}"
                     )
                 return "\n".join(lines)
 
-            # Defensive — should never reach here because the action
+            # Defensive 鈥?should never reach here because the action
             # whitelist runs first.
             return _err(
                 f"Unknown omni_patch action: {action}. "
@@ -5835,7 +6055,7 @@ def register_high_level_tools(mcp, make_request):
             return _err(f"omni_patch failed: {e}")
 
     # -------------------------------------------------------------------
-    # Backwards-compat alias — omni_analyze delegates to omni_impact for
+    # Backwards-compat alias 鈥?omni_analyze delegates to omni_impact for
     # the most common case ("impact" analysis). Kept so older MCP configs
     # don't break, but new clients should use omni_impact directly.
     # -------------------------------------------------------------------
@@ -5880,13 +6100,13 @@ def register_high_level_tools(mcp, make_request):
                     "symbol": symbol,
                     "error": err,
                     "next_actions": [
-                        "omni_impact(symbol='<name>', format='json') — the "
+                        "omni_impact(symbol='<name>', format='json') 鈥?the "
                         "supported entry point for blast-radius analysis.",
                         "omni_search(mode='symbol', query='<partial_name>', "
                         "format='json') if you don't know the exact symbol.",
                     ],
                 })
-            return f"❌ {err}"
+            return f"鉂?{err}"
 
         try:
             if analysis in ("callers", "callees", "impact"):
@@ -5906,7 +6126,7 @@ def register_high_level_tools(mcp, make_request):
                         return _alias_json({
                             "ok": False, "error": f"Analysis error: {result['error']}",
                         })
-                    return f"❌ Analysis error: {result['error']}"
+                    return f"鉂?Analysis error: {result['error']}"
 
                 data = result.get("result", result)
                 callers = data.get("callers", {})
@@ -5917,7 +6137,7 @@ def register_high_level_tools(mcp, make_request):
                 # audit-bundle.r13 (P1-A): missing-symbol parity with
                 # omni_impact.  When the symbol has neither callers nor
                 # callees in the graph, we cannot be sure the symbol
-                # exists — emit risk=unknown (not the misleading
+                # exists 鈥?emit risk=unknown (not the misleading
                 # risk=low) plus confidence=low and a note pointing at
                 # omni_search.
                 #
@@ -5959,11 +6179,11 @@ def register_high_level_tools(mcp, make_request):
                         "total_edges": total_edges,
                         # audit-bundle.r14 (P2): stamp ``source`` on every
                         # branch of omni_analyze so callers, callees, and
-                        # impact analyses agree on provenance — same key
+                        # impact analyses agree on provenance 鈥?same key
                         # omni_impact uses.
                         "source": "graph",
                         "next_actions": [
-                            "Prefer omni_impact(symbol='%s', format='json') — "
+                            "Prefer omni_impact(symbol='%s', format='json') 鈥?"
                             "it returns risk + suggested_tests + source/confidence."
                             % symbol_clean,
                         ],
@@ -5978,28 +6198,28 @@ def register_high_level_tools(mcp, make_request):
                         )
                     return _alias_json(json_payload)
 
-                lines = [f"🔍 Impact analysis: {symbol_clean}\n"]
+                lines = [f"馃攳 Impact analysis: {symbol_clean}\n"]
                 lines.append(f"  Total edges in scope: {data.get('total_edges', '?')}")
 
                 if callers:
-                    lines.append(f"\n  ⬆️ Callers ({callers.get('count', 0)}):")
+                    lines.append(f"\n  猬嗭笍 Callers ({callers.get('count', 0)}):")
                     for name in (callers.get("names") or [])[:15]:
-                        lines.append(f"    ← {name}")
+                        lines.append(f"    鈫?{name}")
 
                 if callees:
-                    lines.append(f"\n  ⬇️ Callees ({callees.get('count', 0)}):")
+                    lines.append(f"\n  猬囷笍 Callees ({callees.get('count', 0)}):")
                     for name in (callees.get("names") or [])[:15]:
-                        lines.append(f"    → {name}")
+                        lines.append(f"    鈫?{name}")
 
                 # Risk assessment
                 lines.append(
-                    f"\n  ⚠️ Risk: {risk} (confidence={confidence}, "
+                    f"\n  鈿狅笍 Risk: {risk} (confidence={confidence}, "
                     f"{caller_count} direct callers)"
                 )
                 if note:
-                    lines.append(f"  ℹ️ {note}")
+                    lines.append(f"  鈩癸笍 {note}")
                 lines.append(
-                    "  (omni_analyze is a deprecated alias — prefer omni_impact)"
+                    "  (omni_analyze is a deprecated alias 鈥?prefer omni_impact)"
                 )
 
                 return "\n".join(lines)
@@ -6014,7 +6234,7 @@ def register_high_level_tools(mcp, make_request):
                         return _alias_json({
                             "ok": False, "error": f"Graph error: {result['error']}",
                         })
-                    return f"❌ Graph error: {result['error']}"
+                    return f"鉂?Graph error: {result['error']}"
                 data = result.get("result", result)
                 summary = data.get("summary", {})
                 if fmt == "json":
@@ -6033,7 +6253,7 @@ def register_high_level_tools(mcp, make_request):
                         ],
                     })
                 return (
-                    f"📊 Call graph{' for ' + path if path else ''}\n"
+                    f"馃搳 Call graph{' for ' + path if path else ''}\n"
                     f"  Edges: {summary.get('total_edges', 0)}\n"
                     f"  Callers: {summary.get('total_callers', 0)}\n"
                     f"  Callees: {summary.get('total_callees', 0)}"
@@ -6045,12 +6265,12 @@ def register_high_level_tools(mcp, make_request):
             )
             if fmt == "json":
                 return _alias_json({"ok": False, "error": unknown})
-            return f"❌ {unknown}"
+            return f"鉂?{unknown}"
 
         except Exception as e:
             if fmt == "json":
                 return _alias_json({"ok": False, "error": f"Analysis failed: {e}"})
-            return f"❌ Analysis failed: {e}"
+            return f"鉂?Analysis failed: {e}"
 
     @mcp.tool()
     async def omni_memory(
@@ -6073,7 +6293,7 @@ def register_high_level_tools(mcp, make_request):
           - search:    find relevant memories (requires ``query``)
           - store:     save a new memory (requires ``content`` + ``category``)
           - context:   startup context (recent progress, key learnings)
-          - advisory:  multi-angle proactive recall for an edit task —
+          - advisory:  multi-angle proactive recall for an edit task 鈥?
                        searches by file/symbol/task/error and dedupes.
 
         Categories: solution, learning, preference, mistake, architecture,
@@ -6097,7 +6317,7 @@ def register_high_level_tools(mcp, make_request):
             return (
                 json.dumps(payload, ensure_ascii=False, indent=2)
                 if is_json
-                else f"❌ {msg}"
+                else f"鉂?{msg}"
             )
 
         try:
@@ -6144,7 +6364,7 @@ def register_high_level_tools(mcp, make_request):
                     ),
                 }
                 # Audit guard: surface a warning if any row came back
-                # without an id — the API contract is that backend
+                # without an id 鈥?the API contract is that backend
                 # responses always include id; if they don't, we want
                 # an explicit signal rather than silent null.
                 missing_ids = [
@@ -6160,9 +6380,9 @@ def register_high_level_tools(mcp, make_request):
                 if is_json:
                     return json.dumps(payload, ensure_ascii=False, indent=2)
                 if not normalised:
-                    return f"🧠 No memories found for '{query}'"
+                    return f"馃 No memories found for '{query}'"
                 lines = [
-                    f"🧠 {len(normalised)} memory(ies) for '{query}'\n"
+                    f"馃 {len(normalised)} memory(ies) for '{query}'\n"
                 ]
                 for r in normalised:
                     lines.append(
@@ -6172,7 +6392,7 @@ def register_high_level_tools(mcp, make_request):
                     )
                     lines.append(f"  {(r.get('content') or '')[:200]}")
                     if r.get("match_reason"):
-                        lines.append(f"  📍 {r['match_reason']}")
+                        lines.append(f"  馃搷 {r['match_reason']}")
                     lines.append("")
                 return "\n".join(lines)
 
@@ -6249,7 +6469,7 @@ def register_high_level_tools(mcp, make_request):
                     task=task,
                 )
                 # If we couldn't pull a memory_id out of any field, that's
-                # an audit failure — tell the caller explicitly so they
+                # an audit failure 鈥?tell the caller explicitly so they
                 # don't silently accept a null id (the original P0 bug).
                 if memory_id is None:
                     payload["warnings"] = [
@@ -6263,7 +6483,7 @@ def register_high_level_tools(mcp, make_request):
                     return json.dumps(payload, ensure_ascii=False, indent=2)
                 tag = " (duplicate, counters bumped)" if is_dup else ""
                 return (
-                    f"✅ Memory stored{tag}: id={memory_id} "
+                    f"鉁?Memory stored{tag}: id={memory_id} "
                     f"category={category} importance={importance}"
                 )
 
@@ -6329,7 +6549,7 @@ def register_high_level_tools(mcp, make_request):
                     )
 
                 # Drive the advisory off the same /memory/search backend
-                # via _collect_advisory_payload — the shared helper that
+                # via _collect_advisory_payload 鈥?the shared helper that
                 # omni_context also calls. This guarantees both tools
                 # report the same memory_id / memory_count / synthesis.
                 #
@@ -6419,12 +6639,12 @@ def register_high_level_tools(mcp, make_request):
                 _stamp(payload, tool="omni_memory")
                 if is_json:
                     return json.dumps(payload, ensure_ascii=False, indent=2)
-                # Text rendering keeps the emoji header for humans —
+                # Text rendering keeps the emoji header for humans 鈥?
                 # JSON path stays clean.
                 if not merged:
-                    return "🧠 No advisory available for the given inputs."
+                    return "馃 No advisory available for the given inputs."
                 lines = [
-                    f"🧠 Advisory  symbol={symbol!r}  file={file!r}  "
+                    f"馃 Advisory  symbol={symbol!r}  file={file!r}  "
                     f"task={(task or query)!r}",
                     f"   confidence={advisory_data['confidence']}  "
                     f"memories={len(merged)}",
@@ -6443,7 +6663,7 @@ def register_high_level_tools(mcp, make_request):
                         lines.append(f"  {i}. {risk}")
                 return "\n".join(lines)
 
-            # Defensive — should never reach here because the action
+            # Defensive 鈥?should never reach here because the action
             # validation up front catches unknown actions.
             return _err(
                 f"Unknown action: {action}. "
@@ -6471,12 +6691,12 @@ def register_high_level_tools(mcp, make_request):
         what it found and what it skipped.
 
         Modes:
-          * ``symbol``   — resolve the symbol via the symbol index, then
+          * ``symbol``   鈥?resolve the symbol via the symbol index, then
                            call references + impact + memory advisory +
                            diagnostics on the file that defines it.
-          * ``file``     — outline the file, then run diagnostics + look
+          * ``file``     鈥?outline the file, then run diagnostics + look
                            for related references defined in it.
-          * ``task``     — semantic + lexical search on the task string;
+          * ``task``     鈥?semantic + lexical search on the task string;
                            lexical hits go through ``omni_search(symbol)``
                            so a query mentioning ``_detect_mode`` lands
                            on the actual function rather than fuzz.
@@ -6531,7 +6751,7 @@ def register_high_level_tools(mcp, make_request):
             return (
                 json.dumps(err, ensure_ascii=False, indent=2)
                 if (format or "json").lower() == "json"
-                else f"❌ {err['error']}"
+                else f"鉂?{err['error']}"
             )
 
         try:
@@ -6950,7 +7170,7 @@ def register_high_level_tools(mcp, make_request):
 
                 # 8a. Lexical-boost: extract code-shaped tokens and
                 # query symbol search for them. This is what fixes the
-                # "modify search mode routing" → noise-only result.
+                # "modify search mode routing" 鈫?noise-only result.
                 #
                 # audit-bundle.r17 (P3): when omni_context is called
                 # task-only (no symbol=, no file=) and the lexical
@@ -6967,7 +7187,7 @@ def register_high_level_tools(mcp, make_request):
                 lex_added = 0
                 primary_promoted = 0
                 # Only promote when no symbol-mode primary already
-                # exists — otherwise the explicit ``symbol=`` row keeps
+                # exists 鈥?otherwise the explicit ``symbol=`` row keeps
                 # priority.
                 can_promote_primary = not ctx["primary_symbols"]
                 for term in lex_terms:
@@ -7005,21 +7225,21 @@ def register_high_level_tools(mcp, make_request):
                                 ],
                                 "signature": (h.get("signature") or "")[:120],
                                 "score": score,
-                                "reason": f"task→lexical:{term} (promoted)",
+                                "reason": f"task鈫抣exical:{term} (promoted)",
                             }
                             n = _approx_token_count(json.dumps(primary_row))
                             if _spend(n, section="primary_symbols"):
                                 ctx["primary_symbols"].append(primary_row)
                                 primary_promoted += 1
                                 continue  # don't double-add to related_files
-                            # Budget exhausted — fall through and try
+                            # Budget exhausted 鈥?fall through and try
                             # related_files instead, which has its own
                             # cap.
                         row = {
                             "file": (h.get("file_path") or "").replace("\\", "/"),
                             "symbol": h.get("symbol_name") or "",
                             "score": score,
-                            "reason": f"task→lexical:{term}",
+                            "reason": f"task鈫抣exical:{term}",
                         }
                         if _accept_related(row):
                             lex_added += 1
@@ -7049,7 +7269,7 @@ def register_high_level_tools(mcp, make_request):
                             "file": (h.get("file_path") or "").replace("\\", "/"),
                             "symbol": h.get("symbol_name") or "",
                             "score": float(h.get("relevance_score") or 0),
-                            "reason": "task→semantic top hit",
+                            "reason": "task鈫抯emantic top hit",
                         }
                         if _accept_related(row):
                             sem_added += 1
@@ -7155,9 +7375,9 @@ def register_high_level_tools(mcp, make_request):
             elif file:
                 confidence = "high" if outline_symbols else "low"
             elif task:
-                # Lexical hit on a real symbol → high; semantic only → medium.
+                # Lexical hit on a real symbol 鈫?high; semantic only 鈫?medium.
                 if any(
-                    r.get("reason", "").startswith("task→lexical:")
+                    r.get("reason", "").startswith("task鈫抣exical:")
                     for r in ctx["related_files"]
                 ):
                     confidence = "high"
@@ -7172,7 +7392,7 @@ def register_high_level_tools(mcp, make_request):
             )
             if token_budget > 0 and budget_utilization >= 0.8 and not truncated:
                 # Heuristic: even if no section was outright cut, an
-                # ≥80% budget burn indicates we're squeezing.
+                # 鈮?0% budget burn indicates we're squeezing.
                 _add_truncation_reason(
                     f"budget_utilization:{budget_utilization:.2f}"
                 )
@@ -7249,7 +7469,7 @@ def register_high_level_tools(mcp, make_request):
             # could not be resolved (diagnostics reported "File not
             # found", primary_symbols is empty, and the outline produced
             # nothing), we must NOT return ok=true with stray memory
-            # rows attached — that's the misleading-success pattern the
+            # rows attached 鈥?that's the misleading-success pattern the
             # Round 5 audit flagged. Convert the response to ok=false +
             # top-level error + file_status, and replace next_actions
             # with recovery steps. Memory advisory is dropped to avoid
@@ -7300,53 +7520,53 @@ def register_high_level_tools(mcp, make_request):
 
             if (format or "json").lower() == "text":
                 lines = [
-                    f"📦 Context  task={task!r}  file={file!r}  "
+                    f"馃摝 Context  task={task!r}  file={file!r}  "
                     f"symbol={symbol!r}  budget={token_budget}",
                     f"   resolution={symbol_resolution}  confidence={confidence}",
                 ]
                 if truncated:
                     lines.append(
-                        f"   ⚠️ truncated at {spent}/{token_budget} tokens"
+                        f"   鈿狅笍 truncated at {spent}/{token_budget} tokens"
                     )
                     for tr_reason in truncation_reasons:
-                        lines.append(f"      • {tr_reason}")
+                        lines.append(f"      鈥?{tr_reason}")
                 if ctx["primary_symbols"]:
                     lines.append(
-                        f"   📄 {len(ctx['primary_symbols'])} primary symbols"
+                        f"   馃搫 {len(ctx['primary_symbols'])} primary symbols"
                     )
                 if ctx["references"]:
                     lines.append(
-                        f"   🔗 {len(ctx['references'])} references"
+                        f"   馃敆 {len(ctx['references'])} references"
                     )
                 if impact_payload:
                     lines.append(
-                        f"   💥 impact risk={impact_payload.get('risk')}, "
+                        f"   馃挜 impact risk={impact_payload.get('risk')}, "
                         f"{len(impact_payload.get('callers', []))} callers"
                     )
                 if ctx["diagnostics"]:
                     lines.append(
-                        f"   ⚠️ {len(ctx['diagnostics'])} diagnostics"
+                        f"   鈿狅笍 {len(ctx['diagnostics'])} diagnostics"
                     )
                 if ctx["related_files"]:
                     lines.append(
-                        f"   📚 {len(ctx['related_files'])} related files"
+                        f"   馃摎 {len(ctx['related_files'])} related files"
                     )
                 if ctx["recent_changes"]:
                     lines.append(
-                        f"   🌿 {len(ctx['recent_changes'])} recent changes"
+                        f"   馃尶 {len(ctx['recent_changes'])} recent changes"
                     )
                 if ctx["memories"]:
-                    lines.append(f"   🧠 {len(ctx['memories'])} memories")
+                    lines.append(f"   馃 {len(ctx['memories'])} memories")
                 if note:
-                    lines.append(f"\n   ℹ️ {note}")
+                    lines.append(f"\n   鈩癸笍 {note}")
                 if next_actions:
                     lines.append("\n   next_actions:")
                     for a in next_actions:
-                        lines.append(f"   → {a}")
+                        lines.append(f"   鈫?{a}")
                 if why:
                     lines.append("\n   why_selected:")
                     for w in why:
-                        lines.append(f"   • {w}")
+                        lines.append(f"   鈥?{w}")
                 _stamp(payload, tool="omni_context")
                 return "\n".join(lines)
             _stamp(payload, tool="omni_context")
@@ -7358,7 +7578,7 @@ def register_high_level_tools(mcp, make_request):
             return (
                 json.dumps(err, ensure_ascii=False, indent=2)
                 if (format or "json").lower() == "json"
-                else f"❌ Context gathering failed: {e}"
+                else f"鉂?Context gathering failed: {e}"
             )
 
     @mcp.tool()
@@ -7380,15 +7600,15 @@ def register_high_level_tools(mcp, make_request):
           - preview / validate / apply / rollback: delegate to omni_patch
           - ai_edit: LLM-driven edit (only when OMNICODE_LLM_ROUTER=true).
                      When ``dry_run=True`` the LLM still runs but no
-                     write happens — the response carries a unified
+                     write happens 鈥?the response carries a unified
                      diff under preview_diff so you can show the user.
 
         audit-bundle.r13 (P0 close): ``apply`` now runs the same
         ``_do_validate`` gate as ``omni_patch`` before any write. To
         bypass validation you must pass both ``force=True`` AND
         ``force_reason='...'``; the response then carries
-        ``validation_bypassed=true`` and a ⚠️ warning as the first
-        ``next_actions`` item — exactly the same audit trail
+        ``validation_bypassed=true`` and a 鈿狅笍 warning as the first
+        ``next_actions`` item 鈥?exactly the same audit trail
         ``omni_patch`` uses. The path guard introduced in r9 is
         unchanged.
 
@@ -7404,10 +7624,10 @@ def register_high_level_tools(mcp, make_request):
         edit_content = content if content is not None else patch
 
         def _alias_text(ok: bool, msg: str) -> str:
-            mark = "✅" if ok else "❌"
+            mark = "鉁? if ok else "鉂?
             return (
                 f"{mark} {action}: {msg}\n"
-                f"   (omni_edit is a deprecated alias — prefer omni_patch)"
+                f"   (omni_edit is a deprecated alias 鈥?prefer omni_patch)"
             )
 
         def _alias_json(payload: Dict[str, Any]) -> str:
@@ -7418,7 +7638,7 @@ def register_high_level_tools(mcp, make_request):
 
         try:
             # ---------------------------------------------------------------
-            # Path guard — applies to every action that takes a file and may
+            # Path guard 鈥?applies to every action that takes a file and may
             # touch disk (ai_edit / preview / validate / apply). Runs BEFORE
             # any make_request so a bad path never reaches the backend and
             # never creates a session. Reuses the exact same helper +
@@ -7453,7 +7673,7 @@ def register_high_level_tools(mcp, make_request):
                                 "format='json') for a deterministic edit",
                             ],
                         })
-                    return f"❌ {err}"
+                    return f"鉂?{err}"
                 try:
                     result = await make_request("POST", "/edit", json={
                         "target_file": file,
@@ -7473,7 +7693,7 @@ def register_high_level_tools(mcp, make_request):
                                 "omni_patch preview/validate/apply.",
                             ],
                         })
-                    return f"❌ {err}"
+                    return f"鉂?{err}"
                 if isinstance(result, dict) and "error" in result:
                     err = f"ai_edit error: {result['error']}"
                     if fmt == "json":
@@ -7481,12 +7701,12 @@ def register_high_level_tools(mcp, make_request):
                             "ok": False, "action": "ai_edit",
                             "file": file, "error": err,
                             "next_actions": [
-                                "ai_edit may be disabled — set OMNICODE_LLM_ROUTER=true "
+                                "ai_edit may be disabled 鈥?set OMNICODE_LLM_ROUTER=true "
                                 "or use omni_patch(action='preview'/'validate'/'apply') "
                                 "for a deterministic edit.",
                             ],
                         })
-                    return f"❌ {err}"
+                    return f"鉂?{err}"
                 data = (
                     result.get("result", result)
                     if isinstance(result, dict) else {}
@@ -7528,17 +7748,17 @@ def register_high_level_tools(mcp, make_request):
                             ],
                         })
                     if no_changes:
-                        return f"⚪ Dry run: LLM produced no changes for {file}"
+                        return f"鈿?Dry run: LLM produced no changes for {file}"
                     tail = (
                         f"\n... ({len(diff_lines) - 80} more diff lines)"
                         if diff_truncated else ""
                     )
                     return (
-                        f"📋 Dry-run preview for {file}\n"
+                        f"馃搵 Dry-run preview for {file}\n"
                         f"   +{a} / -{r_lines} lines (no write performed)\n\n"
                         f"{diff_show}{tail}\n\n"
                         f"   Re-run with dry_run=False to apply, or "
-                        f"omni_patch(action='preview', file=…, content=…) "
+                        f"omni_patch(action='preview', file=鈥? content=鈥? "
                         f"to render externally."
                     )
 
@@ -7555,9 +7775,9 @@ def register_high_level_tools(mcp, make_request):
                         "message": data.get("message", ""),
                         "result": data,
                         "next_actions": [
-                            "⚠️ ai_edit non-dry-run does NOT run the patch.v2 "
+                            "鈿狅笍 ai_edit non-dry-run does NOT run the patch.v2 "
                             "validate gate. Prefer omni_patch(action='validate' "
-                            "→ 'apply', file='%s', content=<llm_output>, "
+                            "鈫?'apply', file='%s', content=<llm_output>, "
                             "format='json') for the safety contract." % file,
                             "If you accept the risk, run with dry_run=True first "
                             "to inspect the diff.",
@@ -7566,7 +7786,7 @@ def register_high_level_tools(mcp, make_request):
                 if success:
                     score = data.get("quality_score", 0)
                     sid = data.get("edit_session_id")
-                    line = f"✅ Edit applied to {file} (quality={score:.2f})"
+                    line = f"鉁?Edit applied to {file} (quality={score:.2f})"
                     if sid:
                         line += (
                             f"\n   session_id: {sid}\n"
@@ -7579,7 +7799,7 @@ def register_high_level_tools(mcp, make_request):
                 reason = analysis.get(
                     "root_cause", analysis.get("failure_reasons", "unknown"),
                 )
-                return f"❌ Edit failed at stage '{stage}': {reason}"
+                return f"鉂?Edit failed at stage '{stage}': {reason}"
 
             # =====================================================
             #          preview / validate / apply / rollback
@@ -7587,7 +7807,7 @@ def register_high_level_tools(mcp, make_request):
             if action == "preview":
                 if not file or edit_content is None:
                     msg = "omni_edit preview needs both file and content."
-                    return _alias_json({"ok": False, "error": msg}) if fmt == "json" else f"❌ {msg}"
+                    return _alias_json({"ok": False, "error": msg}) if fmt == "json" else f"鉂?{msg}"
                 raw = await make_request("POST", "/patch/preview", json={
                     "file_path": file, "content": edit_content,
                 })
@@ -7613,7 +7833,7 @@ def register_high_level_tools(mcp, make_request):
                         "newline_normalized": False,
                         "result": data,
                         "next_actions": [
-                            "Prefer omni_patch(action='preview', ...) directly — "
+                            "Prefer omni_patch(action='preview', ...) directly 鈥?"
                             "omni_edit is a deprecated alias.",
                         ],
                     }
@@ -7630,7 +7850,7 @@ def register_high_level_tools(mcp, make_request):
                             recovery = [
                                 "Confirm the file exists with omni_read(file='%s', "
                                 "mode='outline', format='json'). For a new file, "
-                                "use omni_patch(action='apply', ...) directly — "
+                                "use omni_patch(action='apply', ...) directly 鈥?"
                                 "preview requires an existing target." % file,
                                 "omni_search(query='%s', mode='text', format='json') "
                                 "to locate the file." % file,
@@ -7647,7 +7867,7 @@ def register_high_level_tools(mcp, make_request):
             if action == "validate":
                 if not file or edit_content is None:
                     msg = "omni_edit validate needs both file and content."
-                    return _alias_json({"ok": False, "error": msg}) if fmt == "json" else f"❌ {msg}"
+                    return _alias_json({"ok": False, "error": msg}) if fmt == "json" else f"鉂?{msg}"
                 v = await _do_validate(file, edit_content)
                 if fmt == "json":
                     return _alias_json({
@@ -7663,7 +7883,7 @@ def register_high_level_tools(mcp, make_request):
                         "source": v["source"],
                         "next_actions": (
                             [
-                                "Prefer omni_patch(action='validate', ...) directly — "
+                                "Prefer omni_patch(action='validate', ...) directly 鈥?"
                                 "omni_edit is a deprecated alias.",
                                 "If validation passed, you can apply via "
                                 "omni_patch(action='apply', file=..., content=...).",
@@ -7671,7 +7891,7 @@ def register_high_level_tools(mcp, make_request):
                             if v["validation_passed"]
                             else [
                                 "Fix the listed errors and re-validate.",
-                                "Prefer omni_patch(action='validate', ...) directly — "
+                                "Prefer omni_patch(action='validate', ...) directly 鈥?"
                                 "omni_edit is a deprecated alias.",
                             ]
                         ),
@@ -7681,7 +7901,7 @@ def register_high_level_tools(mcp, make_request):
             if action == "apply":
                 if not file or edit_content is None:
                     msg = "omni_edit apply needs both file and content."
-                    return _alias_json({"ok": False, "error": msg}) if fmt == "json" else f"❌ {msg}"
+                    return _alias_json({"ok": False, "error": msg}) if fmt == "json" else f"鉂?{msg}"
 
                 # ---- audit-bundle.r13 (P0 close): force_reason gate.
                 # Same contract omni_patch uses: force=True without a
@@ -7708,7 +7928,7 @@ def register_high_level_tools(mcp, make_request):
                                 "(strongly recommended).",
                             ],
                         })
-                    return f"❌ {err}"
+                    return f"鉂?{err}"
 
                 # ---- audit-bundle.r13 (P0 close): validate gate.
                 # Reuses the exact ``_do_validate`` closure that omni_patch
@@ -7733,7 +7953,7 @@ def register_high_level_tools(mcp, make_request):
                         "next_actions": [
                             "Fix the listed errors and retry.",
                             "Prefer omni_patch(action='validate', file='%s', "
-                            "content=...) directly — omni_edit is a deprecated "
+                            "content=...) directly 鈥?omni_edit is a deprecated "
                             "alias." % file,
                             "Set force=True with force_reason='<why>' to override "
                             "(strongly discouraged).",
@@ -7742,9 +7962,9 @@ def register_high_level_tools(mcp, make_request):
                     if fmt == "json":
                         return _alias_json(err_payload)
                     return (
-                        f"❌ Apply blocked: validation failed "
+                        f"鉂?Apply blocked: validation failed "
                         f"({v['counts']['error']} error(s)). "
-                        f"(omni_edit is a deprecated alias — prefer omni_patch.)"
+                        f"(omni_edit is a deprecated alias 鈥?prefer omni_patch.)"
                     )
 
                 # ---- write goes through.
@@ -7773,7 +7993,7 @@ def register_high_level_tools(mcp, make_request):
                                 "Prefer omni_patch(action='apply', ...) directly.",
                             ],
                         })
-                    return f"❌ {err}"
+                    return f"鉂?{err}"
 
                 sid = data.get("session_id")
                 rb = bool(data.get("rollback_available", True))
@@ -7781,7 +8001,7 @@ def register_high_level_tools(mcp, make_request):
                 next_actions: List[str] = []
                 if validation_bypassed:
                     next_actions.append(
-                        "⚠️ Validation was bypassed via force=True. "
+                        "鈿狅笍 Validation was bypassed via force=True. "
                         "Re-run omni_diagnostics + tests immediately."
                     )
                 if sid and rb:
@@ -7790,7 +8010,7 @@ def register_high_level_tools(mcp, make_request):
                         "anything looks wrong" % sid
                     )
                 next_actions.append(
-                    "Prefer omni_patch(action='apply', ...) directly — "
+                    "Prefer omni_patch(action='apply', ...) directly 鈥?"
                     "omni_edit is a deprecated alias."
                 )
                 if fmt == "json":
@@ -7812,18 +8032,18 @@ def register_high_level_tools(mcp, make_request):
                         "result": data,
                         "next_actions": next_actions,
                     })
-                bypass_tag = "  ⚠️ validation bypassed" if validation_bypassed else ""
+                bypass_tag = "  鈿狅笍 validation bypassed" if validation_bypassed else ""
                 return (
-                    f"✅ Applied: {file}{bypass_tag}\n"
+                    f"鉁?Applied: {file}{bypass_tag}\n"
                     f"   session_id: {sid}\n"
                     f"   rollback_available: {rb}\n"
-                    f"   (omni_edit is a deprecated alias — prefer omni_patch)"
+                    f"   (omni_edit is a deprecated alias 鈥?prefer omni_patch)"
                 )
 
             if action == "rollback":
                 if not session_id:
                     msg = "omni_edit rollback needs session_id."
-                    return _alias_json({"ok": False, "error": msg}) if fmt == "json" else f"❌ {msg}"
+                    return _alias_json({"ok": False, "error": msg}) if fmt == "json" else f"鉂?{msg}"
                 raw = await make_request(
                     "POST", "/patch/rollback",
                     params={"session_id": session_id},
@@ -7840,7 +8060,7 @@ def register_high_level_tools(mcp, make_request):
                         "rolled_back": ok,
                         "result": data,
                         "next_actions": [
-                            "Prefer omni_patch(action='rollback', ...) directly — "
+                            "Prefer omni_patch(action='rollback', ...) directly 鈥?"
                             "omni_edit is a deprecated alias.",
                         ],
                     }
@@ -7858,14 +8078,14 @@ def register_high_level_tools(mcp, make_request):
             )
             if fmt == "json":
                 return _alias_json({"ok": False, "error": unknown})
-            return f"❌ {unknown}"
+            return f"鉂?{unknown}"
 
         except Exception as e:
             if fmt == "json":
                 return _alias_json({
                     "ok": False, "error": f"Edit operation failed: {e}",
                 })
-            return f"❌ Edit operation failed: {e}"
+            return f"鉂?Edit operation failed: {e}"
 
 
     @mcp.tool()
@@ -7883,13 +8103,13 @@ def register_high_level_tools(mcp, make_request):
         Combines code understanding + search + impact + memory + git
         history into one structured payload that fits the requested
         token budget. Use when the editor needs broad context for an
-        unfamiliar file or symbol — far cheaper than chaining the six
+        unfamiliar file or symbol 鈥?far cheaper than chaining the six
         single-purpose tools by hand.
 
         Returns JSON-formatted IntelligenceContext with capability
         status, results from each capability that ran, and a flat
         ``advisories`` list summarising what to watch out for. This is a
-        deprecated alias for omni_context — the JSON payload carries the
+        deprecated alias for omni_context 鈥?the JSON payload carries the
         common deprecated/replacement compat fields.
         """
         # ---------------------------------------------------------------
@@ -7917,7 +8137,7 @@ def register_high_level_tools(mcp, make_request):
                     ),
                     "next_actions": [
                         "omni_context(file='<path>', task='<intent>', "
-                        "format='json') — the supported composer.",
+                        "format='json') 鈥?the supported composer.",
                         "omni_search(mode='auto', query='<keywords>', "
                         "format='json') if you need lexical/semantic recall first.",
                     ],
@@ -7985,7 +8205,7 @@ def register_high_level_tools(mcp, make_request):
                 )
                 # Live-test fix: the intelligence backend sometimes
                 # returns "fallback" search rows with score=None and
-                # snippet="" when the symbol can't be resolved — those
+                # snippet="" when the symbol can't be resolved 鈥?those
                 # are noise, not real hits. Only count rows that look
                 # like genuine matches.
                 meaningful_hits = [
@@ -8037,7 +8257,7 @@ def register_high_level_tools(mcp, make_request):
                 "errors": ctx.get("errors", {}),
                 "next_actions": [
                     "Prefer omni_context(symbol=..., task=..., format='json') "
-                    "— the supported composer with budget + truncation_reasons.",
+                    "鈥?the supported composer with budget + truncation_reasons.",
                 ],
             }
             # ---------- audit-bundle.r14 (P2): confidence normalisation
@@ -8061,7 +8281,7 @@ def register_high_level_tools(mcp, make_request):
                 memory_blob_copy["confidence"] = band
                 envelope_payload["memory"] = memory_blob_copy
                 # Top-level confidence reflects the strongest available
-                # signal — symbol_resolution overrides this below.
+                # signal 鈥?symbol_resolution overrides this below.
                 envelope_payload["confidence"] = band
             if symbol_resolution is not None:
                 envelope_payload["symbol_resolution"] = symbol_resolution
@@ -8104,7 +8324,7 @@ def register_high_level_tools(mcp, make_request):
 
         Skills are declarative manifests that bundle a sequence of MCP
         tool calls into a recommended workflow. The OmniCode server
-        does NOT execute them — this tool just shows you the recipe so
+        does NOT execute them 鈥?this tool just shows you the recipe so
         you can decide whether to follow it.
 
         Actions:
@@ -8114,7 +8334,7 @@ def register_high_level_tools(mcp, make_request):
 
         First-party skills:
           - omni-impact-review:  pre-edit blast-radius bundle
-          - omni-safe-refactor:  preview → validate → apply → rollback
+          - omni-safe-refactor:  preview 鈫?validate 鈫?apply 鈫?rollback
           - omni-test-coverage:  find related tests + suggested commands
 
         Drop your own skills as JSON or YAML at ``~/.kiro/skills/`` or
@@ -8143,7 +8363,7 @@ def register_high_level_tools(mcp, make_request):
             return (
                 json.dumps(payload, ensure_ascii=False, indent=2)
                 if is_json
-                else f"❌ {msg}"
+                else f"鉂?{msg}"
             )
 
         try:
@@ -8167,16 +8387,16 @@ def register_high_level_tools(mcp, make_request):
                         indent=2,
                     )
                 if not skills:
-                    return "📦 No skills installed. Drop manifests under ~/.kiro/skills/."
-                lines = [f"📦 {len(skills)} skill(s) available:\n"]
+                    return "馃摝 No skills installed. Drop manifests under ~/.kiro/skills/."
+                lines = [f"馃摝 {len(skills)} skill(s) available:\n"]
                 for s in skills:
-                    lines.append(f"  • {s.name:<24} v{s.version}")
+                    lines.append(f"  鈥?{s.name:<24} v{s.version}")
                     lines.append(f"      {s.description}")
                     if s.keywords:
                         lines.append(f"      keywords: {', '.join(s.keywords[:6])}")
                     lines.append("")
                 lines.append(
-                    "💡 Use omni_skill(action='show', name=<name>) to see the steps."
+                    "馃挕 Use omni_skill(action='show', name=<name>) to see the steps."
                 )
                 return "\n".join(lines)
 
@@ -8204,13 +8424,13 @@ def register_high_level_tools(mcp, make_request):
                         indent=2,
                     )
                 if not ranked:
-                    return f"📦 No skills matching '{query}'"
-                lines = [f"🔍 {len(ranked)} skill(s) matching '{query}':\n"]
+                    return f"馃摝 No skills matching '{query}'"
+                lines = [f"馃攳 {len(ranked)} skill(s) matching '{query}':\n"]
                 for s, score, why in ranked:
                     why_tail = (
                         f"   why_matched: {', '.join(why[:4])}" if why else ""
                     )
-                    lines.append(f"  • {s.name}  (score={score}): {s.description}")
+                    lines.append(f"  鈥?{s.name}  (score={score}): {s.description}")
                     if why_tail:
                         lines.append(why_tail)
                 return "\n".join(lines)
@@ -8237,7 +8457,7 @@ def register_high_level_tools(mcp, make_request):
                         indent=2,
                     )
                 lines = [
-                    f"📦 {skill.name}  v{skill.version}",
+                    f"馃摝 {skill.name}  v{skill.version}",
                     f"   {skill.description}",
                 ]
                 if skill.when_to_use:
@@ -8252,7 +8472,7 @@ def register_high_level_tools(mcp, make_request):
                     lines.append("")
                     lines.append("   Safety notes:")
                     for note in skill.safety_notes:
-                        lines.append(f"     • {note}")
+                        lines.append(f"     鈥?{note}")
                 if skill.keywords:
                     lines.append("")
                     lines.append(f"   Keywords: {', '.join(skill.keywords)}")
@@ -8276,7 +8496,7 @@ def register_high_level_tools(mcp, make_request):
                     condition = step.get("condition", "always")
                     head = f"     {i}. [{sid}] {tool}"
                     if title:
-                        head += f"  — {title}"
+                        head += f"  鈥?{title}"
                     if not required:
                         head += "  (optional)"
                     lines.append(head)
@@ -8311,7 +8531,7 @@ def register_high_level_tools(mcp, make_request):
         """Runtime self-check for the live MCP host.
 
         Returns a JSON envelope describing the actual code that's serving
-        traffic right now. Use this BEFORE any human acceptance test —
+        traffic right now. Use this BEFORE any human acceptance test 鈥?
         it's the only reliable way to detect the "source updated, unit
         tests pass, but the running FastMCP host is still bound to a
         previous handler" failure mode that bit the late-May 2026 audit.
@@ -8335,7 +8555,7 @@ def register_high_level_tools(mcp, make_request):
             }
 
         ``warnings`` is empty when the running runtime matches the
-        on-disk source. A non-empty list means a stale binding — fix by
+        on-disk source. A non-empty list means a stale binding 鈥?fix by
         killing the MCP host process (not a soft reload) and restarting.
         """
         import datetime as _dt
@@ -8345,7 +8565,7 @@ def register_high_level_tools(mcp, make_request):
         import sys as _sys
         from pathlib import Path as _Path
 
-        # Lazily capture the boot time the first call into this tool —
+        # Lazily capture the boot time the first call into this tool 鈥?
         # accurate enough for "is this the same process I saw 5 minutes
         # ago" without requiring a hook into the FastMCP lifespan.
         global _PROCESS_START_TIME
@@ -8382,7 +8602,7 @@ def register_high_level_tools(mcp, make_request):
             if feature not in _HANDLER_FEATURES:
                 continue
             if attr == "_collect_diagnostics_payload":
-                # Closure inside register_high_level_tools — verify by
+                # Closure inside register_high_level_tools 鈥?verify by
                 # reading the source rather than hasattr.
                 try:
                     src_text = _Path(module_path).read_text(
@@ -8440,7 +8660,7 @@ def register_high_level_tools(mcp, make_request):
         # Audit rule: every tool that has a contract_version MUST also
         # support format="json" so the live response can be stamped.
         # Anything in _CONTRACT_VERSIONS but absent from
-        # _TOOLS_WITH_JSON_STAMP gets surfaced — this prevents a future
+        # _TOOLS_WITH_JSON_STAMP gets surfaced 鈥?this prevents a future
         # text-only tool slipping into the flagship roster without an
         # auditable response.
         json_stamp_set = set(_TOOLS_WITH_JSON_STAMP)
@@ -8459,7 +8679,7 @@ def register_high_level_tools(mcp, make_request):
 
         # audit-bundle.r12 (workspace.backend_root_visibility): probe the
         # backend so an auditor can see whether the MCP-host root and the
-        # FastAPI backend root agree. Best-effort — when the backend
+        # FastAPI backend root agree. Best-effort 鈥?when the backend
         # doesn't expose a canonical root or a resolved path, we leave
         # the field null and add a workspace_root_warning.
         backend_workspace_root: Optional[str] = None
@@ -8474,7 +8694,7 @@ def register_high_level_tools(mcp, make_request):
                 backend_workspace_root_source = "backend_response"
             elif resolved:
                 # Derive root from the resolved file path: strip the file
-                # name to get a directory, then resolve. Best-effort —
+                # name to get a directory, then resolve. Best-effort 鈥?
                 # only valid when the backend returned an absolute path.
                 p = Path(resolved)
                 if p.is_absolute():
@@ -8524,7 +8744,7 @@ def register_high_level_tools(mcp, make_request):
         }
         # Note: _stamp injects contract_version="status.v1" + handler_version
         # for omni_status itself. expected_contract_versions above is the
-        # per-tool reference table — callers compare each tool's response
+        # per-tool reference table 鈥?callers compare each tool's response
         # contract_version against this map to detect a stale binding.
         _stamp(payload, tool="omni_status")
         return json.dumps(payload, ensure_ascii=False, indent=2)
@@ -8538,10 +8758,10 @@ def register_high_level_tools(mcp, make_request):
         """Discover available OmniCode tools and their capabilities.
 
         Call with no query to get the full default tool listing plus the
-        recommended pre-edit workflow.  Call with a free-text query —
-        in **English or Chinese** — and the tool runs the workspace's
-        Tool Intent Registry against it: tokeniser → per-tool keyword
-        match (EN + ZH) → multilingual intent patterns → ranked output
+        recommended pre-edit workflow.  Call with a free-text query 鈥?
+        in **English or Chinese** 鈥?and the tool runs the workspace's
+        Tool Intent Registry against it: tokeniser 鈫?per-tool keyword
+        match (EN + ZH) 鈫?multilingual intent patterns 鈫?ranked output
         with ``why_matched`` annotations and a tailored next-step
         pipeline.
 
@@ -8564,9 +8784,9 @@ def register_high_level_tools(mcp, make_request):
         Eight core tools:
           - omni_search:      search code (auto/semantic/symbol/text/hybrid/references)
           - omni_read:        read files (outline/symbols/full/imports/diagnostics/range)
-          - omni_impact:      blast radius — callers / callees / risk / related tests
+          - omni_impact:      blast radius 鈥?callers / callees / risk / related tests
           - omni_diagnostics: lint / type / static analysis for a file
-          - omni_context:     composer — outline + impact + memory + git in one call
+          - omni_context:     composer 鈥?outline + impact + memory + git in one call
           - omni_memory:      project memory (search/store/advisory)
           - omni_patch:       safe edit (preview / validate / apply / rollback)
           - omni_skill:       discover packaged workflow recipes (skills)
@@ -8582,7 +8802,7 @@ def register_high_level_tools(mcp, make_request):
         tools_catalogue: List[Dict[str, Any]] = [
             {
                 "name": "omni_context",
-                "desc": "Composer — outline + impact + memory + git in one call",
+                "desc": "Composer 鈥?outline + impact + memory + git in one call",
                 "scenario": "First call when starting a task; aggregates outline/impact/memory/git into one response with a token_budget.",
                 "keywords": [
                     "context", "compose", "task", "understand", "before",
@@ -8617,7 +8837,7 @@ def register_high_level_tools(mcp, make_request):
             },
             {
                 "name": "omni_impact",
-                "desc": "Blast radius — callers/callees/risk/suggested tests",
+                "desc": "Blast radius 鈥?callers/callees/risk/suggested tests",
                 "scenario": "Before any non-trivial edit; reports risk level + callers + callees + recommended tests.",
                 "keywords": [
                     "impact", "blast", "radius", "risk", "callers", "callees",
@@ -8653,7 +8873,7 @@ def register_high_level_tools(mcp, make_request):
             {
                 "name": "omni_patch",
                 "desc": "Safe edit (preview / validate / apply / rollback / sessions)",
-                "scenario": "Never write to disk directly; always go preview→validate→apply, keep session_id for rollback.",
+                "scenario": "Never write to disk directly; always go preview鈫抳alidate鈫抋pply, keep session_id for rollback.",
                 "keywords": [
                     "patch", "edit", "modify", "change", "write",
                     "preview", "validate", "apply", "rollback", "rewrite",
@@ -8664,8 +8884,8 @@ def register_high_level_tools(mcp, make_request):
             },
             {
                 "name": "omni_skill",
-                "desc": "Discover packaged workflow recipes (impact-review, safe-refactor, …)",
-                "scenario": "Look up a multi-step recipe before improvising — recipes bundle the right tool sequence.",
+                "desc": "Discover packaged workflow recipes (impact-review, safe-refactor, 鈥?",
+                "scenario": "Look up a multi-step recipe before improvising 鈥?recipes bundle the right tool sequence.",
                 "keywords": [
                     "skill", "recipe", "workflow", "playbook", "guide",
                     "how to", "best practice", "pipeline",
@@ -8674,12 +8894,12 @@ def register_high_level_tools(mcp, make_request):
             },
             {
                 "name": "discover_tools",
-                "desc": "Find what's available — keyword + intent based",
+                "desc": "Find what's available 鈥?keyword + intent based",
                 "scenario": "When unsure which tool fits the task.",
                 "keywords": ["discover", "tools", "what tools", "available"],
                 "deprecated": False,
             },
-            # Deprecated aliases — only matched when user names them explicitly.
+            # Deprecated aliases 鈥?only matched when user names them explicitly.
             {
                 "name": "omni_analyze",
                 "desc": "[deprecated alias] Use omni_impact",
@@ -8707,33 +8927,33 @@ def register_high_level_tools(mcp, make_request):
         ]
 
         default_pipeline = [
-            "1. omni_skill(action='list')             — see if a recipe exists",
-            "2. omni_context(file=… or task=…)       — gather outline + impact + memory + git",
-            "3. omni_impact(symbol=…)                — check blast radius before editing",
-            "4. omni_diagnostics(file=…)             — see existing lint/type issues",
-            "5. omni_search(mode='references', …)    — find every callsite of the symbol",
-            "6. omni_patch(action='preview', …)      — render the diff",
-            "7. omni_patch(action='validate', …)     — run static checks on the patch",
-            "8. omni_patch(action='apply', …)        — write + create rollback hook",
-            "9. omni_patch(action='rollback', session_id=…)  — undo on regret",
+            "1. omni_skill(action='list')             鈥?see if a recipe exists",
+            "2. omni_context(file=鈥?or task=鈥?       鈥?gather outline + impact + memory + git",
+            "3. omni_impact(symbol=鈥?                鈥?check blast radius before editing",
+            "4. omni_diagnostics(file=鈥?             鈥?see existing lint/type issues",
+            "5. omni_search(mode='references', 鈥?    鈥?find every callsite of the symbol",
+            "6. omni_patch(action='preview', 鈥?      鈥?render the diff",
+            "7. omni_patch(action='validate', 鈥?     鈥?run static checks on the patch",
+            "8. omni_patch(action='apply', 鈥?        鈥?write + create rollback hook",
+            "9. omni_patch(action='rollback', session_id=鈥?  鈥?undo on regret",
         ]
 
         # ------------------------------------------------------------------
-        # Empty query → unchanged default listing + full pipeline.
+        # Empty query 鈫?unchanged default listing + full pipeline.
         # ------------------------------------------------------------------
         if not (query and query.strip()):
             non_deprecated = [t for t in tools_catalogue if not t["deprecated"]]
-            lines = ["📦 OmniCode tools:\n"]
+            lines = ["馃摝 OmniCode tools:\n"]
             for t in non_deprecated:
-                lines.append(f"  • {t['name']:<18} {t['desc']}")
+                lines.append(f"  鈥?{t['name']:<18} {t['desc']}")
             lines.append("")
-            lines.append("💡 Recommended flow before any edit:")
+            lines.append("馃挕 Recommended flow before any edit:")
             for step in default_pipeline:
                 lines.append(f"   {step}")
             return "\n".join(lines)
 
         # ------------------------------------------------------------------
-        # Non-empty query → tokenise + intent-match + score.
+        # Non-empty query 鈫?tokenise + intent-match + score.
         # ------------------------------------------------------------------
         # 1) Tokenise: lowercase + word-boundary split, drop stop-words.
         STOPWORDS = {
@@ -8859,49 +9079,49 @@ def register_high_level_tools(mcp, make_request):
         # ------------------------------------------------------------------
         if not scores:
             lines = [
-                f"🔍 No direct keyword match for '{query}'.",
+                f"馃攳 No direct keyword match for '{query}'.",
                 "",
-                "📦 Showing default tool listing — pick one of:",
+                "馃摝 Showing default tool listing 鈥?pick one of:",
                 "",
             ]
             for t in tools_catalogue:
                 if t["deprecated"]:
                     continue
-                lines.append(f"  • {t['name']:<18} {t['desc']}")
+                lines.append(f"  鈥?{t['name']:<18} {t['desc']}")
             lines.append("")
-            lines.append("💡 Default workflow before any edit:")
+            lines.append("馃挕 Default workflow before any edit:")
             for step in default_pipeline:
                 lines.append(f"   {step}")
             return "\n".join(lines)
 
         ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
         info_by_name = {t["name"]: t for t in tools_catalogue}
-        lines = [f"🔍 Tools matching '{query}' (ranked):\n"]
+        lines = [f"馃攳 Tools matching '{query}' (ranked):\n"]
         for name, score in ranked[:6]:
             info = info_by_name[name]
-            tag = " ⚠️ deprecated alias" if info.get("deprecated") else ""
-            lines.append(f"  • {name}{tag}  (score={score})")
+            tag = " 鈿狅笍 deprecated alias" if info.get("deprecated") else ""
+            lines.append(f"  鈥?{name}{tag}  (score={score})")
             lines.append(f"      {info['desc']}")
-            lines.append(f"      ↳ {info['scenario']}")
+            lines.append(f"      鈫?{info['scenario']}")
             if why.get(name):
                 shown = ", ".join(why[name][:4])
                 lines.append(f"      why_matched: {shown}")
             lines.append("")
 
         # If the top match is omni_patch, append the safe-edit pipeline as
-        # an actionable hint — saves the AI an extra discovery call.
+        # an actionable hint 鈥?saves the AI an extra discovery call.
         top_name = ranked[0][0]
         if top_name == "omni_patch":
-            lines.append("💡 Safe edit pipeline:")
-            lines.append("   1. omni_patch(action='preview', file=…, content=…)")
-            lines.append("   2. omni_patch(action='validate', file=…, content=…)")
-            lines.append("   3. omni_patch(action='apply', file=…, content=…)")
-            lines.append("   4. omni_patch(action='rollback', session_id=…)  # if needed")
+            lines.append("馃挕 Safe edit pipeline:")
+            lines.append("   1. omni_patch(action='preview', file=鈥? content=鈥?")
+            lines.append("   2. omni_patch(action='validate', file=鈥? content=鈥?")
+            lines.append("   3. omni_patch(action='apply', file=鈥? content=鈥?")
+            lines.append("   4. omni_patch(action='rollback', session_id=鈥?  # if needed")
         elif top_name in ("omni_context", "omni_impact", "omni_read"):
-            lines.append("💡 Pre-edit understanding pipeline:")
-            lines.append("   1. omni_context(task=… or file=…)")
-            lines.append("   2. omni_search(mode='references', query=…)")
-            lines.append("   3. omni_read(file=…, mode='symbol', symbol=…)")
-            lines.append("   4. omni_impact(symbol=…)")
+            lines.append("馃挕 Pre-edit understanding pipeline:")
+            lines.append("   1. omni_context(task=鈥?or file=鈥?")
+            lines.append("   2. omni_search(mode='references', query=鈥?")
+            lines.append("   3. omni_read(file=鈥? mode='symbol', symbol=鈥?")
+            lines.append("   4. omni_impact(symbol=鈥?")
 
         return "\n".join(lines)

@@ -38,6 +38,7 @@ dependencies = [
     "tree-sitter-rust",
     "gitpython>=3.1.0",
     "tiktoken",
+    "rapidfuzz>=3.0.0",
 ]
 
 [project.optional-dependencies]

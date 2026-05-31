@@ -1,9 +1,23 @@
 {
   "name": "omni-test-coverage",
-  "description": "Find tests related to a symbol and surface the suggested commands to run them.",
-  "version": "1.0.0",
+  "description": "Find tests related to a symbol and surface targeted commands to run them; flag a coverage gap and suggest adding a test when nothing matches.",
+  "version": "2.1.0",
+  "when_to_use": "After (or alongside) a refactor — answers 'what targeted command should I run to verify nothing regressed?'. Falls back to suggesting a new test when the call graph and search both come up empty.",
+  "tools_used": ["omni_impact", "omni_search"],
+  "does_execute": false,
+  "recipe_for_handler_features": [
+    "impact.boundary_contracts",
+    "search.source_confidence"
+  ],
+  "safety_notes": [
+    "Read-only flow — no step writes to disk.",
+    "Suggested commands are printed; the AI / user decides whether to run them.",
+    "Never recommend a full project-wide pytest as the only option — prefer targeted tests; only recommend the full suite as a last resort with coverage_gap=true."
+  ],
   "keywords": [
-    "tests", "coverage", "related tests", "verify", "before merge"
+    "tests", "coverage", "related tests", "verify", "before merge",
+    "coverage gap", "no tests", "missing tests",
+    "测试", "测试覆盖", "相关测试", "回归", "覆盖缺失"
   ],
   "inputs": [
     {
@@ -14,19 +28,79 @@
   ],
   "steps": [
     {
+      "id": "impact_tests",
+      "title": "Pull the suggested-tests list from the call graph",
       "tool": "omni_impact",
-      "args": {"symbol": "${symbol}"},
-      "explain": "Risk badge + 'suggested tests' list (test files + pytest commands)."
+      "purpose": "Risk badge + tests/ files known to reach the symbol via call-graph + suggested pytest/jest commands. impact.v2 returns suggested_commands as ready-to-run targeted invocations (e.g. 'pytest tests/unit/test_x.py').",
+      "args": {"symbol": "${symbol}", "format": "json"},
+      "required": true,
+      "condition": "always",
+      "consume_fields": [
+        "suggested_tests",
+        "suggested_commands",
+        "files_involved",
+        "risk",
+        "confidence"
+      ],
+      "post_step_guidance": [
+        "If suggested_tests is non-empty, prefer the targeted suggested_commands over any broader sweep.",
+        "If suggested_tests is empty, run the search_tests step next; do not jump to a full pytest yet."
+      ],
+      "failure_policy": {
+        "on_error": "continue_with_reduced_confidence",
+        "notes": "Search step can still salvage the recipe if the graph endpoint is down."
+      }
     },
     {
+      "id": "search_tests",
+      "title": "Hybrid-search test files mentioning the symbol",
       "tool": "omni_search",
+      "purpose": "Catches tests that don't show up in the static call graph (e.g. dynamic dispatch, parametrised fixtures, integration tests that import the symbol via string).",
       "args": {
         "query": "test ${symbol}",
         "mode": "hybrid",
         "max_results": 8,
-        "around_file": "tests/"
+        "around_file": "tests/",
+        "format": "json"
       },
-      "explain": "Find test files mentioning the symbol, biased toward the tests/ tree."
+      "required": true,
+      "condition": "always",
+      "consume_fields": ["results", "total", "count", "source", "confidence"],
+      "failure_policy": {
+        "on_error": "continue_with_reduced_confidence",
+        "notes": "Even a partial result is enough to recommend SOME targeted test."
+      }
+    },
+    {
+      "id": "suggest_new_test",
+      "title": "Suggest adding a targeted test when no existing test is found",
+      "tool": "manual_step",
+      "purpose": "If omni_impact.suggested_tests is empty AND tests/ search returns no relevant test file, mark coverage_gap=true and recommend adding a focused unit test for the target symbol — either before the patch (test-first) or alongside it. Do NOT recommend running the entire test suite as the sole option.",
+      "args": {
+        "recommendation_template": "Add tests/unit/test_${symbol}.py covering the primary branches of ${symbol} before applying the patch."
+      },
+      "required": false,
+      "condition": "suggested_tests_empty_and_search_empty",
+      "produces": [
+        "coverage_gap=true",
+        "recommended_test_path",
+        "confidence='low'"
+      ],
+      "failure_policy": {
+        "on_error": "continue_with_warning",
+        "notes": "This step is advisory; if it can't produce a recommendation, surface coverage_gap=true and stop."
+      }
     }
+  ],
+  "success_criteria": [
+    "A targeted test file or suggested_command is recorded, OR coverage_gap=true is reported with a recommended_test_path",
+    "The workflow does not fall back to a project-wide pytest as the only recommendation unless every other step produced empty results",
+    "When suggested_commands are surfaced, they are kept as targeted invocations (e.g. `pytest tests/unit/test_X.py`), not whole-suite runs"
+  ],
+  "next_actions": [
+    "Run omni_impact(symbol='${symbol}', format='json') to pull the suggested-tests list",
+    "Then omni_search(query='test ${symbol}', mode='hybrid', around_file='tests/', format='json') to catch dynamic-dispatch tests",
+    "If both steps produced empty results, follow the suggest_new_test step's template and add a focused unit test before patching",
+    "If you found tests, run the targeted suggested_commands (and only fall back to the full suite if they pass)"
   ]
 }

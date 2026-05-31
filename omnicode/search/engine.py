@@ -1,3 +1,4 @@
+import fnmatch
 import json
 import logging
 import os
@@ -11,6 +12,47 @@ from omnicode.search.models import SearchRequest
 from omnicode.search.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
+
+
+def _norm_path(file_path: str) -> str:
+    """Normalize a workspace-relative path for index storage.
+
+    All chunks live under a single canonical key: forward slashes, no
+    leading ``./``. Without this, the same file gets indexed twice on
+    Windows whenever one caller uses ``omnicode\\search\\engine.py``
+    and another uses ``omnicode/search/engine.py`` — and ~30% of search
+    hits end up duplicated under the wrong shape.
+    """
+    if not file_path:
+        return file_path
+    p = str(file_path).replace("\\", "/")
+    while p.startswith("./"):
+        p = p[2:]
+    return p
+
+
+def _matches_any_glob(path: str, patterns: List[str]) -> bool:
+    """Return True if ``path`` matches at least one of ``patterns``.
+
+    Both ``path`` and the patterns are normalized to forward slashes
+    before matching. Patterns can be:
+      - basename globs:    "*.py"
+      - subtree globs:     "src/**", "tests/**/*.py"
+      - exact paths:       "main.py"
+    """
+    norm = _norm_path(path)
+    base = os.path.basename(norm)
+    for raw in patterns:
+        pat = raw.strip().replace("\\", "/")
+        if not pat or pat == "*" or pat == "**":
+            return True
+        if "/" not in pat:
+            if fnmatch.fnmatch(base, pat):
+                return True
+        else:
+            if fnmatch.fnmatch(norm, pat):
+                return True
+    return False
 
 class LegacySearchResult:
     """
@@ -137,12 +179,19 @@ class SemanticSearchEngine:
                 model_name = get_settings().EMBEDDING_MODEL
                 # ``get_default_backend`` honours OMNICODE_EMBEDDING_BACKEND
                 # (local | remote | hybrid). Local mode keeps the offline
-                # SentenceTransformer behaviour the engine has always had.
+                # SentenceTransformer behaviour the engine has had.
                 self.embedding_model = get_default_backend(model_name)
                 logger.info(f"✅ embedding backend ready: {self.embedding_model.name} ({model_name})")
             except Exception as e:
                 logger.error(f"❌ Failed to load sentence-transformers: {e}")
                 raise
+
+        # One-shot self-heal: drop any legacy backslash-shaped duplicates
+        # left over from before path normalization landed.
+        try:
+            self._dedupe_legacy_path_rows()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Legacy path dedupe skipped: %s", exc)
 
         # Fetch index statistics from database
         try:
@@ -194,8 +243,52 @@ class SemanticSearchEngine:
     def get_stats(self) -> dict:
         return self.stats
 
+    def _dedupe_legacy_path_rows(self) -> int:
+        """Drop SQLite chunks whose ``file_path`` contains a backslash.
+
+        Older index runs wrote rows under both ``a/b.py`` *and*
+        ``a\\b.py`` shapes on Windows. After path normalization landed
+        we keep only the forward-slash variant; this helper strips the
+        legacy duplicates on startup so search results stop showing the
+        same file twice. Returns the number of rows deleted.
+        """
+        try:
+            cursor = self.vector_store.conn.cursor()
+            # SQLite's ``LIKE`` doesn't natively understand backslash —
+            # use the ``instr`` builtin, which is stable across platforms
+            # and avoids ESCAPE-clause portability issues.
+            cursor.execute(
+                "SELECT COUNT(*) FROM chunks WHERE instr(file_path, '\\') > 0"
+            )
+            n = cursor.fetchone()[0] or 0
+            if not n:
+                return 0
+            # Drop the FAISS rows for those chunks first so search() can
+            # never surface them again — even before the next reindex.
+            cursor.execute(
+                "SELECT faiss_id FROM chunks WHERE instr(file_path, '\\') > 0"
+            )
+            ids = [int(r[0]) for r in cursor.fetchall()]
+            if ids:
+                import numpy as np
+                try:
+                    self.vector_store.index.remove_ids(np.array(ids, dtype=np.int64))
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug("FAISS remove_ids during dedupe failed: %s", exc)
+            cursor.execute("DELETE FROM chunks WHERE instr(file_path, '\\') > 0")
+            self.vector_store.conn.commit()
+            self.vector_store._persist_index()
+            logger.info(
+                "Dedupe: removed %d legacy backslash-path chunk(s) from index.", n
+            )
+            return n
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Legacy path dedupe failed: %s", exc)
+            return 0
+
     async def update_file(self, file_path: str) -> None:
         """Parse, chunk, embed, and store a single file"""
+        file_path = _norm_path(file_path)
         full_path = os.path.abspath(os.path.join(self.working_dir, file_path))
         if not os.path.exists(full_path):
             logger.warning(f"File not found for index update: {file_path}")
@@ -219,8 +312,17 @@ class SemanticSearchEngine:
         access to the original tree. Returns the number of chunks
         produced so the agent can log progress / detect no-ops.
         """
-        # 1. Delete old chunks for this file
+        # Canonicalize path early so writes and lookups match across
+        # platforms. See _norm_path docstring.
+        file_path = _norm_path(file_path)
+
+        # 1. Delete old chunks for this file — including any legacy
+        #    backslash-shaped duplicates left over from before path
+        #    normalization landed.
         await self.vector_store.delete_by_file(file_path)
+        legacy = file_path.replace("/", "\\")
+        if legacy != file_path:
+            await self.vector_store.delete_by_file(legacy)
 
         # 2. Extract AST chunks
         language = os.path.splitext(file_path)[1].lstrip(".") or "python"
@@ -252,7 +354,11 @@ class SemanticSearchEngine:
     async def delete_file_index(self, file_path: str) -> bool:
         """Remove ``file_path`` from the vector store. Returns whether
         anything was actually deleted."""
+        file_path = _norm_path(file_path)
         existed = await self.vector_store.delete_by_file(file_path)
+        legacy = file_path.replace("/", "\\")
+        if legacy != file_path:
+            existed = await self.vector_store.delete_by_file(legacy) or existed
         await self.initialize()
         return bool(existed)
 
@@ -285,15 +391,19 @@ class SemanticSearchEngine:
 
         for change in changes:
             try:
+                norm_change_path = _norm_path(change.path)
                 if change.change_type == "deleted":
-                    await self.vector_store.delete_by_file(change.path)
-                    tracker.mark_deleted(change.path)
-                    logger.debug(f"Removed from index: {change.path}")
+                    await self.vector_store.delete_by_file(norm_change_path)
+                    legacy = norm_change_path.replace("/", "\\")
+                    if legacy != norm_change_path:
+                        await self.vector_store.delete_by_file(legacy)
+                    tracker.mark_deleted(norm_change_path)
+                    logger.debug(f"Removed from index: {norm_change_path}")
                 else:
                     # new or modified — re-index
-                    await self.update_file(change.path)
+                    await self.update_file(norm_change_path)
                     tracker.mark_indexed(
-                        self.working_dir, change.path, change.content_hash
+                        self.working_dir, norm_change_path, change.content_hash
                     )
             except Exception as e:
                 logger.warning(f"Failed to index {change.path}: {e}")
@@ -487,15 +597,38 @@ class SemanticSearchEngine:
             ".cpp": "cpp", ".cc": "cpp", ".c": "cpp",
             ".h": "cpp", ".hpp": "cpp",
             ".java": "java", ".go": "go", ".rs": "rust",
-        }.get(ext, "python")
+            ".md": "markdown", ".markdown": "markdown",
+            ".json": "json", ".yaml": "yaml", ".yml": "yaml",
+            ".toml": "toml", ".sh": "shell", ".bash": "shell",
+            ".rb": "ruby", ".php": "php", ".kt": "kotlin", ".cs": "csharp",
+        }.get(ext, "text")
 
     async def search(self, request: SearchRequest) -> List[LegacySearchResult]:
         """Execute hybrid RRF search or text search and map to legacy SearchResult model"""
         logger.info(f"Executing search: query='{request.query}', type='{request.search_type}'")
 
-        metadata_filter = None
+        # ``file_pattern`` is a comma-separated glob list. We over-fetch
+        # at the SQL level and apply fnmatch on the way out so every
+        # search type ends up filtered consistently.
+        glob_list: List[str] = []
         if request.file_pattern:
-            metadata_filter = {"file_path": request.file_pattern} # simplistic glob filtering mapping
+            glob_list = [
+                g.strip() for g in str(request.file_pattern).split(",") if g.strip()
+            ]
+
+        def _glob_ok(file_path: str) -> bool:
+            if not glob_list:
+                return True
+            return _matches_any_glob(file_path, glob_list)
+
+        # Semantic search uses metadata_filter only when a single glob
+        # is passed and it's an exact path; otherwise we filter in
+        # Python after FAISS recall. The previous behaviour silently
+        # truncated to ``glob_list[0]`` and treated it as an exact
+        # ``file_path`` match — which dropped almost every result.
+        metadata_filter = None
+        if len(glob_list) == 1 and "*" not in glob_list[0] and "?" not in glob_list[0]:
+            metadata_filter = {"file_path": _norm_path(glob_list[0])}
 
         results = []
 
@@ -506,6 +639,8 @@ class SemanticSearchEngine:
             rows = cursor.fetchall()
 
             for row in rows:
+                if not _glob_ok(row["file_path"]):
+                    continue
                 results.append(LegacySearchResult(
                     file_path=row["file_path"],
                     symbol_name="",
@@ -522,46 +657,52 @@ class SemanticSearchEngine:
         elif request.search_type in ("symbol", "symbol_exact", "fuzzy_symbol"):
             # Symbol search — match the literal symbol name stored in
             # ``metadata.symbol_name`` (extracted at indexing time by the
-            # AST chunker).  Falls back to scanning the content column when
-            # metadata is unavailable.
+            # AST chunker). Uses RapidFuzz for fuzzy mode so 1-2 char
+            # typos still recall (e.g. "creat_app" -> "create_app").
             cursor = self.vector_store.conn.cursor()
             q = request.query.strip()
             if not q:
                 return results
 
             fuzzy = request.search_type != "symbol_exact"
-            # The metadata column is JSON text in SQLite, so a LIKE on the
-            # serialized blob is a cheap way to find the symbol_name field.
-            if fuzzy:
-                pattern = f'%"symbol_name": "%{q}%"%'
-                pattern2 = f'%"symbol_name": "%{q.lower()}%"%'
-            else:
-                pattern = f'%"symbol_name": "{q}"%'
-                pattern2 = pattern  # exact mode — single pattern
 
             # Optional symbol-type filter (function / class / method / ...).
             sql_extra = ""
-            params = [pattern, pattern2]
+            sql_params: List[Any] = []
             if getattr(request, "symbol_type", None):
-                sql_extra = " AND chunk_type = ?"
-                params.append(request.symbol_type)
+                sql_extra = " WHERE chunk_type = ?"
+                sql_params.append(request.symbol_type)
 
             cursor.execute(
                 f"""
                 SELECT file_path, chunk_type, content, metadata
                 FROM chunks
-                WHERE (metadata LIKE ? OR LOWER(metadata) LIKE ?){sql_extra}
-                LIMIT ?
+                {sql_extra}
                 """,
-                params + [request.max_results * 4],  # over-fetch then rank
+                sql_params,
             )
             rows = cursor.fetchall()
 
-            # Score by simple distance: exact name = 1.0, prefix match = 0.9,
-            # contains = 0.6.  Caller can filter by request.min_score.
-            scored = []
             ql = q.lower()
+            scored = []
+
+            # RapidFuzz lets a 1-2 char edit-distance still surface, which
+            # the previous LIKE-based scorer dropped to score=0. Fall back
+            # to substring matching when rapidfuzz isn't installed so the
+            # tool keeps working on minimal deployments.
+            try:
+                from rapidfuzz import fuzz as _rf_fuzz
+                _have_rapidfuzz = True
+            except Exception:  # pragma: no cover - defensive
+                _rf_fuzz = None
+                _have_rapidfuzz = False
+
+            min_score = float(request.min_score or 0.0)
+
             for row in rows:
+                # Glob filter early — saves JSON parse on rows we'd drop.
+                if not _glob_ok(row["file_path"]):
+                    continue
                 try:
                     meta = json.loads(row["metadata"]) if row["metadata"] else {}
                 except Exception:
@@ -570,6 +711,10 @@ class SemanticSearchEngine:
                 if not name:
                     continue
                 nl = name.lower()
+
+                # Tier 1: hard literal matches keep the deterministic
+                # 1.0 / 0.9 / 0.7 scoring so behaviour stays predictable
+                # for "exact" mode and unit tests.
                 if nl == ql:
                     score = 1.0
                 elif nl.startswith(ql):
@@ -577,8 +722,27 @@ class SemanticSearchEngine:
                 elif ql in nl:
                     score = 0.7
                 else:
-                    score = 0.5
-                if score < (request.min_score or 0.0):
+                    if not fuzzy:
+                        continue
+                    # Tier 2 (fuzzy only): RapidFuzz token-set ratio so
+                    # 1-2 char typos still rank near 0.6-0.8.
+                    if _have_rapidfuzz:
+                        ratio = _rf_fuzz.WRatio(ql, nl)
+                        # Map 0-100 -> 0.0-0.95 with a 50 floor so
+                        # marginal matches don't pollute the result list.
+                        if ratio < 60:
+                            continue
+                        score = min(0.95, 0.5 + (ratio - 60) / 100)
+                    else:
+                        # No rapidfuzz: only fall back when query is a
+                        # short prefix of a token inside the symbol.
+                        tokens = nl.replace("_", " ").replace(".", " ").split()
+                        if any(t.startswith(ql) for t in tokens):
+                            score = 0.55
+                        else:
+                            continue
+
+                if score < min_score:
                     continue
                 scored.append((score, row, meta, name))
 
@@ -587,11 +751,17 @@ class SemanticSearchEngine:
             for score, row, meta, name in scored[: request.max_results]:
                 # Tag *why* this row matched so AI editors can decide which
                 # signal to trust. Exact symbol hits are the strongest;
-                # prefix/contains matches get more conservative tags.
-                why = ["symbol:exact"] if score >= 1.0 else (
-                    ["symbol:prefix"] if score >= 0.9 else
-                    (["symbol:contains"] if score >= 0.7 else ["symbol:fuzzy"])
-                )
+                # prefix/contains/fuzzy matches get more conservative tags.
+                if score >= 1.0:
+                    why = ["symbol:exact"]
+                elif score >= 0.9:
+                    why = ["symbol:prefix"]
+                elif score >= 0.7:
+                    why = ["symbol:contains"]
+                else:
+                    why = ["symbol:fuzzy"]
+                    if _have_rapidfuzz:
+                        why.append("rapidfuzz")
                 results.append(LegacySearchResult(
                     file_path=row["file_path"],
                     symbol_name=name,
@@ -606,13 +776,19 @@ class SemanticSearchEngine:
         else:
             # Semantic / Hybrid search using RRF
             query_emb = self.embedding_model.encode(request.query)
+            # Over-fetch when we'll be Python-side glob filtering so the
+            # result list isn't suspiciously short on a narrow pattern.
+            top_k = request.max_results
+            fetch_k = top_k * 5 if (glob_list and metadata_filter is None) else top_k
             hybrid_results = await self.vector_store.search(
                 query_emb,
-                top_k=request.max_results,
-                metadata_filter=metadata_filter
+                top_k=fetch_k,
+                metadata_filter=metadata_filter,
             )
 
             for item in hybrid_results:
+                if not _glob_ok(item.get("file_path", "")):
+                    continue
                 meta = item.get("metadata", {})
                 # Hybrid RRF can be entered via several recall paths; we
                 # keep ``semantic`` as the base tag and append a stronger
@@ -635,6 +811,8 @@ class SemanticSearchEngine:
                     relevance_score=item["score"],
                     why_matched=why,
                 ))
+                if len(results) >= top_k:
+                    break
 
             # Optional cross-encoder reranker (Wave 2 W2-9). Toggle via
             # ``OMNICODE_RERANKER=true``. The reranker is responsible for

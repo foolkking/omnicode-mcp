@@ -1042,6 +1042,53 @@ async def _read_mode_dispatch(file_path: str, mode: str, with_line_numbers: bool
     # MODE: outline — signatures + first docstring line
     # -------------------------------------------------------------------------
     if mode == "outline":
+        # Special-case Markdown: tree-sitter doesn't ship a default Markdown
+        # grammar in our env, so the symbol extractor returns []. Pull
+        # headings out with a tiny regex so the agent at least gets a TOC.
+        if file_path.lower().endswith((".md", ".markdown", ".mdx")):
+            import re as _re
+
+            outline_items = []
+            heading_re = _re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
+            in_fence = False
+            for i, ln in enumerate(lines, 1):
+                stripped = ln.lstrip()
+                if stripped.startswith("```"):
+                    in_fence = not in_fence
+                    continue
+                if in_fence:
+                    continue
+                m = heading_re.match(ln)
+                if m:
+                    level = len(m.group(1))
+                    title = m.group(2).strip()
+                    parent = None
+                    # Crude parent inference: previous heading at level-1.
+                    for prev in reversed(outline_items):
+                        if prev.get("_level", 1) < level:
+                            parent = prev["name"]
+                            break
+                    outline_items.append({
+                        "name": title,
+                        "kind": f"h{level}",
+                        "signature": ln.rstrip(),
+                        "doc": "",
+                        "lines": [i, i],
+                        "parent": parent,
+                        "_level": level,
+                    })
+            # Strip the internal _level helper before returning.
+            for item in outline_items:
+                item.pop("_level", None)
+            return create_success_response({
+                "file": file_path,
+                "mode": "outline",
+                "total_lines": total_lines,
+                "language": "markdown",
+                "symbols": outline_items,
+                "symbol_count": len(outline_items),
+            })
+
         search_engine = get_search_engine()
         if not search_engine:
             return create_error_response("Search engine not initialized", 500)
@@ -1128,41 +1175,156 @@ async def _read_mode_dispatch(file_path: str, mode: str, with_line_numbers: bool
 
     # -------------------------------------------------------------------------
     # MODE: imports — only import/require lines
+    #
+    # Uses the AST when possible so multi-line imports come back with their
+    # closing parenthesis intact and "import" appearing inside a string
+    # literal (e.g. `# from x import y` in a docstring) is not misclassified.
+    # Falls back to the line-prefix heuristic when the language has no
+    # tree-sitter parser (.md, .yaml, ...).
     # -------------------------------------------------------------------------
     if mode == "imports":
-        import_lines = []
-        for i, ln in enumerate(lines, 1):
-            stripped = ln.strip()
-            if stripped.startswith(("import ", "from ", "require(", "require (")) or \
-               stripped.startswith(("const ", "let ", "var ")) and " require(" in stripped or \
-               stripped.startswith("#include"):
-                import_lines.append({"line": i, "text": stripped})
+        from core import get_ast_parser
 
-        rendered = "\n".join(f"{il['line']:>4} | {il['text']}" for il in import_lines) if with_line_numbers else \
-                   "\n".join(il["text"] for il in import_lines)
+        search_engine = get_search_engine()
+        language = (
+            search_engine._guess_language(file_path)
+            if search_engine is not None
+            else ""
+        )
+
+        import_lines: list[dict] = []
+        ast_parser = get_ast_parser()
+        ast_used = False
+
+        if ast_parser is not None and language:
+            try:
+                imports = ast_parser.extract_imports(content, language) or []
+            except Exception:
+                imports = []
+
+            for imp in imports:
+                if not isinstance(imp, dict):
+                    continue
+                start = int(imp.get("line") or imp.get("line_start") or 0)
+                if start <= 0:
+                    continue
+                # The raw text from extract_imports already covers the
+                # whole node (start_byte..end_byte) so multi-line imports
+                # carry their trailing ')' / '}' along.
+                raw = imp.get("raw") or imp.get("module") or ""
+                if not raw and 1 <= start <= total_lines:
+                    raw = lines[start - 1]
+                # Compute end line by counting newlines in the raw block
+                end_line_num = start + max(0, raw.count("\n"))
+                import_lines.append(
+                    {
+                        "line": start,
+                        "line_end": end_line_num,
+                        "text": raw,
+                    }
+                )
+                ast_used = True
+
+        if not ast_used:
+            # Heuristic fallback for non-AST-supported languages.
+            for i, ln in enumerate(lines, 1):
+                stripped = ln.strip()
+                if (
+                    stripped.startswith(("import ", "from ", "require(", "require ("))
+                    or (
+                        stripped.startswith(("const ", "let ", "var "))
+                        and " require(" in stripped
+                    )
+                    or stripped.startswith("#include")
+                    or stripped.startswith("use ")  # rust
+                    or stripped.startswith("package ")  # go / java
+                ):
+                    import_lines.append(
+                        {"line": i, "line_end": i, "text": stripped}
+                    )
+
+        if with_line_numbers:
+            rendered_parts: list[str] = []
+            for il in import_lines:
+                head = f"{il['line']:>4} | "
+                txt = il["text"]
+                if "\n" in txt:
+                    # Indent continuation lines so the column-alignment
+                    # stays consistent.
+                    pad = " " * len(head)
+                    parts = txt.split("\n")
+                    rendered_parts.append(
+                        head + parts[0] + "\n" + "\n".join(pad + p for p in parts[1:])
+                    )
+                else:
+                    rendered_parts.append(head + txt)
+            rendered = "\n".join(rendered_parts)
+        else:
+            rendered = "\n".join(il["text"] for il in import_lines)
 
         return create_success_response({
             "file": file_path,
             "mode": "imports",
             "total_lines": total_lines,
+            "language": language,
             "imports": import_lines,
             "import_count": len(import_lines),
             "content": rendered,
+            "ast_used": ast_used,
         })
 
     # -------------------------------------------------------------------------
     # MODE: diagnostics — run guard checks on this file
+    #
+    # Filters out mypy info-level "note" lines (which add noise without
+    # being actionable: e.g. "by default the bodies of untyped
+    # functions are not checked"). Errors and warnings are kept.
     # -------------------------------------------------------------------------
     if mode == "diagnostics":
         try:
             from omnicode.guard import ProactiveGuard
+            from omnicode.guard.models import GuardResult, IssueSeverity
+
             guard = ProactiveGuard()
             result = await guard.check(file_path)
+
+            issues_out: list[dict] = []
+            tools_run: list[str] = []
+            tools_skipped: list[str] = []
+
+            if isinstance(result, GuardResult):
+                tools_run = list(result.tools_run or [])
+                tools_skipped = list(result.tools_skipped or [])
+                for issue in result.issues or []:
+                    sev = (
+                        issue.severity.value
+                        if isinstance(issue.severity, IssueSeverity)
+                        else str(issue.severity)
+                    )
+                    tool = (issue.tool or "").lower()
+                    # Drop mypy info-level notes — they're advisory, not actionable.
+                    if tool == "mypy" and sev == "info":
+                        continue
+                    issues_out.append(
+                        {
+                            "tool": issue.tool,
+                            "code": issue.code,
+                            "severity": sev,
+                            "message": issue.message,
+                            "line": issue.line,
+                            "column": issue.column,
+                            "file_path": issue.file_path,
+                        }
+                    )
+
             return create_success_response({
                 "file": file_path,
                 "mode": "diagnostics",
                 "total_lines": total_lines,
-                "diagnostics": result if isinstance(result, list) else [result] if result else [],
+                "diagnostics": issues_out,
+                "diagnostic_count": len(issues_out),
+                "tools_run": tools_run,
+                "tools_skipped": tools_skipped,
             })
         except Exception as exc:
             return create_success_response({
@@ -1170,6 +1332,7 @@ async def _read_mode_dispatch(file_path: str, mode: str, with_line_numbers: bool
                 "mode": "diagnostics",
                 "total_lines": total_lines,
                 "diagnostics": [],
+                "diagnostic_count": 0,
                 "note": f"Guard check unavailable: {exc}",
             })
 
@@ -1196,21 +1359,24 @@ async def _read_mode_dispatch(file_path: str, mode: str, with_line_numbers: bool
         if engine is None:
             return create_error_response("Search engine not initialized", 500)
 
+        # Don't pass ``file_pattern`` to the engine: most backends treat it
+        # as an fnmatch glob, and a full path with slashes won't match
+        # anything. We over-fetch and then strictly filter on this side.
         req = SearchRequest(
             query=query.strip(),
             search_type="semantic",
-            max_results=20,
-            file_pattern=file_path,
+            max_results=50,
         )
         results = await engine.search(req)
 
-        # Filter strictly to this file (file_pattern is a hint, not a hard
-        # filter inside the engine for all backends).
-        normalised = file_path.replace("\\", "/")
+        # Filter strictly to this file. Compare both forward-slash forms
+        # (handles the case where the indexer normalised one way and the
+        # caller passed the other).
+        normalised = file_path.replace("\\", "/").lstrip("./")
         filtered = []
         for r in results:
-            rp = (getattr(r, "file_path", "") or "").replace("\\", "/")
-            if rp == normalised or rp.endswith("/" + normalised):
+            rp = (getattr(r, "file_path", "") or "").replace("\\", "/").lstrip("./")
+            if rp == normalised or rp.endswith("/" + normalised) or normalised.endswith("/" + rp):
                 filtered.append(r)
 
         return create_success_response(

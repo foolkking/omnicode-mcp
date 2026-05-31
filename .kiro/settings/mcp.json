@@ -7,7 +7,30 @@
       ],
       "env": {
         "ENV_FILE": "C:\\Users\\86182\\Documents\\antigravity\\dazzling-heisenberg\\codebase-mcp\\.env"
-      }
+      },
+      "autoApprove": [
+        "omni_search",
+        "discover_tools",
+        "omni_read",
+        "omni_context",
+        "omni_read",
+        "omni_impact",
+        "omni_diagnostics",
+        "omni_memory",
+        "omni_impact",
+        "omni_diagnostics",
+        "omni_memory",
+        "omni_diagnostics",
+        "omni_memory",
+        "discover_tools",
+        "discover_tools",
+        "discover_tools",
+        "omni_skill",
+        "omni_skill",
+        "omni_patch",
+        "omni_patch",
+        "omni_status"
+      ]
     }
   }
 }
