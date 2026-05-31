@@ -307,14 +307,51 @@ single-client, the OS user boundary is enough.
 
 ```bash
 # Refuse to start when no auth source is configured
-python mcp_server.py --transport sse --port 6790 --auth required
+omnicode mcp --transport sse --port 6790 --auth required
 
 # auto-mode: gate on if a source exists, off otherwise
-python mcp_server.py --transport sse --auth auto
+omnicode mcp --transport sse --auth auto
 
 # unauthenticated (NOT recommended for cloud)
-python mcp_server.py --transport sse --auth off
+omnicode mcp --transport sse --auth off
 ```
+
+For local editors that only speak stdio, keep the MCP process local
+and point it at the cloud FastAPI backend:
+
+```bash
+omnicode mcp \
+  --backend-url https://omnicode.example.com \
+  --backend-token "$OMNICODE_API_KEY" \
+  --workspace C:/repo \
+  --workspace-id repo-a \
+  --executor hybrid
+```
+
+The local bridge sends tool requests to the remote backend with
+`X-API-Key`, `X-Omnicode-Workspace`, and `X-Omnicode-Executor`.
+If the editor supports SSE or streamable HTTP directly, connect it to
+the cloud MCP transport instead.
+
+For hybrid deployments, register the same logical id on the cloud
+before starting the local agent:
+
+```bash
+curl -X POST https://omnicode.example.com/workspaces \
+  -H "X-API-Key: $ADMIN_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"workspace_id":"repo-a","name":"repo-a","path":"/srv/omnicode/workspaces/repo-a-cache","set_active":true}'
+
+omnicode agent \
+  --remote https://omnicode.example.com \
+  --token "$OMNICODE_AGENT_TOKEN" \
+  --workspace C:/repo \
+  --workspace-id repo-a
+```
+
+The `/index/*` endpoints reject unknown or inactive `workspace_id`
+values. This is intentional: it prevents a local checkout from being
+indexed into the wrong cloud workspace.
 
 ### Layer 5 · Encryption at rest
 

@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 # but omni_read didn't); the omni_status tool reads this constant so the
 # next round can verify which build is actually serving traffic.
 # ---------------------------------------------------------------------------
-_HANDLER_VERSION = "2026.05.29.audit-bundle.r20"
+_HANDLER_VERSION = "2026.05.31.workspace-bridge.r21"
 _HANDLER_FEATURES: Tuple[str, ...] = (
     "search.source_confidence",       # omni_search row stamping
     "read.diagnostics_aligned",       # omni_read[diagnostics] uses _collect_diagnostics_payload
@@ -385,6 +385,9 @@ _HANDLER_FEATURES: Tuple[str, ...] = (
                                       # for unlinked new-file
                                       # rollbacks) instead of returning
                                       # stale post-apply content.
+    "workspace.identity_visibility",  # status exposes workspace_id /
+                                      # executor_mode for local-cloud
+                                      # bridge audits.
 )
 _PROCESS_START_TIME = None  # set lazily on first omni_status call
 
@@ -8514,6 +8517,13 @@ def register_high_level_tools(mcp, make_request):
             "tools_with_json_stamp": list(_TOOLS_WITH_JSON_STAMP),
             "workspace_root": str(ws_root),
             "workspace_root_source": ws_source,
+            "workspace_id": _os.environ.get("OMNICODE_WORKSPACE_ID") or None,
+            "executor_mode": _os.environ.get("OMNICODE_EXECUTOR_MODE") or None,
+            "local_workspace_root": (
+                _os.environ.get("OMNICODE_WORKSPACE_ROOT")
+                or _os.environ.get("OMNICODE_WORKSPACE")
+                or None
+            ),
             "cwd": str(cwd_path),
             "workspace_root_matches_cwd": ws_root == cwd_path,
             "backend_workspace_root": backend_workspace_root,

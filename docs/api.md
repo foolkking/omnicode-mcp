@@ -394,8 +394,16 @@ List or fetch the active.
 ### `POST /workspaces`
 
 ```jsonc
-{ "name": "my-app", "path": "C:/Users/me/projects/my-app", "set_active": false }
+{
+  "workspace_id": "repo-a",
+  "name": "my-app",
+  "path": "/srv/omnicode/workspaces/repo-a",
+  "set_active": false
+}
 ```
+
+`workspace_id` is optional. When supplied it must be stable and path
+safe: letters, numbers, `.`, `_`, `:`, `-`; no slashes or `..`.
 
 ### `DELETE /workspaces/{id}`
 
@@ -418,6 +426,16 @@ Flip the active flag and update `WORKING_DIR`.
 
 Five endpoints under `/index/*` for the `omnicode agent` watcher to
 push file bodies to a remote OmniCode server.
+
+Workspace-aware clients should send:
+
+```http
+X-Omnicode-Workspace: repo-a
+```
+
+If the id is unknown or not the active backend `WORKING_DIR`, the
+endpoint returns a structured 404/409 instead of indexing into the
+wrong project.
 
 ### `POST /index/upsert-file`
 
@@ -443,7 +461,7 @@ indexed counts plus per-file errors.
 ### `GET /index/sync-status` · `GET /index/stats`
 
 What the server has indexed (file count, chunks, embedding model
-name, working_dir).
+name, working_dir, workspace_id).
 
 All five endpoints respect the path sandbox.
 
@@ -639,12 +657,23 @@ Backwards-compat aliases (still register but redirect):
 omnicode mcp
 
 # SSE for remote MCP clients
-python mcp_server.py --transport sse --port 6790 --auth required
+omnicode mcp --transport sse --port 6790 --auth required
 
 # Streamable HTTP
-python mcp_server.py --transport streamable-http --auth auto
+omnicode mcp --transport streamable-http --auth auto
+
+# Local stdio bridge to a cloud FastAPI backend
+omnicode mcp \
+  --workspace C:/repo \
+  --workspace-id repo-a \
+  --backend-url https://omnicode.example.com \
+  --backend-token "$OMNICODE_API_KEY" \
+  --executor hybrid
 ```
 
 The `--auth required` flag refuses to start when no auth source is
 configured (neither `OMNICODE_API_KEY` nor any RBAC user). Runtime
-gate honours both sources.
+gate honours both sources. `--backend-url` controls where MCP tool
+handlers send their REST calls; `--backend-token` is forwarded as
+`X-API-Key`; `--workspace-id` is forwarded as
+`X-Omnicode-Workspace`.

@@ -374,9 +374,16 @@ omnicode doctor                    # python / LSP / models / ports check
 omnicode serve [--headless] [--console] [--mode local|cloud|hybrid]
 omnicode dev                       # console + auto-reload
 omnicode mcp                       # stdio MCP for AI editors
-omnicode agent --remote URL --token TOK --workspace .
+omnicode mcp --transport sse --port 6790 --auth required
+omnicode mcp --workspace . --workspace-id repo-a --backend-url https://omnicode.example.com --backend-token "$OMNICODE_API_KEY" --executor hybrid
+omnicode agent --remote URL --token TOK --workspace . --workspace-id repo-a
 omnicode rotate-master-key [--db ...] [--key ...] [--new-key BASE64]
 ```
+
+Use `omnicode mcp --backend-url ...` as a local stdio bridge when
+the AI editor runs locally but OmniCode's FastAPI backend is deployed
+on a cloud machine. The backend token is sent as `X-API-Key`; the
+logical project id is sent as `X-Omnicode-Workspace`.
 
 Run-helpers under [`scripts/`](scripts/) (`run.bat` / `.sh`,
 `run-dev.bat` / `.sh`, `test.bat` / `.sh`, `lint.bat` / `.sh`).

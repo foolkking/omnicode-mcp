@@ -104,12 +104,30 @@ Mode presets (see [`Mode presets`](#mode-presets) below).
 ### MCP-over-HTTP (remote AI editors)
 
 ```bash
-python mcp_server.py --transport sse --port 6790 --auth required
-python mcp_server.py --transport streamable-http --auth auto
+omnicode mcp --transport sse --host 127.0.0.1 --port 6790 --auth required
+omnicode mcp --transport streamable-http --auth auto
 ```
 
 Use only when remote MCP clients need to connect over the wire.
 Stdio is the right call locally.
+
+If the local editor only supports stdio but the backend runs in the
+cloud, run a local MCP bridge that forwards tool calls to the remote
+FastAPI backend:
+
+```bash
+omnicode mcp \
+  --backend-url https://omnicode.example.com \
+  --backend-token "$OMNICODE_API_KEY" \
+  --workspace C:/repo \
+  --workspace-id repo-a \
+  --executor hybrid
+```
+
+The bridge sends the backend token as `X-API-Key`. It keeps the local
+editor on stdio while the indexing/search/patch APIs live on the
+cloud server. `workspace-id` is sent as `X-Omnicode-Workspace` so the
+cloud backend can fail closed if the wrong project is active.
 
 ### CLI cheat sheet
 
@@ -120,10 +138,10 @@ Stdio is the right call locally.
 | `omnicode status` | Hits `/health` on the running server |
 | `omnicode doctor` | Python / deps / LSP / model / port check |
 | `omnicode rotate-master-key` | Rotate Fernet key for `providers.db` |
-| `omnicode agent --remote URL --token TOK --workspace .` | Hybrid-mode local watcher |
+| `omnicode agent --remote URL --token TOK --workspace . --workspace-id repo-a` | Hybrid-mode local watcher |
 | `omnicode serve [--headless\|--console] [--mode local\|cloud\|hybrid] [--host] [--port] [--reload]` | All-in-one server |
 | `omnicode dev` | `serve --console --reload` |
-| `omnicode mcp` | stdio MCP |
+| `omnicode mcp [--transport stdio\|sse\|streamable-http] [--backend-url URL] [--workspace-id ID] [--executor remote\|hybrid]` | MCP server / local-to-cloud bridge |
 
 Helper scripts in `scripts/` (`run.bat`/`.sh`, `run-dev.bat`/`.sh`,
 `test.bat`/`.sh`, `lint.bat`/`.sh`) wrap the above for convenience.
@@ -381,12 +399,26 @@ omnicode serve --headless --mode cloud
 # On the cloud machine
 omnicode serve --headless --mode hybrid
 
+# Register the logical workspace id against the cloud-side root
+curl -X POST https://omnicode.example.com/workspaces \
+  -H "X-API-Key: $ADMIN_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"workspace_id":"repo-a","name":"repo-a","path":"/srv/omnicode/workspaces/repo-a-cache","set_active":true}'
+
 # On the user's local machine
 omnicode agent \
   --remote https://omnicode.example.com \
   --token sk-... \
   --workspace . \
+  --workspace-id repo-a \
   --debounce-ms 800
+
+omnicode mcp \
+  --workspace . \
+  --workspace-id repo-a \
+  --backend-url https://omnicode.example.com \
+  --backend-token sk-... \
+  --executor hybrid
 ```
 
 `pip install -e ".[agent]"` adds the optional `watchfiles`

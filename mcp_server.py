@@ -4,13 +4,17 @@ Provides 7 MCP tools that proxy requests to FastAPI backend via HTTP calls.
 """
 
 import asyncio
-import sys
-from typing import Optional, List, Dict, Any
-import httpx
-import time
 import json
-from mcp.server.fastmcp import FastMCP
 import logging
+import os
+import sys
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import httpx
+from mcp.server.fastmcp import FastMCP
+
 from prompts.general_dev_prompt import GENERAL_DEV_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -21,8 +25,15 @@ logger = logging.getLogger(__name__)
 # vEthernet adapter) "localhost" gets intercepted and returns a spurious
 # 502 with an empty body, even when the FastAPI server is healthy on the
 # IPv4 loopback. ``127.0.0.1`` bypasses the proxy/DNS lookup entirely.
-FASTAPI_BASE_URL = "http://127.0.0.1:6789"
+FASTAPI_BASE_URL = (
+    os.environ.get("OMNICODE_FASTAPI_BASE_URL")
+    or os.environ.get("OMNICODE_REMOTE")
+    or "http://127.0.0.1:6789"
+).rstrip("/")
 HTTP_TIMEOUT = 30.0
+BACKEND_WORKSPACE_ID = os.environ.get("OMNICODE_WORKSPACE_ID", "").strip()
+LOCAL_WORKSPACE_ROOT = os.environ.get("OMNICODE_WORKSPACE_ROOT", "").strip()
+EXECUTOR_MODE = os.environ.get("OMNICODE_EXECUTOR_MODE", "remote").strip() or "remote"
 
 # Initialize MCP server.
 # Use a *different* port from the FastAPI backend (6789) so the two can run
@@ -35,11 +46,79 @@ mcp = FastMCP("Codebase Manager MCP Server", port=6790)
 http_client: Optional[httpx.AsyncClient] = None
 
 
+def _backend_token() -> str:
+    return (
+        os.environ.get("OMNICODE_FASTAPI_TOKEN")
+        or os.environ.get("OMNICODE_BACKEND_TOKEN")
+        or os.environ.get("OMNICODE_API_KEY")
+        or os.environ.get("OMNICODE_AGENT_TOKEN")
+        or ""
+    ).strip()
+
+
+def _backend_headers() -> Dict[str, str]:
+    headers: Dict[str, str] = {}
+    token = _backend_token()
+    if token:
+        headers["X-API-Key"] = token
+    if BACKEND_WORKSPACE_ID:
+        headers["X-Omnicode-Workspace"] = BACKEND_WORKSPACE_ID
+    if EXECUTOR_MODE:
+        headers["X-Omnicode-Executor"] = EXECUTOR_MODE
+    return headers
+
+
+def configure_backend(base_url: Optional[str] = None, token: Optional[str] = None) -> None:
+    """Configure the FastAPI backend used by this MCP proxy.
+
+    This is intentionally process-global: FastMCP builds tool handlers once,
+    and every handler calls :func:`make_request`.
+    """
+    global FASTAPI_BASE_URL, http_client
+    if base_url:
+        FASTAPI_BASE_URL = base_url.rstrip("/")
+        os.environ["OMNICODE_FASTAPI_BASE_URL"] = FASTAPI_BASE_URL
+    if token is not None:
+        if token:
+            os.environ["OMNICODE_FASTAPI_TOKEN"] = token
+        else:
+            os.environ.pop("OMNICODE_FASTAPI_TOKEN", None)
+    http_client = None
+
+
+def configure_workspace(
+    workspace: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+    executor: Optional[str] = None,
+) -> None:
+    """Configure workspace identity for backend calls from this MCP process."""
+    global BACKEND_WORKSPACE_ID, LOCAL_WORKSPACE_ROOT, EXECUTOR_MODE, http_client
+    if workspace:
+        path = Path(workspace).expanduser().resolve()
+        if not path.is_dir():
+            raise NotADirectoryError(str(path))
+        root = str(path)
+        LOCAL_WORKSPACE_ROOT = root
+        os.environ["OMNICODE_WORKSPACE_ROOT"] = root
+        os.environ["WORKING_DIR"] = root
+    if workspace_id:
+        BACKEND_WORKSPACE_ID = workspace_id.strip()
+        os.environ["OMNICODE_WORKSPACE_ID"] = BACKEND_WORKSPACE_ID
+    if executor:
+        EXECUTOR_MODE = executor.strip()
+        os.environ["OMNICODE_EXECUTOR_MODE"] = EXECUTOR_MODE
+    http_client = None
+
+
 async def get_http_client() -> httpx.AsyncClient:
     """Get or create HTTP client"""
     global http_client
     if http_client is None:
-        http_client = httpx.AsyncClient(base_url=FASTAPI_BASE_URL, timeout=HTTP_TIMEOUT)
+        http_client = httpx.AsyncClient(
+            base_url=FASTAPI_BASE_URL,
+            timeout=HTTP_TIMEOUT,
+            headers=_backend_headers(),
+        )
     return http_client
 
 
@@ -2380,7 +2459,7 @@ def _has_users_configured() -> bool:
         return False
 
 
-def main():
+def main(argv: Optional[List[str]] = None):
     """Main entry point.
 
     Transport selection:
@@ -2400,6 +2479,12 @@ def main():
         choices=("stdio", "sse", "streamable-http"),
         default="stdio",
         help="Transport to expose the MCP server on (default: stdio).",
+    )
+    parser.add_argument(
+        "--host",
+        type=str,
+        default=None,
+        help="Host for sse/streamable-http transports.",
     )
     parser.add_argument(
         "--port",
@@ -2425,11 +2510,69 @@ def main():
             "off: no-op gate (NOT recommended for cloud deployments)."
         ),
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--backend-url",
+        type=str,
+        default=None,
+        help=(
+            "FastAPI backend URL. Defaults to OMNICODE_FASTAPI_BASE_URL, "
+            "OMNICODE_REMOTE, then http://127.0.0.1:6789."
+        ),
+    )
+    parser.add_argument(
+        "--backend-token",
+        type=str,
+        default=None,
+        help=(
+            "FastAPI backend API token. Defaults to OMNICODE_FASTAPI_TOKEN, "
+            "OMNICODE_BACKEND_TOKEN, OMNICODE_API_KEY, then OMNICODE_AGENT_TOKEN."
+        ),
+    )
+    parser.add_argument(
+        "--workspace",
+        type=str,
+        default=None,
+        help="Local workspace root for stdio/hybrid MCP sessions.",
+    )
+    parser.add_argument(
+        "--workspace-id",
+        type=str,
+        default=None,
+        help="Workspace identity sent to the FastAPI backend as X-Omnicode-Workspace.",
+    )
+    parser.add_argument(
+        "--executor",
+        choices=("local", "remote", "hybrid", "auto"),
+        default="remote",
+        help=(
+            "Execution locality for workspace-aware clients. remote keeps the "
+            "current proxy behaviour; hybrid reserves local file writes for "
+            "the local MCP facade."
+        ),
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        configure_backend(args.backend_url, args.backend_token)
+        configure_workspace(args.workspace, args.workspace_id, args.executor)
+    except (OSError, ValueError) as exc:
+        parser.error(str(exc))
+    logger.info(
+        "MCP backend=%s backend_auth=%s workspace_id=%s executor=%s",
+        FASTAPI_BASE_URL,
+        "ON" if _backend_token() else "OFF",
+        BACKEND_WORKSPACE_ID or "<unset>",
+        EXECUTOR_MODE,
+    )
 
     # FastMCP reads its host/port from the constructor; rebuild if user
     # changed them so users can pick a different port without touching code.
-    if args.transport != "stdio" and args.port is not None and args.port != 6789:
+    if args.host is not None:
+        try:
+            mcp.settings.host = args.host  # type: ignore[attr-defined]
+        except Exception:
+            logger.warning("Could not set FastMCP host; ignoring --host flag.")
+    if args.port is not None:
         # FastMCP exposes settings.port we can mutate before run()
         try:
             mcp.settings.port = args.port  # type: ignore[attr-defined]
@@ -2459,9 +2602,11 @@ def main():
                 _os.environ.get("OMNICODE_MCP_REQUIRE_AUTH", "").lower()
                 in ("1", "true", "yes")
             ) or args.auth == "required"
+            auth_configured = bool(
+                _os.environ.get("OMNICODE_API_KEY") or _has_users_configured()
+            )
             if require_auth and not (
-                _os.environ.get("OMNICODE_API_KEY")
-                or _has_users_configured()
+                auth_configured
             ):
                 logger.error(
                     "MCP transport=%s requires --auth required but no auth "
@@ -2471,13 +2616,13 @@ def main():
                 )
                 sys.exit(2)
 
-            wrapped = make_auth_middleware(inner)
+            wrapped = inner if args.auth == "off" else make_auth_middleware(inner)
             logger.info(
-                "MCP transport=%s listening on %s:%d (auth %s)",
+                "MCP transport=%s listening on %s:%d (transport_auth %s)",
                 args.transport,
                 host,
                 port,
-                "ON" if (_os.environ.get("OMNICODE_API_KEY") or _has_users_configured()) else "OFF",
+                "OFF" if args.auth == "off" else ("ON" if auth_configured else "OFF"),
             )
             uvicorn.run(wrapped, host=host, port=port, log_level="info")
     except KeyboardInterrupt:

@@ -86,6 +86,23 @@ def test_push_file_sends_json_with_path_and_hash(tmp_path: Path):
     assert len(captured["body"]["content_hash"]) == 64  # sha256 hex
 
 
+def test_workspace_id_header_sent(tmp_path: Path):
+    target = tmp_path / "hello.py"
+    target.write_text("print('hi')\n", encoding="utf-8")
+
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["headers"] = dict(request.headers)
+        return httpx.Response(200, json={"result": {"chunks_indexed": 1}})
+
+    client = _client_with_handler(handler, workspace=tmp_path, workspace_id="repo-a")
+    result = client.push_file("hello.py")
+
+    assert result.pushed == 1
+    assert captured["headers"].get("x-omnicode-workspace") == "repo-a"
+
+
 def test_push_file_skips_excluded_paths(tmp_path: Path):
     target = tmp_path / ".git" / "config"
     target.parent.mkdir()

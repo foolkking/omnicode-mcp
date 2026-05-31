@@ -31,11 +31,16 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from core import get_search_engine
 from core.config import get_settings
+from omnicode_core.workspace import get_workspace_registry
+from omnicode_core.workspace.request import (
+    WorkspaceResolutionError,
+    resolve_workspace_request,
+)
 from utils import (
     create_error_response,
     create_success_response,
@@ -43,6 +48,30 @@ from utils import (
 )
 
 router = APIRouter(prefix="/index", tags=["agent"])
+
+
+def _resolve_agent_workspace(
+    workspace_id: Optional[str],
+) -> tuple[str, Optional[str]]:
+    """Resolve the workspace targeted by an agent request.
+
+    The current service layer is still single-workspace. When a caller sends
+    ``X-Omnicode-Workspace`` we require that id to map to the active
+    ``WORKING_DIR``; otherwise we fail fast instead of indexing into the wrong
+    project.
+    """
+    try:
+        resolved = resolve_workspace_request(
+            workspace_id,
+            working_dir=get_settings().WORKING_DIR,
+            registry=get_workspace_registry(),
+        )
+    except WorkspaceResolutionError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+        ) from exc
+    return resolved.working_dir, resolved.workspace_id
 
 
 # ---------------------------------------------------------------------------
@@ -72,14 +101,17 @@ class _DeleteBody(BaseModel):
 # Endpoints
 # ---------------------------------------------------------------------------
 @router.post("/upsert-file")
-async def upsert_file(body: _UpsertBody):
+async def upsert_file(
+    body: _UpsertBody,
+    x_omnicode_workspace: Optional[str] = Header(default=None),
+):
     """Index a single file's body coming from the local agent.
 
     Returns the chunk count so the agent can summarise progress.
     """
-    settings = get_settings()
     try:
-        await validate_file_path(body.file_path, settings.WORKING_DIR)
+        working_dir, workspace_id = _resolve_agent_workspace(x_omnicode_workspace)
+        await validate_file_path(body.file_path, working_dir)
     except HTTPException as exc:
         return create_error_response(str(exc.detail), exc.status_code)
 
@@ -88,14 +120,25 @@ async def upsert_file(body: _UpsertBody):
         return create_error_response("Search engine not initialized", 500)
     chunks = await engine.upsert_content(body.file_path, body.content)
     return create_success_response(
-        {"file_path": body.file_path, "chunks_indexed": chunks}
+        {
+            "file_path": body.file_path,
+            "chunks_indexed": chunks,
+            "workspace_id": workspace_id,
+        }
     )
 
 
 @router.post("/upsert-batch")
-async def upsert_batch(body: _UpsertBatchBody):
+async def upsert_batch(
+    body: _UpsertBatchBody,
+    x_omnicode_workspace: Optional[str] = Header(default=None),
+):
     """Index a batch of files — used by the agent's debounce buffer."""
-    settings = get_settings()
+    try:
+        working_dir, workspace_id = _resolve_agent_workspace(x_omnicode_workspace)
+    except HTTPException as exc:
+        return create_error_response(str(exc.detail), exc.status_code)
+
     engine = get_search_engine()
     if engine is None:
         return create_error_response("Search engine not initialized", 500)
@@ -104,7 +147,7 @@ async def upsert_batch(body: _UpsertBatchBody):
     errors: list[dict[str, str]] = []
     for entry in body.files:
         try:
-            await validate_file_path(entry.file_path, settings.WORKING_DIR)
+            await validate_file_path(entry.file_path, working_dir)
             chunks = await engine.upsert_content(entry.file_path, entry.content)
             results.append({"file_path": entry.file_path, "chunks_indexed": chunks})
         except HTTPException as exc:
@@ -118,17 +161,21 @@ async def upsert_batch(body: _UpsertBatchBody):
             "errors": errors,
             "total_indexed": len(results),
             "total_errors": len(errors),
+            "workspace_id": workspace_id,
         }
     )
 
 
 @router.delete("/file")
-async def delete_file_from_index(body: _DeleteBody):
+async def delete_file_from_index(
+    body: _DeleteBody,
+    x_omnicode_workspace: Optional[str] = Header(default=None),
+):
     """Drop a file from the index — used when the agent observes a
     deletion."""
-    settings = get_settings()
     try:
-        await validate_file_path(body.file_path, settings.WORKING_DIR)
+        working_dir, workspace_id = _resolve_agent_workspace(x_omnicode_workspace)
+        await validate_file_path(body.file_path, working_dir)
     except HTTPException as exc:
         return create_error_response(str(exc.detail), exc.status_code)
 
@@ -137,18 +184,25 @@ async def delete_file_from_index(body: _DeleteBody):
         return create_error_response("Search engine not initialized", 500)
     removed = await engine.delete_file_index(body.file_path)
     return create_success_response(
-        {"file_path": body.file_path, "removed": removed}
+        {"file_path": body.file_path, "removed": removed, "workspace_id": workspace_id}
     )
 
 
 @router.get("/sync-status")
-async def sync_status():
+async def sync_status(
+    x_omnicode_workspace: Optional[str] = Header(default=None),
+):
     """Report what the server currently has indexed.
 
     The agent calls this on startup to decide whether a full rescan +
     push is needed (e.g. after a long disconnect or a server-side
     rebuild).
     """
+    try:
+        working_dir, workspace_id = _resolve_agent_workspace(x_omnicode_workspace)
+    except HTTPException as exc:
+        return create_error_response(str(exc.detail), exc.status_code)
+
     engine = get_search_engine()
     if engine is None:
         return create_error_response("Search engine not initialized", 500)
@@ -160,16 +214,19 @@ async def sync_status():
             "embedding_model": getattr(
                 engine.embedding_model, "name", "unknown"
             ),
-            "working_dir": get_settings().WORKING_DIR,
+            "working_dir": working_dir,
+            "workspace_id": workspace_id,
         }
     )
 
 
 @router.get("/stats")
-async def index_stats():
+async def index_stats(
+    x_omnicode_workspace: Optional[str] = Header(default=None),
+):
     """Same shape as `/sync-status` — kept as a stable name for the
     Web Console."""
-    return await sync_status()
+    return await sync_status(x_omnicode_workspace)
 
 
 __all__ = ["router"]

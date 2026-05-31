@@ -174,6 +174,7 @@ def run_agent(
     remote: str,
     token: Optional[str],
     workspace: str,
+    workspace_id: Optional[str] = None,
     initial_sync: bool = True,
     excludes: Iterable[str] = (),
     debounce_ms: int = 800,
@@ -187,6 +188,7 @@ def run_agent(
         remote=remote,
         token=token,
         workspace=ws,
+        workspace_id=workspace_id,
         excludes=tuple(excludes),
     )
     if not client.health():

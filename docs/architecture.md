@@ -82,6 +82,34 @@ CLI: `omnicode serve --mode local|cloud|hybrid` plus `--headless`,
 this server's `/index/*` endpoints; the user's editor still applies
 patches locally.
 
+### Workspace-aware MCP bridge
+
+Workspace identity is explicit across MCP, agent, and HTTP:
+
+- `X-Omnicode-Workspace: <workspace_id>` identifies the logical
+  project. All paths remain workspace-relative; local absolute paths
+  such as `C:\repo\src\a.py` must never be sent to cloud APIs.
+- `X-Omnicode-Executor: local|remote|hybrid|auto` advertises where the
+  caller expects file-bound operations to execute. The current bridge
+  preserves remote proxy behaviour while making the execution policy
+  auditable in logs and `omni_status`.
+- `/workspaces` accepts an optional stable `workspace_id` so the local
+  agent and cloud backend can agree on `repo-a` instead of relying on
+  generated ids.
+- `/index/*` fails closed when `X-Omnicode-Workspace` names a workspace
+  that is not the active backend `WORKING_DIR`; this prevents local file
+  bodies from being indexed into the wrong cloud project.
+
+The intended hybrid path is:
+
+1. Cloud registers `workspace_id=repo-a` for
+   `/srv/omnicode/workspaces/repo-a-cache` and runs in `hybrid` mode.
+2. Local `omnicode agent --workspace C:\repo --workspace-id repo-a`
+   pushes file bodies and deletions to `/index/*`.
+3. Local `omnicode mcp --workspace C:\repo --workspace-id repo-a
+   --backend-url https://... --executor hybrid` gives the AI editor a
+   stable local project root and a cloud analysis backend.
+
 For full deployment recipes see [`deployment.md`](deployment.md).
 
 ---

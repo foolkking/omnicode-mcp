@@ -35,6 +35,10 @@ def _ok(payload):
 # Request schemas
 # ---------------------------------------------------------------------------
 class _AddBody(BaseModel):
+    workspace_id: str | None = Field(
+        default=None,
+        description="Optional stable id shared by MCP/agent/cloud clients",
+    )
     name: str = Field(..., description="Display name shown in UIs")
     path: str = Field(..., description="Absolute path on the host")
     set_active: bool = Field(default=False)
@@ -63,10 +67,15 @@ async def get_active_workspace():
 async def add_workspace(body: _AddBody):
     try:
         ws = get_workspace_registry().add(
-            name=body.name, path=body.path, set_active=body.set_active
+            name=body.name,
+            path=body.path,
+            set_active=body.set_active,
+            workspace_id=body.workspace_id,
         )
     except NotADirectoryError as exc:
         raise HTTPException(status_code=400, detail=f"Not a directory: {exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if body.set_active:
         get_settings().update_working_directory(ws.path)
     return _ok({"workspace": ws.to_dict()})

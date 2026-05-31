@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -38,10 +39,22 @@ from typing import List, Optional
 logger = logging.getLogger(__name__)
 
 _LOCK = threading.RLock()
+_WORKSPACE_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _validate_workspace_id(workspace_id: str) -> str:
+    cleaned = (workspace_id or "").strip()
+    if not cleaned:
+        raise ValueError("workspace_id cannot be empty")
+    if cleaned in {".", ".."} or not _WORKSPACE_ID_RE.match(cleaned):
+        raise ValueError(
+            "workspace_id may contain only letters, numbers, '.', '_', ':', '-'"
+        )
+    return cleaned
 
 
 def _default_store_path() -> Path:
@@ -125,22 +138,37 @@ class WorkspaceRegistry:
         active = self.get_active()
         return active.path if active else None
 
-    def add(self, name: str, path: str, set_active: bool = False) -> Workspace:
+    def add(
+        self,
+        name: str,
+        path: str,
+        set_active: bool = False,
+        workspace_id: Optional[str] = None,
+    ) -> Workspace:
         abs_path = str(Path(path).expanduser().resolve())
         if not Path(abs_path).is_dir():
             raise NotADirectoryError(abs_path)
+        explicit_id = _validate_workspace_id(workspace_id) if workspace_id else None
         with _LOCK:
             items = self._load()
+            if explicit_id:
+                for w in items:
+                    if w.id == explicit_id and w.path != abs_path:
+                        raise ValueError(f"workspace_id already exists: {explicit_id}")
             # If a workspace with the same path already exists, return it.
             for w in items:
                 if w.path == abs_path:
+                    if explicit_id and w.id != explicit_id:
+                        raise ValueError(
+                            f"path is already registered as workspace_id: {w.id}"
+                        )
                     if set_active:
                         for other in items:
                             other.active = (other.id == w.id)
                         self._save(items)
                     return w
             new = Workspace(
-                id=f"wk_{uuid.uuid4().hex[:12]}",
+                id=explicit_id or f"wk_{uuid.uuid4().hex[:12]}",
                 name=name or Path(abs_path).name,
                 path=abs_path,
                 active=set_active,

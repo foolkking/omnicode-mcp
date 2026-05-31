@@ -5,7 +5,7 @@ Usage:
     omnicode init              Initialize .data/ in the current directory
     omnicode index             Run incremental index
     omnicode status            Show index and service status
-    omnicode mcp               Start MCP stdio server (for AI editors)
+    omnicode mcp               Start MCP server / local-to-cloud bridge
     omnicode serve             Start HTTP API + Web Console (default)
     omnicode serve --headless  Start HTTP API only (no Web UI)
     omnicode serve --console   Start HTTP API + Web Console (explicit)
@@ -37,7 +37,61 @@ def main():
     subparsers.add_parser("status", help="Show index and service status")
 
     # --- mcp ---
-    subparsers.add_parser("mcp", help="Start MCP stdio server")
+    mcp_parser = subparsers.add_parser("mcp", help="Start MCP server")
+    mcp_parser.add_argument(
+        "--transport",
+        choices=("stdio", "sse", "streamable-http"),
+        default="stdio",
+        help="MCP transport (default: stdio).",
+    )
+    mcp_parser.add_argument(
+        "--host",
+        default=None,
+        help="Bind host for sse/streamable-http transports.",
+    )
+    mcp_parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Bind port for sse/streamable-http transports (default: 6790).",
+    )
+    mcp_parser.add_argument(
+        "--mount-path",
+        default=None,
+        help="URL prefix for sse/streamable-http transports.",
+    )
+    mcp_parser.add_argument(
+        "--auth",
+        choices=("auto", "required", "off"),
+        default="auto",
+        help="Transport auth posture for sse/streamable-http.",
+    )
+    mcp_parser.add_argument(
+        "--backend-url",
+        default=None,
+        help="FastAPI backend URL for local or remote tool execution.",
+    )
+    mcp_parser.add_argument(
+        "--backend-token",
+        default=None,
+        help="FastAPI backend API token.",
+    )
+    mcp_parser.add_argument(
+        "--workspace",
+        default=None,
+        help="Local workspace root for stdio/hybrid MCP sessions.",
+    )
+    mcp_parser.add_argument(
+        "--workspace-id",
+        default=None,
+        help="Logical workspace id sent to the backend.",
+    )
+    mcp_parser.add_argument(
+        "--executor",
+        choices=("local", "remote", "hybrid", "auto"),
+        default="remote",
+        help="Execution locality policy for workspace-aware MCP calls.",
+    )
 
     # --- serve ---
     serve_parser = subparsers.add_parser("serve", help="Start HTTP API server")
@@ -85,6 +139,11 @@ def main():
         "--workspace",
         default=".",
         help="Local working tree to watch (default: cwd).",
+    )
+    agent_parser.add_argument(
+        "--workspace-id",
+        default=None,
+        help="Logical workspace id to send as X-Omnicode-Workspace.",
     )
     agent_parser.add_argument(
         "--no-initial-sync",
@@ -147,7 +206,18 @@ def main():
         run()
     elif args.command == "mcp":
         from omnicode_adapters.cli.commands.mcp_cmd import run
-        run()
+        run(
+            transport=args.transport,
+            host=args.host,
+            port=args.port,
+            mount_path=args.mount_path,
+            auth=args.auth,
+            backend_url=args.backend_url,
+            backend_token=args.backend_token,
+            workspace=args.workspace,
+            workspace_id=args.workspace_id,
+            executor=args.executor,
+        )
     elif args.command == "serve":
         from omnicode_adapters.cli.commands.serve_cmd import run
         run(
@@ -166,6 +236,7 @@ def main():
             remote=args.remote,
             token=args.token,
             workspace=args.workspace,
+            workspace_id=args.workspace_id,
             initial_sync=not args.no_initial_sync,
             debounce_ms=args.debounce_ms,
             exclude=tuple(args.exclude or ()),

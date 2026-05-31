@@ -16,5 +16,17 @@ from omnicode_core.workspace.registry import (
     WorkspaceRegistry,
     get_workspace_registry,
 )
+from omnicode_core.workspace.request import (
+    WorkspaceRequest,
+    WorkspaceResolutionError,
+    resolve_workspace_request,
+)
 
-__all__ = ["Workspace", "WorkspaceRegistry", "get_workspace_registry"]
+__all__ = [
+    "Workspace",
+    "WorkspaceRegistry",
+    "WorkspaceRequest",
+    "WorkspaceResolutionError",
+    "get_workspace_registry",
+    "resolve_workspace_request",
+]

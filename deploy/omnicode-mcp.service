@@ -23,7 +23,7 @@ Environment=OMNICODE_CONFIG=/etc/omnicode/omnicode.toml
 # REQUIRE auth — refuse to start if neither key nor users are configured.
 Environment=OMNICODE_MCP_REQUIRE_AUTH=true
 
-ExecStart=/opt/omnicode/.venv/bin/python /opt/omnicode/mcp_server.py \
+ExecStart=/opt/omnicode/.venv/bin/omnicode mcp \
     --transport sse \
     --port 6790 \
     --auth required

@@ -22,6 +22,17 @@ def test_add_and_list_round_trip(reg: WorkspaceRegistry, tmp_path: Path):
     assert listed[0].path == str(tmp_path.resolve())
 
 
+def test_add_accepts_stable_workspace_id(reg: WorkspaceRegistry, tmp_path: Path):
+    ws = reg.add(name="proj", path=str(tmp_path), workspace_id="repo-a")
+    assert ws.id == "repo-a"
+    assert reg.get("repo-a").path == str(tmp_path.resolve())
+
+
+def test_add_rejects_unsafe_workspace_id(reg: WorkspaceRegistry, tmp_path: Path):
+    with pytest.raises(ValueError):
+        reg.add(name="proj", path=str(tmp_path), workspace_id="../escape")
+
+
 def test_add_rejects_non_directory(reg: WorkspaceRegistry, tmp_path: Path):
     bogus = tmp_path / "does-not-exist"
     with pytest.raises(NotADirectoryError):

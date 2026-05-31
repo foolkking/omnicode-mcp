@@ -113,6 +113,7 @@ class AgentClient:
         remote: str,
         token: Optional[str] = None,
         workspace: Optional[Path] = None,
+        workspace_id: Optional[str] = None,
         client: Optional[httpx.Client] = None,
         timeout: float = 30.0,
         max_retries: int = 3,
@@ -124,6 +125,7 @@ class AgentClient:
         self._remote = remote.rstrip("/")
         self._token = token or ""
         self._workspace = Path(workspace).resolve() if workspace else Path.cwd()
+        self._workspace_id = (workspace_id or "").strip()
         self._timeout = timeout
         self._max_retries = max_retries
         self._max_file_bytes = max_file_bytes
@@ -134,9 +136,12 @@ class AgentClient:
 
     # ------------------------------------------------------------ helpers
     def _headers(self) -> dict[str, str]:
+        headers: dict[str, str] = {}
         if self._token:
-            return {"X-API-Key": self._token}
-        return {}
+            headers["X-API-Key"] = self._token
+        if self._workspace_id:
+            headers["X-Omnicode-Workspace"] = self._workspace_id
+        return headers
 
     def _rel(self, path: Path) -> str:
         try:
@@ -196,7 +201,7 @@ class AgentClient:
     def health(self) -> bool:
         """Probe the remote /health endpoint. Returns True iff 200."""
         try:
-            r = self._client.get("/health", timeout=5.0)
+            r = self._client.get("/health", timeout=5.0, headers=self._headers())
             return r.status_code == 200
         except Exception:
             return False
