@@ -74,8 +74,10 @@ class PatchManager:
         self.data_dir = os.path.join(self.working_dir, ".data")
         self.snapshots_dir = os.path.join(self.data_dir, "snapshots")
         self.sessions_dir = os.path.join(self.data_dir, "edit_sessions")
+        self.preview_dir = os.path.join(self.data_dir, "patch_previews")
         os.makedirs(self.snapshots_dir, exist_ok=True)
         os.makedirs(self.sessions_dir, exist_ok=True)
+        os.makedirs(self.preview_dir, exist_ok=True)
 
     # -------------------------------------------------------------------------
     # Preview
@@ -91,12 +93,19 @@ class PatchManager:
         """
         full_path = self._resolve(file_path)
         if not os.path.exists(full_path):
+            self._record_preview_baseline(file_path, full_path, new_content)
             return PatchResult(
                 success=False,
                 message=f"File not found: {file_path}",
             )
 
         original = self._read(full_path)
+        self._record_preview_baseline(
+            file_path,
+            full_path,
+            new_content,
+            original=original,
+        )
         diff = self._make_diff(original, new_content, file_path)
         added, removed = self._count_changes(diff)
 
@@ -138,6 +147,7 @@ class PatchManager:
         # Write to temp location for checking
         temp_path = full_path + ".omnicode_validate_tmp"
         try:
+            os.makedirs(os.path.dirname(temp_path), exist_ok=True)
             with open(temp_path, "w", encoding="utf-8") as f:
                 f.write(new_content)
 
@@ -188,6 +198,10 @@ class PatchManager:
             original = ""
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
 
+        conflict = self._preview_conflict(file_path, full_path, new_content, original)
+        if conflict:
+            return conflict
+
         # Create diff
         diff = self._make_diff(original, new_content, file_path)
         added, removed = self._count_changes(diff)
@@ -221,6 +235,7 @@ class PatchManager:
             metadata=metadata or {},
         )
         self._save_session(session)
+        self._delete_preview_baseline(file_path, new_content)
 
         logger.info(f"Patch applied: {file_path} (session={session_id}, +{added}/-{removed})")
 
@@ -333,7 +348,7 @@ class PatchManager:
     # -------------------------------------------------------------------------
     def list_sessions(self, limit: int = 20) -> List[Dict[str, Any]]:
         """List recent edit sessions."""
-        sessions = []
+        sessions: List[Dict[str, Any]] = []
         if not os.path.exists(self.sessions_dir):
             return sessions
 
@@ -440,6 +455,92 @@ class PatchManager:
         path = os.path.join(self.sessions_dir, f"{session.session_id}.json")
         with open(path, "w", encoding="utf-8") as f:
             json.dump(asdict(session), f, indent=2, ensure_ascii=False)
+
+    def _hash_text(self, text: str) -> str:
+        return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+    def _preview_key(self, file_path: str, new_content: str) -> str:
+        rel = file_path.replace("\\", "/")
+        content_hash = hashlib.sha256(new_content.encode()).hexdigest()
+        raw = f"{rel}\0{content_hash}"
+        return hashlib.sha256(raw.encode()).hexdigest()
+
+    def _preview_path(self, file_path: str, new_content: str) -> str:
+        return os.path.join(
+            self.preview_dir,
+            f"{self._preview_key(file_path, new_content)}.json",
+        )
+
+    def _record_preview_baseline(
+        self,
+        file_path: str,
+        full_path: str,
+        new_content: str,
+        *,
+        original: Optional[str] = None,
+    ) -> None:
+        """Record the pre-preview file hash used to reject stale applies."""
+        if original is None:
+            original = self._read(full_path) if os.path.exists(full_path) else ""
+        payload = {
+            "file_path": file_path,
+            "original_hash": self._hash_text(original),
+            "new_hash": self._hash_text(new_content),
+            "file_existed": os.path.exists(full_path),
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        path = self._preview_path(file_path, new_content)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+
+    def _load_preview_baseline(
+        self,
+        file_path: str,
+        new_content: str,
+    ) -> Optional[Dict[str, Any]]:
+        path = self._preview_path(file_path, new_content)
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else None
+        except Exception:
+            return None
+
+    def _delete_preview_baseline(self, file_path: str, new_content: str) -> None:
+        path = self._preview_path(file_path, new_content)
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass
+
+    def _preview_conflict(
+        self,
+        file_path: str,
+        full_path: str,
+        new_content: str,
+        current_content: str,
+    ) -> Optional[PatchResult]:
+        baseline = self._load_preview_baseline(file_path, new_content)
+        if not baseline:
+            return None
+        expected = str(baseline.get("original_hash") or "")
+        current = self._hash_text(current_content)
+        if expected == current:
+            return None
+        return PatchResult(
+            success=False,
+            message=(
+                "Apply conflict: file changed after preview. "
+                f"Expected original_hash={expected}, current_hash={current}. "
+                "Re-run preview/validate before applying so external edits "
+                "are not overwritten."
+            ),
+            file_path=file_path,
+            rollback_available=False,
+        )
 
     def _load_session(self, session_id: str) -> Optional[EditSession]:
         path = os.path.join(self.sessions_dir, f"{session_id}.json")

@@ -6,9 +6,8 @@ unit tests can drive it against a fake transport.
 
 Responsibilities:
 
-* Read files off the local disk and POST them as JSON to
-  ``/index/upsert-file``  /  ``/index/upsert-batch``.
-* DELETE  ``/index/file`` for removed paths.
+* Read files off the local disk and POST them as JSON to ``/sync/batch``.
+* Send deletes through ``/sync/batch`` as delete entries.
 * Carry the bearer token (or X-API-Key) on every request.
 * Retry transient failures with exponential backoff.
 
@@ -25,10 +24,14 @@ import hashlib
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence
+from typing import Any, Iterable, List, Optional, Sequence
 
 import httpx
+
+from omnicode_core.workspace.local import LocalWorkspace
+from omnicode_core.workspace.manifest import LocalManifest
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +71,12 @@ class AgentResult:
     skipped: int = 0
     errors: List[str] = field(default_factory=list)
     elapsed_ms: int = 0
+    accepted_revision: Optional[int] = None
+    indexed_revision: Optional[int] = None
+    sync_protocol: Optional[str] = None
+    files_seen: Optional[int] = None
+    initial_sync_truncated: Optional[bool] = None
+    initial_sync_cap: Optional[int] = None
 
     def merge(self, other: "AgentResult") -> "AgentResult":
         self.pushed += other.pushed
@@ -75,16 +84,41 @@ class AgentResult:
         self.skipped += other.skipped
         self.errors.extend(other.errors)
         self.elapsed_ms += other.elapsed_ms
+        if other.accepted_revision is not None:
+            self.accepted_revision = other.accepted_revision
+        if other.indexed_revision is not None:
+            self.indexed_revision = other.indexed_revision
+        if other.sync_protocol is not None:
+            self.sync_protocol = other.sync_protocol
+        if other.files_seen is not None:
+            self.files_seen = other.files_seen
+        if other.initial_sync_truncated is not None:
+            self.initial_sync_truncated = other.initial_sync_truncated
+        if other.initial_sync_cap is not None:
+            self.initial_sync_cap = other.initial_sync_cap
         return self
 
     def to_dict(self) -> dict:
-        return {
+        payload = {
             "pushed": self.pushed,
             "deleted": self.deleted,
             "skipped": self.skipped,
             "errors": list(self.errors),
             "elapsed_ms": self.elapsed_ms,
         }
+        if self.accepted_revision is not None:
+            payload["accepted_revision"] = self.accepted_revision
+        if self.indexed_revision is not None:
+            payload["indexed_revision"] = self.indexed_revision
+        if self.sync_protocol is not None:
+            payload["sync_protocol"] = self.sync_protocol
+        if self.files_seen is not None:
+            payload["files_seen"] = self.files_seen
+        if self.initial_sync_truncated is not None:
+            payload["initial_sync_truncated"] = self.initial_sync_truncated
+        if self.initial_sync_cap is not None:
+            payload["initial_sync_cap"] = self.initial_sync_cap
+        return payload
 
 
 def _is_binary_path(rel: str) -> bool:
@@ -106,7 +140,7 @@ def _content_hash(text: str) -> str:
 
 
 class AgentClient:
-    """HTTP client that talks to the remote ``/index/...`` endpoints."""
+    """HTTP client that talks to the remote ``/sync/...`` endpoints."""
 
     def __init__(
         self,
@@ -118,7 +152,11 @@ class AgentClient:
         timeout: float = 30.0,
         max_retries: int = 3,
         max_file_bytes: int = 1_000_000,
+        batch_max_files: int = 25,
+        batch_max_bytes: int = 250_000,
         excludes: Sequence[str] = (),
+        manifest_path: Optional[Path] = None,
+        record_manifest: bool = True,
     ) -> None:
         if not remote:
             raise ValueError("remote is required")
@@ -129,10 +167,15 @@ class AgentClient:
         self._timeout = timeout
         self._max_retries = max_retries
         self._max_file_bytes = max_file_bytes
+        self._batch_max_files = max(1, int(batch_max_files or 1))
+        self._batch_max_bytes = max(1, int(batch_max_bytes or 1))
         self._excludes = tuple(excludes)
+        self._manifest_path = Path(manifest_path) if manifest_path else None
+        self._record_manifest = bool(record_manifest)
         self._client = client or httpx.Client(
             base_url=self._remote, timeout=timeout
         )
+        self._sync_revision: Optional[int] = None
 
     # ------------------------------------------------------------ helpers
     def _headers(self) -> dict[str, str]:
@@ -191,23 +234,189 @@ class AgentClient:
         # All attempts failed
         raise last_exc  # type: ignore[misc]
 
-    def _request_delete(self, path: str, json: dict) -> httpx.Response:
-        # httpx.Client.delete doesn't take a JSON body; use request().
-        return self._client.request(
-            "DELETE", path, json=json, headers=self._headers()
+    def _sync_status_revision(self) -> int:
+        if self._sync_revision is not None:
+            return self._sync_revision
+        try:
+            r = self._client.get("/sync/status", headers=self._headers())
+            if r.status_code == 200:
+                payload = r.json()
+                body = payload.get("result", payload)
+                if isinstance(body, dict):
+                    self._sync_revision = int(body.get("accepted_revision") or 0)
+                    return self._sync_revision
+        except Exception:
+            pass
+        self._sync_revision = 0
+        return self._sync_revision
+
+    def _sync_file_payload(self, rel: str, text: str) -> dict[str, Any]:
+        full = self._workspace / rel
+        mtime_ms = 0
+        try:
+            mtime_ms = int(full.stat().st_mtime * 1000)
+        except OSError:
+            pass
+        raw = text.encode("utf-8", errors="replace")
+        return {
+            "path": rel,
+            "hash": "sha256:" + hashlib.sha256(raw).hexdigest(),
+            "size": len(raw),
+            "mtime_ms": mtime_ms,
+            "encoding": "utf-8",
+            "content": text,
+        }
+
+    @staticmethod
+    def _utc_now() -> str:
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def _load_manifest(self) -> Optional[LocalManifest]:
+        if not self._record_manifest or not self._workspace_id:
+            return None
+        try:
+            workspace = LocalWorkspace(
+                root=self._workspace,
+                workspace_id=self._workspace_id,
+            )
+            return LocalManifest.load(
+                workspace=workspace,
+                path=self._manifest_path,
+                max_file_bytes=self._max_file_bytes,
+                ignore_paths=tuple(_DEFAULT_EXCLUDES) + self._excludes,
+            )
+        except Exception as exc:
+            logger.warning("agent: local manifest unavailable: %s", exc)
+            return None
+
+    def _record_manifest_ack(
+        self,
+        *,
+        files: list[dict[str, Any]],
+        deletes: list[str],
+        result: AgentResult,
+    ) -> None:
+        if result.errors or result.accepted_revision is None:
+            return
+        manifest = self._load_manifest()
+        if manifest is None:
+            return
+        accepted = int(result.accepted_revision)
+        indexed = int(result.indexed_revision or accepted)
+        now = self._utc_now()
+        changed_paths: set[str] = set()
+
+        for payload in files:
+            try:
+                rel = manifest.workspace.normalize_rel(str(payload.get("path") or ""))
+            except Exception:
+                continue
+            changed_paths.add(rel)
+            manifest.files[rel] = {
+                "hash": payload.get("hash"),
+                "size": int(payload.get("size") or 0),
+                "mtime_ms": int(payload.get("mtime_ms") or 0),
+                "last_uploaded_revision": accepted,
+                "last_seen_at": now,
+            }
+
+        for raw in deletes:
+            try:
+                rel = manifest.workspace.normalize_rel(str(raw))
+            except Exception:
+                continue
+            changed_paths.add(rel)
+            manifest.files.pop(rel, None)
+
+        manifest.data["local_revision"] = max(manifest.local_revision, accepted)
+        manifest.data["last_accepted_revision"] = accepted
+        manifest.data["last_indexed_revision"] = indexed
+        if changed_paths:
+            manifest.data["pending"] = [
+                item for item in manifest.pending if item.get("path") not in changed_paths
+            ]
+        manifest.save()
+
+    def _push_sync_batch(
+        self,
+        *,
+        files: list[dict[str, Any]],
+        deletes: list[str],
+        started: float,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> AgentResult:
+        result = AgentResult(sync_protocol="/sync/batch")
+        if not self._workspace_id:
+            result.errors.append("workspace_id is required for /sync")
+            result.elapsed_ms = int((time.monotonic() - started) * 1000)
+            return result
+        base_revision = self._sync_status_revision()
+        client_revision = base_revision + 1
+        body = {
+            "client_id": "omnicode-agent",
+            "base_revision": base_revision,
+            "client_revision": client_revision,
+            "files": files,
+            "deletes": [{"path": p} for p in deletes],
+        }
+        if metadata:
+            body["metadata"] = metadata
+        try:
+            r = self._post("/sync/batch", body)
+        except Exception as exc:
+            result.errors.append(f"sync batch: {exc}")
+            result.elapsed_ms = int((time.monotonic() - started) * 1000)
+            return result
+        if r.status_code != 200:
+            result.errors.append(f"sync batch: HTTP {r.status_code} — {r.text[:200]}")
+            result.elapsed_ms = int((time.monotonic() - started) * 1000)
+            return result
+        try:
+            payload = r.json()
+        except ValueError:
+            result.errors.append(f"sync batch: non-JSON response {r.text[:200]}")
+            result.elapsed_ms = int((time.monotonic() - started) * 1000)
+            return result
+        body_out = payload.get("result", payload)
+        if not isinstance(body_out, dict) or not body_out.get("ok", False):
+            message = "unknown"
+            if isinstance(body_out, dict):
+                message = str(body_out.get("error") or body_out.get("message") or message)
+            result.errors.append(f"sync batch: {message}")
+            result.elapsed_ms = int((time.monotonic() - started) * 1000)
+            return result
+        pushed_raw = (
+            body_out.get("files_accepted")
+            if "files_accepted" in body_out else len(files)
         )
+        deleted_raw = (
+            body_out.get("deletes_accepted")
+            if "deletes_accepted" in body_out else len(deletes)
+        )
+        result.pushed = int(pushed_raw or 0)
+        result.deleted = int(deleted_raw or 0)
+        result.accepted_revision = int(
+            body_out.get("accepted_revision") or client_revision
+        )
+        result.indexed_revision = int(
+            body_out.get("indexed_revision") or result.accepted_revision
+        )
+        self._sync_revision = result.accepted_revision
+        result.elapsed_ms = int((time.monotonic() - started) * 1000)
+        self._record_manifest_ack(files=files, deletes=deletes, result=result)
+        return result
 
     # ------------------------------------------------------------ public API
     def health(self) -> bool:
         """Probe the remote /health endpoint. Returns True iff 200."""
         try:
             r = self._client.get("/health", timeout=5.0, headers=self._headers())
-            return r.status_code == 200
+            return bool(r.status_code == 200)
         except Exception:
             return False
 
     def push_file(self, path: str | Path) -> AgentResult:
-        """Upload a single file body."""
+        """Upload a single file body through /sync/batch."""
         result = AgentResult()
         started = time.monotonic()
 
@@ -223,34 +432,38 @@ class AgentClient:
             result.elapsed_ms = int((time.monotonic() - started) * 1000)
             return result
 
-        body = {
-            "file_path": rel,
-            "content": text,
-            "content_hash": _content_hash(text),
-        }
-        try:
-            r = self._post("/index/upsert-file", body)
-            if r.status_code == 200:
-                result.pushed = 1
-            else:
-                result.errors.append(
-                    f"{rel}: HTTP {r.status_code} — {r.text[:200]}"
-                )
-        except Exception as exc:
-            result.errors.append(f"{rel}: {exc}")
+        return self._push_sync_batch(
+            files=[self._sync_file_payload(rel, text)],
+            deletes=[],
+            started=started,
+        )
 
-        result.elapsed_ms = int((time.monotonic() - started) * 1000)
-        return result
-
-    def push_batch(self, paths: Iterable[str | Path]) -> AgentResult:
-        """Upload many files in one HTTP round-trip.
-
-        Skips excluded / binary / oversized files. Returns the
-        aggregate result so the caller can log a one-line summary.
-        """
+    def push_batch(
+        self,
+        paths: Iterable[str | Path],
+        *,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> AgentResult:
+        """Upload many files through chunked /sync/batch requests."""
         result = AgentResult()
         started = time.monotonic()
-        files: list[dict] = []
+        batch: list[dict[str, Any]] = []
+        batch_bytes = 0
+
+        def _flush() -> None:
+            nonlocal batch, batch_bytes
+            if not batch:
+                return
+            result.merge(
+                self._push_sync_batch(
+                    files=batch,
+                    deletes=[],
+                    started=time.monotonic(),
+                    metadata=metadata,
+                )
+            )
+            batch = []
+            batch_bytes = 0
 
         for path in paths:
             rel = self._rel(Path(path)) if not isinstance(path, str) else path
@@ -261,62 +474,42 @@ class AgentClient:
             if text is None:
                 result.skipped += 1
                 continue
-            files.append(
-                {
-                    "file_path": rel,
-                    "content": text,
-                    "content_hash": _content_hash(text),
-                }
+            payload = self._sync_file_payload(rel, text)
+            payload_size = int(payload.get("size") or 0)
+            would_exceed_files = len(batch) >= self._batch_max_files
+            would_exceed_bytes = (
+                bool(batch)
+                and batch_bytes + payload_size > self._batch_max_bytes
             )
+            if would_exceed_files or would_exceed_bytes:
+                _flush()
+            batch.append(payload)
+            batch_bytes += payload_size
+            if payload_size >= self._batch_max_bytes:
+                _flush()
 
-        if not files:
+        _flush()
+        if not result.sync_protocol:
             result.elapsed_ms = int((time.monotonic() - started) * 1000)
-            return result
-
-        try:
-            r = self._post("/index/upsert-batch", {"files": files})
-            if r.status_code == 200:
-                payload = r.json().get("result", {})
-                result.pushed = payload.get("total_indexed", 0)
-                for entry in payload.get("errors", []) or []:
-                    result.errors.append(
-                        f"{entry.get('file_path')}: {entry.get('error')}"
-                    )
-            else:
-                result.errors.append(
-                    f"batch: HTTP {r.status_code} — {r.text[:200]}"
-                )
-        except Exception as exc:
-            result.errors.append(f"batch: {exc}")
-
-        result.elapsed_ms = int((time.monotonic() - started) * 1000)
         return result
 
     def delete_file(self, path: str | Path) -> AgentResult:
-        """Tell the remote to drop ``path`` from its index."""
-        result = AgentResult()
+        """Tell the remote to drop ``path`` through /sync/batch."""
         started = time.monotonic()
         rel = self._rel(Path(path)) if not isinstance(path, str) else path
-        try:
-            r = self._request_delete("/index/file", {"file_path": rel})
-            if r.status_code == 200:
-                result.deleted = 1
-            else:
-                result.errors.append(
-                    f"{rel}: HTTP {r.status_code} — {r.text[:200]}"
-                )
-        except Exception as exc:
-            result.errors.append(f"{rel}: {exc}")
-        result.elapsed_ms = int((time.monotonic() - started) * 1000)
-        return result
+        return self._push_sync_batch(files=[], deletes=[rel], started=started)
 
     def sync_status(self) -> dict:
-        """Read the remote index headline. Used by the agent on
-        startup to decide whether a full re-push is warranted."""
+        """Read the remote sync headline."""
+        if not self._workspace_id:
+            return {"error": "workspace_id is required for /sync"}
         try:
-            r = self._client.get("/index/sync-status", headers=self._headers())
+            r = self._client.get("/sync/status", headers=self._headers())
             if r.status_code == 200:
-                return r.json().get("result", {})
+                payload = r.json()
+                body = payload.get("result", payload)
+                if isinstance(body, dict):
+                    return body
             return {"error": f"HTTP {r.status_code}"}
         except Exception as exc:
             return {"error": str(exc)}

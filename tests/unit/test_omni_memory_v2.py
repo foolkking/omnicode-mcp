@@ -277,6 +277,60 @@ def test_memory_search_warns_when_backend_skips_id() -> None:
     assert any("backend_missing_ids" in w for w in payload["warnings"])
 
 
+def test_memory_search_redacts_absolute_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    inside = root / "omnicode_adapters" / "mcp_server" / "high_level_tools.py"
+    inside.parent.mkdir(parents=True)
+    inside.write_text("# marker\n", encoding="utf-8")
+    outside = tmp_path / "outside" / "secret.py"
+    outside.parent.mkdir()
+    outside.write_text("# secret\n", encoding="utf-8")
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(root))
+
+    routes = {
+        "/memory/search": {
+            "results": [
+                {
+                    "memory": {
+                        "id": 12,
+                        "category": "mistake",
+                        "content": f"Review {inside} but never expose {outside}",
+                        "importance": 4,
+                        "tags": ["paths"],
+                        "timestamp": _now_iso(),
+                        "related_files": [str(inside), str(outside)],
+                    },
+                    "relevance_score": 0.9,
+                    "match_reason": f"Matched in {inside}",
+                    "match_fields": [
+                        {
+                            "field": "content",
+                            "snippet": f"{inside} -> {outside}",
+                        }
+                    ],
+                }
+            ]
+        }
+    }
+    tools = _build_tools(routes)
+    raw = _run(tools["omni_memory"](
+        action="search", query="paths", format="json",
+    ))
+    payload = json.loads(raw)
+    row = payload["results"][0]
+    serialized = json.dumps(payload, ensure_ascii=False)
+
+    assert str(root) not in serialized
+    assert str(outside) not in serialized
+    assert "omnicode_adapters/mcp_server/high_level_tools.py" in row["content"]
+    assert "<absolute-path>" in serialized
+    assert row["related_files"][0] == "omnicode_adapters/mcp_server/high_level_tools.py"
+
+
 # ---------------------------------------------------------------------------
 # 4. advisory.memory_count matches referenced_memories length
 # ---------------------------------------------------------------------------

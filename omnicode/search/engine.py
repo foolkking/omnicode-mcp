@@ -54,6 +54,21 @@ def _matches_any_glob(path: str, patterns: List[str]) -> bool:
                 return True
     return False
 
+
+def _normalize_upsert_item(item: Any) -> tuple[str, str, Dict[str, Any]]:
+    """Accept legacy ``(path, content)`` and metadata-aware upsert rows."""
+    if isinstance(item, dict):
+        path = str(item.get("path") or "")
+        content = str(item.get("content") or "")
+        metadata = item.get("metadata") or {}
+        return path, content, dict(metadata) if isinstance(metadata, dict) else {}
+    try:
+        path, content, metadata = item
+    except ValueError:
+        path, content = item
+        metadata = {}
+    return str(path), str(content), dict(metadata) if isinstance(metadata, dict) else {}
+
 class LegacySearchResult:
     """
     Adapter class representing a search result in the legacy API schema.
@@ -93,36 +108,37 @@ class SqliteKeywordSearcher:
         self.vector_store = vector_store
 
     async def search(self, query: str, top_k: int = 10, metadata_filter: Dict[str, Any] = None) -> List[Dict[str, Any]]:
-        cursor = self.vector_store.conn.cursor()
-        cursor.execute("SELECT chunk_id, file_path, content, chunk_type, metadata FROM chunks WHERE content LIKE ?", (f"%{query}%",))
-        rows = cursor.fetchall()
+        with self.vector_store._lock:
+            cursor = self.vector_store.conn.cursor()
+            cursor.execute("SELECT chunk_id, file_path, content, chunk_type, metadata FROM chunks WHERE content LIKE ?", (f"%{query}%",))
+            rows = cursor.fetchall()
 
-        results = []
-        for row in rows:
-            meta = json.loads(row['metadata'])
-            if metadata_filter:
-                match = True
-                for k, v in metadata_filter.items():
-                    if k == "file_path" and row["file_path"] != v:
-                        match = False
-                        break
-                    elif meta.get(k) != v:
-                        match = False
-                        break
-                if not match:
-                    continue
+            results = []
+            for row in rows:
+                meta = json.loads(row['metadata'])
+                if metadata_filter:
+                    match = True
+                    for k, v in metadata_filter.items():
+                        if k == "file_path" and row["file_path"] != v:
+                            match = False
+                            break
+                        elif meta.get(k) != v:
+                            match = False
+                            break
+                    if not match:
+                        continue
 
-            results.append({
-                "chunk_id": row['chunk_id'],
-                "file_path": row['file_path'],
-                "content": row['content'],
-                "chunk_type": row['chunk_type'],
-                "score": 1.0,
-                "metadata": meta
-            })
-            if len(results) >= top_k:
-                break
-        return results
+                results.append({
+                    "chunk_id": row['chunk_id'],
+                    "file_path": row['file_path'],
+                    "content": row['content'],
+                    "chunk_type": row['chunk_type'],
+                    "score": 1.0,
+                    "metadata": meta
+                })
+                if len(results) >= top_k:
+                    break
+            return results
 
 class SemanticSearchEngine:
     """
@@ -167,6 +183,33 @@ class SemanticSearchEngine:
             "last_indexed": "never",
             "index_size": 0
         }
+
+    def refresh_stats(self) -> None:
+        """Refresh cheap DB-backed index stats without reinitializing models."""
+        try:
+            cursor = self.vector_store.conn.cursor()
+            cursor.execute("SELECT COUNT(DISTINCT file_path), COUNT(*) FROM chunks")
+            row = cursor.fetchone()
+            if row:
+                self.stats["total_files"] = row[0]
+                self.stats["total_chunks"] = row[1]
+                if row[1] > 0:
+                    self.stats["last_indexed"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+            cursor.execute(
+                "SELECT COUNT(*) FROM chunks WHERE chunk_type IN "
+                "('function', 'class', 'method', 'function_definition', "
+                "'class_definition', 'method_definition', 'function_declaration')"
+            )
+            row = cursor.fetchone()
+            if row:
+                self.stats["total_symbols"] = row[0]
+
+            db_file = os.path.join(self.db_dir, "vector_store.db")
+            if os.path.exists(db_file):
+                self.stats["index_size"] = os.path.getsize(db_file)
+        except Exception as e:
+            logger.warning(f"Failed to load search stats from DB: {e}")
 
     async def initialize(self) -> None:
         """Initialize the embedding model and verify DB files"""
@@ -303,7 +346,16 @@ class SemanticSearchEngine:
 
         await self.upsert_content(file_path, content)
 
-    async def upsert_content(self, file_path: str, content: str) -> int:
+    async def upsert_content(
+        self,
+        file_path: str,
+        content: str,
+        *,
+        refresh: bool = True,
+        content_hash: Optional[str] = None,
+        revision: Optional[int] = None,
+        workspace_id: Optional[str] = None,
+    ) -> int:
         """Index ``content`` for ``file_path`` without reading from disk.
 
         Used by the local-agent hybrid mode (Wave 2, W2-2): the agent
@@ -329,6 +381,15 @@ class SemanticSearchEngine:
         chunks = self.chunker.chunk_file(content, file_path, language)
 
         # 3. Generate embeddings and add to store
+        index_metadata: Dict[str, Any] = {}
+        if content_hash:
+            index_metadata["content_hash"] = content_hash
+            index_metadata["snapshot_hash"] = content_hash
+        if revision is not None:
+            index_metadata["snapshot_revision"] = int(revision)
+        if workspace_id:
+            index_metadata["workspace_id"] = workspace_id
+
         for chunk in chunks:
             emb = self.embedding_model.encode(chunk.content)
             metadata = {
@@ -337,6 +398,7 @@ class SemanticSearchEngine:
                 "symbol_name": chunk.symbol_name or "",
                 "signature": chunk.signature or "",
                 "docstring": chunk.docstring or "",
+                **index_metadata,
             }
             await self.vector_store.add(
                 chunk_id=chunk.chunk_id,
@@ -348,10 +410,118 @@ class SemanticSearchEngine:
             )
 
         # Refresh stats lazily — caller can request /index/stats afterwards.
-        await self.initialize()
+        if refresh:
+            await self.initialize()
         return len(chunks)
 
-    async def delete_file_index(self, file_path: str) -> bool:
+    async def upsert_contents(
+        self,
+        files: list[Any],
+        *,
+        refresh: bool = True,
+    ) -> int:
+        """Index many in-memory file bodies with batched embeddings/writes."""
+        if not files:
+            return 0
+
+        normalized_files = [
+            (_norm_path(path), content, metadata)
+            for path, content, metadata in (_normalize_upsert_item(item) for item in files)
+        ]
+        delete_paths: list[str] = []
+        for file_path, _content, _metadata in normalized_files:
+            delete_paths.append(file_path)
+            legacy = file_path.replace("/", "\\")
+            if legacy != file_path:
+                delete_paths.append(legacy)
+        delete_many = getattr(self.vector_store, "delete_by_files", None)
+        if callable(delete_many):
+            await delete_many(delete_paths)
+        else:
+            for path in delete_paths:
+                await self.vector_store.delete_by_file(path)
+
+        chunk_rows = []
+        chunk_texts = []
+        for file_path, content, index_metadata in normalized_files:
+            language = os.path.splitext(file_path)[1].lstrip(".") or "python"
+            for chunk in self.chunker.chunk_file(content, file_path, language):
+                chunk_texts.append(chunk.content)
+                chunk_rows.append((file_path, chunk, dict(index_metadata)))
+
+        if not chunk_rows:
+            if refresh:
+                await self.initialize()
+            return 0
+
+        embeddings = self.embedding_model.encode(chunk_texts)
+        add_items = []
+        for idx, (file_path, chunk, index_metadata) in enumerate(chunk_rows):
+            add_items.append({
+                "chunk_id": chunk.chunk_id,
+                "embedding": embeddings[idx],
+                "file_path": file_path,
+                "chunk_type": chunk.chunk_type,
+                "content": chunk.content,
+                "metadata": {
+                    "start_line": chunk.start_line,
+                    "end_line": chunk.end_line,
+                    "symbol_name": chunk.symbol_name or "",
+                    "signature": chunk.signature or "",
+                    "docstring": chunk.docstring or "",
+                    **index_metadata,
+                },
+            })
+        add_many = getattr(self.vector_store, "add_many", None)
+        if callable(add_many):
+            await add_many(add_items)
+        else:
+            for item in add_items:
+                await self.vector_store.add(**item)
+
+        if refresh:
+            await self.initialize()
+        return len(add_items)
+
+    def indexed_file_hashes(
+        self,
+        *,
+        workspace_id: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """Return content hashes already present in the semantic index."""
+        hashes: Dict[str, str] = {}
+        missing: set[str] = set()
+        cursor = self.vector_store.conn.cursor()
+        cursor.execute("SELECT file_path, metadata FROM chunks")
+        for row in cursor.fetchall():
+            path = row["file_path"]
+            if not isinstance(path, str) or path in missing:
+                continue
+            try:
+                metadata = json.loads(row["metadata"]) if row["metadata"] else {}
+            except Exception:
+                metadata = {}
+            if workspace_id and metadata.get("workspace_id") != workspace_id:
+                continue
+            content_hash = metadata.get("content_hash") or metadata.get("snapshot_hash")
+            if not isinstance(content_hash, str) or not content_hash:
+                hashes.pop(path, None)
+                missing.add(path)
+                continue
+            existing = hashes.get(path)
+            if existing is not None and existing != content_hash:
+                hashes.pop(path, None)
+                missing.add(path)
+                continue
+            hashes[path] = content_hash
+        return hashes
+
+    async def delete_file_index(
+        self,
+        file_path: str,
+        *,
+        refresh: bool = True,
+    ) -> bool:
         """Remove ``file_path`` from the vector store. Returns whether
         anything was actually deleted."""
         file_path = _norm_path(file_path)
@@ -359,7 +529,8 @@ class SemanticSearchEngine:
         legacy = file_path.replace("/", "\\")
         if legacy != file_path:
             existed = await self.vector_store.delete_by_file(legacy) or existed
-        await self.initialize()
+        if refresh:
+            await self.initialize()
         return bool(existed)
 
     async def index_codebase(self) -> None:

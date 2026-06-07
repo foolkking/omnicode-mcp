@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Any, Callable, Dict, List
 
 import pytest
@@ -368,6 +369,50 @@ def test_context_empty_strings_are_treated_as_missing() -> None:
     payload = json.loads(raw)
     assert payload["ok"] is False
     assert payload["contract_version"] == _CONTRACT_VERSIONS["omni_context"]
+
+
+def test_context_rejects_path_traversal_before_backend_calls() -> None:
+    tools = _build_tools({})
+    raw = _run(
+        tools["omni_context"](file="../../outside.py", format="json")
+    )
+    payload = json.loads(raw)
+
+    assert payload["ok"] is False
+    assert payload["file_status"] == "path_rejected"
+    assert ".." not in payload["file"]
+    assert "outside.py" in payload["file"]
+    assert payload["context"]["primary_symbols"] == []
+    actions = "\n".join(payload.get("next_actions") or [])
+    assert "../../outside.py" not in actions
+    assert "omni_status()" in actions
+    assert "do not retry '..' or absolute paths" in actions
+    assert tools["__captured__"] == {}
+
+
+def test_context_symbol_line_is_refreshed_from_local_ast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(Path.cwd()))
+    tools = _build_tools(_routes_for_detect_mode_found())
+    raw = _run(
+        tools["omni_context"](symbol="_detect_mode", token_budget=4000, format="json")
+    )
+    payload = json.loads(raw)
+
+    actual_line = 0
+    with open(_DETECT_MODE_FILE, encoding="utf-8") as fh:
+        for line_no, line in enumerate(fh, 1):
+            if line.startswith("def _detect_mode("):
+                actual_line = line_no
+                break
+    assert actual_line > 0
+    definition = next(
+        row for row in payload["context"]["primary_symbols"]
+        if row.get("name") == "_detect_mode"
+    )
+    assert definition["lines"][0] == actual_line
+    assert definition["lines"][0] != 80
 
 
 # ---------------------------------------------------------------------------

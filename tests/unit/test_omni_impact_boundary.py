@@ -27,7 +27,6 @@ from omnicode_adapters.mcp_server.high_level_tools import (
     register_high_level_tools,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -180,6 +179,50 @@ def test_omni_impact_missing_symbol_risk_unknown() -> None:
     # Stamp present.
     assert payload["handler_version"] == _HANDLER_VERSION
     assert payload["contract_version"] == _CONTRACT_VERSIONS["omni_impact"]
+
+
+def test_omni_impact_graph_empty_but_symbol_index_found() -> None:
+    routes = {
+        "/graph/risk": {
+            "risk": "low",
+            "reasons": ["No test coverage found"],
+        },
+        "/graph/impact": {
+            "affected_symbols": [],
+            "dependent_symbols": [],
+            "files_count": 0,
+            "files_involved": [],
+        },
+        "/graph/related-tests": {
+            "test_files": [],
+            "suggested_commands": [],
+        },
+        "/search/symbols": {
+            "results": [
+                {
+                    "symbol_name": "cloudsim_route",
+                    "file_path": "tests/tmp_cloudsim_routing.py",
+                    "line": 1,
+                    "kind": "function",
+                }
+            ],
+            "total_results": 1,
+        },
+    }
+    tools = _build_tools(routes)
+    raw = _run(tools["omni_impact"](symbol="cloudsim_route", format="json"))
+    payload = json.loads(raw)
+
+    assert payload["ok"] is True
+    assert payload["risk"] == "unknown"
+    assert payload["confidence"] == "low"
+    assert payload["symbol_resolution"] == "found"
+    assert payload["source"] == "graph+symbol_fallback"
+    assert payload["symbol_fallback"]["file"] == "tests/tmp_cloudsim_routing.py"
+    assert "not found" not in (payload.get("note") or "").lower()
+    joined = "\n".join(payload["next_actions"])
+    assert "tests/tmp_cloudsim_routing.py" in joined
+    assert "mode='references'" in joined
 
 
 # ---------------------------------------------------------------------------

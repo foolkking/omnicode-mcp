@@ -22,7 +22,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List
 
 import pytest
 
@@ -34,7 +34,6 @@ from omnicode_adapters.mcp_server.high_level_tools import (
     _resolve_workspace_path,
     register_high_level_tools,
 )
-
 
 # ---------------------------------------------------------------------------
 # FastMCP shim + scripted backend
@@ -161,7 +160,54 @@ def test_patch_rejects_absolute_path() -> None:
     assert payload["ok"] is False
     err = payload["error"].lower()
     assert "absolute" in err
+    assert payload["file"] == Path(abs_path).name
+    assert "C:" not in payload["file"]
+    assert "/" not in payload["file"]
+    assert "\\" not in payload["file"]
     assert "/patch/preview" not in tools["__captured__"]
+
+
+def test_patch_path_guard_error_redacts_resolved_absolute_paths() -> None:
+    payload = hlt._patch_path_guard_error(
+        action="preview",
+        file="link.py",
+        exc=ValueError(
+            "path escapes workspace: 'link.py' -> C:\\secret\\outside.py. "
+            "Files must stay under C:\\repo."
+        ),
+    )
+
+    assert payload["ok"] is False
+    assert payload["file"] == "link.py"
+    assert "path-guard" in payload["error"].lower()
+    assert "C:\\" not in payload["error"]
+    assert "<absolute-path>" in payload["error"]
+
+
+def test_patch_path_guard_error_sanitizes_submitted_absolute_file() -> None:
+    payload = hlt._patch_path_guard_error(
+        action="preview",
+        file="C:/tmp/tmp_cloudsim_abs.py",
+        exc=ValueError("absolute paths are not allowed: 'C:/tmp/tmp_cloudsim_abs.py'"),
+    )
+
+    assert payload["ok"] is False
+    assert payload["file"] == "tmp_cloudsim_abs.py"
+    assert "C:" not in payload["file"]
+    assert "/" not in payload["file"]
+
+
+def test_patch_path_guard_error_sanitizes_submitted_traversal_file() -> None:
+    payload = hlt._patch_path_guard_error(
+        action="preview",
+        file="../tmp_cloudsim_escape.py",
+        exc=ValueError("path traversal is not allowed: '../tmp_cloudsim_escape.py'"),
+    )
+
+    assert payload["ok"] is False
+    assert payload["file"] == "tmp_cloudsim_escape.py"
+    assert ".." not in payload["file"]
+    assert "/" not in payload["file"]
 
 
 # ---------------------------------------------------------------------------

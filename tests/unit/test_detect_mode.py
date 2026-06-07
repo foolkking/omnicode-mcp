@@ -30,6 +30,12 @@ from omnicode_adapters.mcp_server.high_level_tools import (
         ("if", "text"),
         ("def", "text"),
         ("class", "text"),
+        ("before", "text"),
+        ("after", "text"),
+        ("true", "text"),
+        ("false", "text"),
+        ("local-v2", "text"),
+        ("cloudsim-v1", "text"),
         # 4. ALL_CAPS_IDENTIFIER (env vars / constants) → text.
         ("OMNICODE_RERANKER", "text"),
         ("DEFAULT_MAX_RESULTS", "text"),

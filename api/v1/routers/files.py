@@ -3,13 +3,16 @@ File operation endpoints
 Handles intelligent write, AI-assisted edit, and read operations
 """
 
-from typing import Optional
+from pathlib import Path
+import re
+from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query
 
 from core import get_edit_pipeline, get_search_engine, get_write_pipeline
 from core.config import get_settings
 from omnicode.pipelines.edit import EditRequest
+from omnicode_core.workspace.snapshot_store import CloudSnapshotStore
 from schemas.requests import EditRequestAPI, FileRequest, WriteRequest
 from utils import (
     create_detailed_error_response,
@@ -19,6 +22,71 @@ from utils import (
 )
 
 router = APIRouter(tags=["files"])
+
+
+def _snapshot_raw_text(*, workspace_id: Optional[str], file_path: str) -> Optional[str]:
+    if not workspace_id:
+        return None
+    try:
+        return CloudSnapshotStore().read_text(
+            workspace_id=workspace_id,
+            path=file_path,
+        )
+    except Exception:
+        return None
+
+
+def _snapshot_read_payload(
+    *,
+    workspace_id: Optional[str],
+    file_path: str,
+    start_line: Optional[int],
+    end_line: Optional[int],
+    with_line_numbers: bool,
+) -> Optional[dict]:
+    if not workspace_id:
+        return None
+    try:
+        text = CloudSnapshotStore().read_text(
+            workspace_id=workspace_id,
+            path=file_path,
+        )
+    except Exception:
+        return None
+    if text is None:
+        return None
+
+    lines = text.splitlines()
+    total_lines = len(lines)
+    start = start_line or 1
+    end = end_line or total_lines
+    if start < 1 or end < start:
+        return {
+            "success": False,
+            "error": f"Invalid line range: {start}-{end}",
+            "file_path": file_path,
+        }
+    if start > total_lines:
+        selected: list[str] = []
+    else:
+        selected = lines[start - 1:min(end, total_lines)]
+    if with_line_numbers:
+        content = "\n".join(
+            f"{line_no} | {line}"
+            for line_no, line in enumerate(selected, start=start)
+        )
+    else:
+        content = "\n".join(selected)
+    return {
+        "success": True,
+        "file_path": file_path,
+        "content": content,
+        "total_lines": total_lines,
+        "start_line": start,
+        "end_line": min(end, total_lines) if total_lines else 0,
+        "language": Path(file_path).suffix.lstrip("."),
+        "source": "snapshot_store",
+    }
 
 
 @router.post("/write")
@@ -520,6 +588,11 @@ async def read_code_content(
         description="Required when mode=relevant_chunks. Free-text search query "
         "scoped to this file's chunks.",
     ),
+    workspace_id: Optional[str] = Query(
+        None,
+        description="Hybrid sync workspace id; enables cloud snapshot fallback.",
+    ),
+    x_omnicode_workspace: Optional[str] = Header(default=None),
 ):
     """Read code content with multiple modes for token efficiency.
 
@@ -542,18 +615,22 @@ async def read_code_content(
     # Sandbox check happens BEFORE mode dispatch so a hostile path can't
     # exercise any of the read modes (each of which would then call into
     # the workspace itself).  Wave 1, gap §13.
-    from core.config import get_settings as _gs
-
     try:
-        await validate_file_path(file_path, _gs().WORKING_DIR)
+        await validate_file_path(file_path, get_settings().WORKING_DIR)
     except HTTPException as exc:
         return create_error_response(str(exc.detail), exc.status_code)
 
     # Handle non-full modes early — they don't need line range / symbol resolution
     if mode and mode.lower() not in ("full", ""):
-        return await _read_mode_dispatch(file_path, mode.lower(), with_line_numbers, query)
+        return await _read_mode_dispatch(
+            file_path,
+            mode.lower(),
+            with_line_numbers,
+            query,
+            workspace_id=x_omnicode_workspace or workspace_id,
+        )
 
-    def _coerce_int(v: Optional[str], field: str):
+    def _coerce_int(v: Optional[str], field: str) -> tuple[Optional[int], Optional[str]]:
         if v is None:
             return None, None
         if isinstance(v, str) and v.lower() in {"null", "undefined", ""}:
@@ -569,8 +646,8 @@ async def read_code_content(
     end_line_int, err2 = _coerce_int(end_line, "end_line")
     if err2:
         return create_error_response(err2, 400)
-    start_line = start_line_int  # type: ignore[assignment]
-    end_line = end_line_int      # type: ignore[assignment]
+    start_line_value = start_line_int
+    end_line_value = end_line_int
     try:
         search_engine = get_search_engine()
         settings = get_settings()
@@ -601,26 +678,26 @@ async def read_code_content(
             )
 
         # Validate line range parameters
-        if start_line is not None and end_line is not None:
-            if start_line < 1:
+        if start_line_value is not None and end_line_value is not None:
+            if start_line_value < 1:
                 return create_detailed_error_response(
-                    f"Invalid start_line: {start_line}. Line numbers must be >= 1",
+                    f"Invalid start_line: {start_line_value}. Line numbers must be >= 1",
                     400,
                     "InvalidLineRange",
-                    {"start_line": start_line, "end_line": end_line},
+                    {"start_line": start_line_value, "end_line": end_line_value},
                     "SearchEngine",
                     "line_validation",
                     settings.WORKING_DIR,
                 )
 
-            if end_line < start_line:
+            if end_line_value < start_line_value:
                 return create_detailed_error_response(
-                    f"Invalid line range: end_line ({end_line}) < start_line ({start_line})",
+                    f"Invalid line range: end_line ({end_line_value}) < start_line ({start_line_value})",
                     400,
                     "InvalidLineRange",
                     {
-                        "start_line": start_line,
-                        "end_line": end_line,
+                        "start_line": start_line_value,
+                        "end_line": end_line_value,
                         "suggestion": "Ensure end_line >= start_line",
                     },
                     "SearchEngine",
@@ -645,8 +722,8 @@ async def read_code_content(
                 file_path=file_path,
                 symbol_name=symbol_name,
                 occurrence=occurrence,
-                start_line=start_line,
-                end_line=end_line,
+                start_line=start_line_value,
+                end_line=end_line_value,
                 with_line_numbers=with_line_numbers,
             )
         except Exception as read_error:
@@ -657,8 +734,8 @@ async def read_code_content(
                 {
                     "file_path": file_path,
                     "symbol_name": symbol_name,
-                    "start_line": start_line,
-                    "end_line": end_line,
+                    "start_line": start_line_value,
+                    "end_line": end_line_value,
                     "read_error": str(read_error),
                 },
                 "SearchEngine",
@@ -669,6 +746,25 @@ async def read_code_content(
         if result.get("success"):
             return create_success_response(result)
         else:
+            snapshot = _snapshot_read_payload(
+                workspace_id=x_omnicode_workspace or workspace_id,
+                file_path=file_path,
+                start_line=start_line_value,
+                end_line=end_line_value,
+                with_line_numbers=with_line_numbers,
+            )
+            if snapshot is not None:
+                if snapshot.get("success"):
+                    return create_success_response(snapshot)
+                return create_detailed_error_response(
+                    snapshot.get("error", "Snapshot read failed"),
+                    400,
+                    "SnapshotReadFailed",
+                    {"file_path": file_path},
+                    "CloudSnapshotStore",
+                    "read_content",
+                    settings.WORKING_DIR,
+                )
             return create_detailed_error_response(
                 result.get("error", "Unknown read error"),
                 400,
@@ -677,7 +773,8 @@ async def read_code_content(
                     "file_path": file_path,
                     "symbol_name": symbol_name,
                     "line_range": (
-                        f"{start_line}-{end_line}" if start_line and end_line else None
+                        f"{start_line_value}-{end_line_value}"
+                        if start_line_value and end_line_value else None
                     ),
                     "occurrence": occurrence,
                     "with_line_numbers": with_line_numbers,
@@ -1006,17 +1103,81 @@ async def file_operations(request: FileRequest):
 # Multi-mode read dispatch (outline / symbols / diagnostics / imports)
 # =============================================================================
 
-async def _read_mode_dispatch(file_path: str, mode: str, with_line_numbers: bool, query: Optional[str] = None):
+def _lightweight_symbols_from_content(file_path: str, content: str) -> list[dict[str, Any]]:
+    symbols: list[dict[str, Any]] = []
+    suffix = Path(file_path).suffix.lower()
+    for line_no, line in enumerate(content.splitlines(), 1):
+        stripped = line.strip()
+        kind = ""
+        name = ""
+        if suffix in {".py", ".pyi"}:
+            match = re.match(r"^(?:async\s+def|def)\s+([A-Za-z_]\w*)\s*\(", stripped)
+            if match:
+                kind = "function"
+                name = match.group(1)
+            else:
+                match = re.match(r"^class\s+([A-Za-z_]\w*)\b", stripped)
+                if match:
+                    kind = "class"
+                    name = match.group(1)
+        else:
+            match = re.match(
+                r"^(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(",
+                stripped,
+            )
+            if match:
+                kind = "function"
+                name = match.group(1)
+            else:
+                match = re.match(r"^(?:export\s+)?class\s+([A-Za-z_$][\w$]*)\b", stripped)
+                if match:
+                    kind = "class"
+                    name = match.group(1)
+        if not name:
+            continue
+        symbols.append({
+            "name": name,
+            "type": kind or "symbol",
+            "line_start": line_no,
+            "line_end": line_no,
+            "parent": None,
+            "signature": stripped[:200],
+            "source": "snapshot_lightweight",
+        })
+    return symbols
+
+
+def _language_from_file_path(file_path: str) -> str:
+    suffix = Path(file_path).suffix.lower()
+    return {
+        ".py": "python",
+        ".pyi": "python",
+        ".js": "javascript",
+        ".jsx": "javascript",
+        ".ts": "typescript",
+        ".tsx": "typescript",
+        ".rs": "rust",
+        ".go": "go",
+        ".java": "java",
+        ".md": "markdown",
+        ".markdown": "markdown",
+        ".mdx": "markdown",
+    }.get(suffix, "")
+
+
+async def _read_mode_dispatch(
+    file_path: str,
+    mode: str,
+    with_line_numbers: bool,
+    query: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+):
     """Handle non-full read modes that return structured, token-efficient output.
 
     These modes are designed to give AI agents the minimum context they need
     without reading the entire file — typically saving 50-90% of tokens.
     """
     import os
-
-    from core import get_search_engine
-    from core.config import get_settings
-    from utils import create_error_response, create_success_response, validate_file_path
 
     settings = get_settings()
 
@@ -1025,15 +1186,23 @@ async def _read_mode_dispatch(file_path: str, mode: str, with_line_numbers: bool
     except Exception as e:
         return create_error_response(f"Invalid file path: {file_path} — {e}", 400)
 
+    source = "filesystem"
     full_path = os.path.abspath(os.path.join(settings.WORKING_DIR, file_path))
-    if not os.path.exists(full_path):
-        return create_error_response(f"File not found: {file_path}", 404)
-
-    try:
-        with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
-            content = f.read()
-    except Exception as exc:
-        return create_error_response(f"Cannot read file: {exc}", 500)
+    if os.path.exists(full_path):
+        try:
+            with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+        except Exception as exc:
+            return create_error_response(f"Cannot read file: {exc}", 500)
+    else:
+        snapshot_text = _snapshot_raw_text(
+            workspace_id=workspace_id,
+            file_path=file_path,
+        )
+        if snapshot_text is None:
+            return create_error_response(f"File not found: {file_path}", 404)
+        content = snapshot_text
+        source = "snapshot_store"
 
     lines = content.splitlines()
     total_lines = len(lines)
@@ -1048,7 +1217,7 @@ async def _read_mode_dispatch(file_path: str, mode: str, with_line_numbers: bool
         if file_path.lower().endswith((".md", ".markdown", ".mdx")):
             import re as _re
 
-            outline_items = []
+            outline_items: list[dict[str, Any]] = []
             heading_re = _re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
             in_fence = False
             for i, ln in enumerate(lines, 1):
@@ -1087,14 +1256,21 @@ async def _read_mode_dispatch(file_path: str, mode: str, with_line_numbers: bool
                 "language": "markdown",
                 "symbols": outline_items,
                 "symbol_count": len(outline_items),
+                "source": source,
             })
 
-        search_engine = get_search_engine()
-        if not search_engine:
-            return create_error_response("Search engine not initialized", 500)
+        if source == "snapshot_store":
+            symbols_data = {"symbols": [], "language": _language_from_file_path(file_path)}
+            symbols = _lightweight_symbols_from_content(file_path, content)
+        else:
+            search_engine = get_search_engine()
+            if not search_engine:
+                return create_error_response("Search engine not initialized", 500)
 
-        symbols_data = await search_engine.list_symbols_in_file(file_path)
-        symbols = symbols_data.get("symbols") or []
+            symbols_data = await search_engine.list_symbols_in_file(file_path)
+            symbols = symbols_data.get("symbols") or []
+            if not symbols:
+                symbols = _lightweight_symbols_from_content(file_path, content)
 
         outline_items = []
         for sym in symbols:
@@ -1143,18 +1319,25 @@ async def _read_mode_dispatch(file_path: str, mode: str, with_line_numbers: bool
             "language": symbols_data.get("language", ""),
             "symbols": outline_items,
             "symbol_count": len(outline_items),
+            "source": source,
         })
 
     # -------------------------------------------------------------------------
     # MODE: symbols — just the symbol list (even more compact than outline)
     # -------------------------------------------------------------------------
     if mode == "symbols":
-        search_engine = get_search_engine()
-        if not search_engine:
-            return create_error_response("Search engine not initialized", 500)
+        if source == "snapshot_store":
+            symbols_data = {"symbols": [], "language": _language_from_file_path(file_path)}
+            symbols = _lightweight_symbols_from_content(file_path, content)
+        else:
+            search_engine = get_search_engine()
+            if not search_engine:
+                return create_error_response("Search engine not initialized", 500)
 
-        symbols_data = await search_engine.list_symbols_in_file(file_path)
-        symbols = symbols_data.get("symbols") or []
+            symbols_data = await search_engine.list_symbols_in_file(file_path)
+            symbols = symbols_data.get("symbols") or []
+            if not symbols:
+                symbols = _lightweight_symbols_from_content(file_path, content)
 
         return create_success_response({
             "file": file_path,
@@ -1171,6 +1354,7 @@ async def _read_mode_dispatch(file_path: str, mode: str, with_line_numbers: bool
                 for s in symbols
             ],
             "symbol_count": len(symbols),
+            "source": source,
         })
 
     # -------------------------------------------------------------------------
@@ -1271,6 +1455,7 @@ async def _read_mode_dispatch(file_path: str, mode: str, with_line_numbers: bool
             "import_count": len(import_lines),
             "content": rendered,
             "ast_used": ast_used,
+            "source": source,
         })
 
     # -------------------------------------------------------------------------
@@ -1325,6 +1510,7 @@ async def _read_mode_dispatch(file_path: str, mode: str, with_line_numbers: bool
                 "diagnostic_count": len(issues_out),
                 "tools_run": tools_run,
                 "tools_skipped": tools_skipped,
+                "source": source,
             })
         except Exception as exc:
             return create_success_response({
@@ -1334,6 +1520,7 @@ async def _read_mode_dispatch(file_path: str, mode: str, with_line_numbers: bool
                 "diagnostics": [],
                 "diagnostic_count": 0,
                 "note": f"Guard check unavailable: {exc}",
+                "source": source,
             })
 
     # -------------------------------------------------------------------------

@@ -1,8 +1,7 @@
 """Local-agent file-sync client (Wave 2, W2-2).
 
-The agent watches a local working tree and pushes file bodies to a
-remote OmniCode server's ``/index/upsert-file`` and ``/index/delete-file``
-endpoints. Designed for the hybrid-mode story: cloud handles
+The agent watches a local working tree and pushes file bodies/deletes to a
+remote OmniCode server's ``/sync/batch`` endpoint. Designed for the hybrid-mode story: cloud handles
 embedding / search / memory, local stays the source of truth for the
 actual code.
 

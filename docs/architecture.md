@@ -112,6 +112,48 @@ The intended hybrid path is:
 
 For full deployment recipes see [`deployment.md`](deployment.md).
 
+### Runtime config and sync protocol
+
+Hybrid MCP sessions now share one structured runtime model:
+
+- `RuntimeConfig` is built from CLI > env > `omnicode.toml` > defaults.
+  It exports the same env vars the legacy MCP server already understands,
+  so the bridge can move incrementally without a flag-day rewrite.
+- `LocalWorkspace` is the path authority for local files. It accepts only
+  workspace-relative paths, rejects `..`, absolute paths outside the root,
+  and symlink escapes.
+- `LocalManifest` records local file hashes and revisions under
+  `~/.omnicode/workspaces/<workspace_id>/manifest.json`.
+- `SyncQueue` turns pending manifest changes into `/sync/batch` payloads.
+  It reads file bytes first, then decodes as UTF-8, so Windows CRLF bytes
+  hash the same way in the manifest and upload payload.
+- `SyncClient` talks to `/sync/batch`, `/sync/status`, and `/sync/barrier`
+  with `X-Omnicode-Workspace`, `X-Omnicode-Executor`, and optional
+  `X-API-Key` headers.
+
+The cloud sync API accepts only workspace ids, workspace-relative paths,
+hashes, revisions, and UTF-8 file content. Local absolute paths are never
+valid in this protocol. Accepted file content is stored in
+`CloudSnapshotStore`, a content-addressed store under
+`~/.omnicode/cloud-sync/workspaces/<workspace_id>/`. The index records
+`accepted_revision` and `indexed_revision`; `/sync/barrier` blocks cloud
+analysis when the cloud index is stale.
+
+`HybridToolRouter` defines the MCP execution contract:
+
+- `omni_read` and `omni_patch` are always local-authority tools.
+- `omni_diagnostics` is local-first.
+- `omni_search`, `omni_context`, and `omni_impact` may run in cloud only
+  after the barrier revision is current.
+- `omni_status` is aggregate and reports runtime, sync, route, capability,
+  and agent-auto state.
+
+LLM, embedding, and diagnostics capability selection is reported through a
+separate capability contract. It derives from runtime mode flags such as
+`OMNICODE_LLM_MODE`, `OMNICODE_EMBEDDING_MODE`, and
+`OMNICODE_DIAGNOSTICS_MODE`; it does not silently assume cloud is available
+when no backend URL is configured.
+
 ---
 
 ## The eight capabilities

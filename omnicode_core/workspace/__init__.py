@@ -16,17 +16,31 @@ from omnicode_core.workspace.registry import (
     WorkspaceRegistry,
     get_workspace_registry,
 )
+from omnicode_core.workspace.agent_auto import (
+    AgentAutoDecision,
+    decide_agent_auto,
+)
 from omnicode_core.workspace.request import (
     WorkspaceRequest,
     WorkspaceResolutionError,
     resolve_workspace_request,
 )
+from omnicode_core.workspace.tool_router import (
+    HybridToolRouter,
+    SyncRevisionState,
+    ToolRoute,
+)
 
 __all__ = [
     "Workspace",
     "WorkspaceRegistry",
+    "AgentAutoDecision",
     "WorkspaceRequest",
     "WorkspaceResolutionError",
+    "HybridToolRouter",
+    "SyncRevisionState",
+    "ToolRoute",
+    "decide_agent_auto",
     "get_workspace_registry",
     "resolve_workspace_request",
 ]

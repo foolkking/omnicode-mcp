@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
@@ -32,7 +31,6 @@ import pytest
 
 from omnicode_adapters.mcp_server import high_level_tools as hlt
 from omnicode_adapters.mcp_server.high_level_tools import (
-    _CONTRACT_VERSIONS,
     _HANDLER_VERSION,
     _get_workspace_root,
     _resolve_workspace_path,
@@ -93,9 +91,41 @@ def test_workspace_root_helper_returns_three_tuple() -> None:
     assert isinstance(root, Path)
     assert root.is_dir(), f"helper returned non-existent dir: {root}"
     assert source in (
-        "workspace_registry", "settings_working_dir", "cwd_fallback",
+        "explicit_local_workspace", "workspace_registry",
+        "settings_working_dir", "cwd_fallback",
     )
     assert isinstance(warnings, list)
+
+
+def test_workspace_root_helper_prefers_explicit_local_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_root = tmp_path / "local"
+    cloud_root = tmp_path / "cloud"
+    local_root.mkdir()
+    cloud_root.mkdir()
+
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(local_root))
+    monkeypatch.setattr(
+        "omnicode_core.workspace.registry._default_store_path",
+        lambda: tmp_path / "workspaces.json",
+    )
+    monkeypatch.setattr(
+        "omnicode_core.workspace.registry._DEFAULT_REGISTRY", None,
+    )
+    from omnicode_core.workspace import get_workspace_registry
+
+    get_workspace_registry().add(
+        name="repo-a",
+        path=str(cloud_root),
+        set_active=True,
+        workspace_id="repo-a",
+    )
+
+    root, source, warnings = _get_workspace_root()
+    assert root == local_root.resolve()
+    assert source == "explicit_local_workspace"
+    assert "workspace_root_fallback_to_cwd" not in warnings
 
 
 def test_workspace_root_helper_prefers_settings_over_cwd(
@@ -159,7 +189,8 @@ def test_omni_status_reports_workspace_root_and_cwd() -> None:
     assert "workspace_root_matches_cwd" in payload
     assert isinstance(payload["workspace_root_matches_cwd"], bool)
     assert payload["workspace_root_source"] in (
-        "workspace_registry", "settings_working_dir", "cwd_fallback",
+        "explicit_local_workspace", "workspace_registry",
+        "settings_working_dir", "cwd_fallback",
     )
     assert payload["handler_version"] == _HANDLER_VERSION
     assert payload["contract_version"] == "status.v1"

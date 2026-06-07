@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from omnicode_core.config.toml_loader import load_toml_config
+from omnicode_core.config.toml_loader import load_toml_config, read_toml_config
 
 
 def _write(path: Path, body: str) -> Path:
@@ -31,7 +31,20 @@ def test_basic_mapping_applied(tmp_path: Path, monkeypatch):
         port = 8765
 
         [workspace]
+        id = "repo-a"
         read_only = true
+
+        [mcp]
+        executor = "hybrid"
+
+        [cloud]
+        url = "http://cloud:6789"
+
+        [sync]
+        mode = "smart"
+
+        [capabilities]
+        llm_mode = "off"
 
         [security]
         allow_apply_patch = false
@@ -41,6 +54,11 @@ def test_basic_mapping_applied(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("OMNICODE_MODE", raising=False)
     monkeypatch.delenv("API_PORT", raising=False)
     monkeypatch.delenv("OMNICODE_READ_ONLY", raising=False)
+    monkeypatch.delenv("OMNICODE_WORKSPACE_ID", raising=False)
+    monkeypatch.delenv("OMNICODE_EXECUTOR_MODE", raising=False)
+    monkeypatch.delenv("OMNICODE_REMOTE", raising=False)
+    monkeypatch.delenv("OMNICODE_SYNC_MODE", raising=False)
+    monkeypatch.delenv("OMNICODE_LLM_MODE", raising=False)
     monkeypatch.delenv("OMNICODE_ALLOW_APPLY_PATCH", raising=False)
     monkeypatch.delenv("OMNICODE_API_KEY", raising=False)
     monkeypatch.setenv("OMNICODE_CONFIG", str(cfg))
@@ -51,6 +69,11 @@ def test_basic_mapping_applied(tmp_path: Path, monkeypatch):
     assert os.environ["OMNICODE_MODE"] == "cloud"
     assert os.environ["API_PORT"] == "8765"
     assert os.environ["OMNICODE_READ_ONLY"] == "true"
+    assert os.environ["OMNICODE_WORKSPACE_ID"] == "repo-a"
+    assert os.environ["OMNICODE_EXECUTOR_MODE"] == "hybrid"
+    assert os.environ["OMNICODE_REMOTE"] == "http://cloud:6789"
+    assert os.environ["OMNICODE_SYNC_MODE"] == "smart"
+    assert os.environ["OMNICODE_LLM_MODE"] == "off"
     assert os.environ["OMNICODE_ALLOW_APPLY_PATCH"] == "false"
     assert os.environ["OMNICODE_API_KEY"] == "sk-test"
     assert applied["OMNICODE_MODE"] == "cloud"
@@ -118,6 +141,24 @@ def test_explicit_path_via_env(tmp_path: Path, monkeypatch):
     assert os.environ["API_PORT"] == "9999"
 
 
+def test_read_toml_config_does_not_mutate_env(tmp_path: Path, monkeypatch):
+    cfg = _write(
+        tmp_path / "omnicode.toml",
+        """
+        [workspace]
+        id = "repo-a"
+        """,
+    )
+    monkeypatch.setenv("OMNICODE_CONFIG", str(cfg))
+    monkeypatch.delenv("OMNICODE_WORKSPACE_ID", raising=False)
+
+    data = read_toml_config()
+    import os
+
+    assert data["workspace"]["id"] == "repo-a"
+    assert "OMNICODE_WORKSPACE_ID" not in os.environ
+
+
 def test_relative_to_start_dir(tmp_path: Path, monkeypatch):
     """When ``start`` is supplied and contains a TOML file, it wins."""
     sub = tmp_path / "project"
@@ -167,6 +208,14 @@ def _clean_known_env(monkeypatch):
         "OMNICODE_EMBEDDING_DEVICE", "EMBEDDING_MODEL",
         "OMNICODE_REQUIRE_API_KEY", "OMNICODE_ALLOW_APPLY_PATCH",
         "OMNICODE_ALLOW_SHELL", "OMNICODE_API_KEY", "OMNICODE_MCP_TOOLS",
+        "OMNICODE_WORKSPACE_ID", "OMNICODE_EXECUTOR_MODE",
+        "OMNICODE_MCP_TRANSPORT", "OMNICODE_REMOTE",
+        "OMNICODE_CLOUD_AUTH_MODE", "OMNICODE_CLOUD_TOKEN_ENV",
+        "OMNICODE_SYNC_MODE", "OMNICODE_AGENT_MODE",
+        "OMNICODE_AGENT_DEBOUNCE_MS", "OMNICODE_SYNC_MAX_FILE_BYTES",
+        "OMNICODE_SYNC_BATCH_MAX_FILES", "OMNICODE_SYNC_BATCH_MAX_BYTES",
+        "OMNICODE_LLM_MODE", "OMNICODE_EMBEDDING_MODE",
+        "OMNICODE_DIAGNOSTICS_MODE",
         "FOO_BAR", "TRANSFORMERS_OFFLINE",
     ]
     for k in keys:

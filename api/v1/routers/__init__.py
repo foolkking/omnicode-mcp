@@ -4,7 +4,6 @@ Exports all router instances for registration in main app
 """
 
 from api.v1.routers.admin import router as admin_router
-from api.v1.routers.agent import router as agent_router
 from api.v1.routers.directory import router as directory_router
 from api.v1.routers.files import router as files_router
 from api.v1.routers.fs_browser import router as fs_browser_router
@@ -23,6 +22,7 @@ from api.v1.routers.patch import router as patch_router
 from api.v1.routers.project import router as project_router
 from api.v1.routers.search import router as search_router
 from api.v1.routers.static_files import router as static_files_router
+from api.v1.routers.sync import router as sync_router
 from api.v1.routers.working_directory import router as working_directory_router
 from api.v1.routers.workspaces import router as workspaces_router
 
@@ -45,10 +45,10 @@ all_routers = [
     patch_router,
     lsp_router,
     workspaces_router,
+    sync_router,
     admin_router,
     intelligence_router,
     graph_router,
-    agent_router,
     monitoring_router,
 ]
 
@@ -68,8 +68,8 @@ __all__ = [
     "guard_router",
     "fs_browser_router",
     "workspaces_router",
+    "sync_router",
     "admin_router",
     "intelligence_router",
     "graph_router",
-    "agent_router",
 ]

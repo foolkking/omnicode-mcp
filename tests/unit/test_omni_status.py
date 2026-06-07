@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Any, Callable, Dict
 
 import pytest
@@ -26,7 +27,6 @@ from omnicode_adapters.mcp_server import high_level_tools as hlt
 from omnicode_adapters.mcp_server.high_level_tools import (
     register_high_level_tools,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -70,8 +70,18 @@ def _build_status_tool() -> Callable[..., Any]:
     return fn
 
 
+def _build_status_tool_with_request(
+    make_request: Callable[..., Any],
+) -> Callable[..., Any]:
+    mcp = _MCPStub()
+    register_high_level_tools(mcp, make_request)
+    fn = mcp.tools.get("omni_status")
+    assert fn is not None, "omni_status was not registered"
+    return fn
+
+
 def _run(coro: Any) -> Any:
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +104,7 @@ def test_omni_status_returns_required_fields() -> None:
         "python_version",
         "handler_version",
         "handler_features",
+        "backend_url",
         "registered_tools",
         "deprecated_aliases_present",
         "warnings",
@@ -108,6 +119,12 @@ def test_omni_status_returns_required_fields() -> None:
     assert payload["handler_version"] == hlt._HANDLER_VERSION
     assert isinstance(payload["registered_tools"], list)
     assert "omni_status" in payload["registered_tools"]
+    assert "sync" in payload
+    assert isinstance(payload["sync"], dict)
+    assert "capability_contract" in payload
+    assert isinstance(payload["capability_contract"], dict)
+    assert "agent_auto" in payload
+    assert isinstance(payload["agent_auto"], dict)
 
 
 def test_omni_status_clean_when_source_and_runtime_agree() -> None:
@@ -161,3 +178,175 @@ def test_omni_status_pid_matches_current_process() -> None:
     raw = _run(_build_status_tool()())
     payload = json.loads(raw)
     assert payload["pid"] == os.getpid()
+
+
+def test_omni_status_sync_defaults_are_clean(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OMNICODE_WORKSPACE_ID", raising=False)
+    monkeypatch.delenv("OMNICODE_EXECUTOR_MODE", raising=False)
+    monkeypatch.delenv("OMNICODE_REMOTE", raising=False)
+    monkeypatch.delenv("OMNICODE_FASTAPI_BASE_URL", raising=False)
+
+    raw = _run(_build_status_tool()())
+    payload = json.loads(raw)
+
+    assert payload["ok"] is True
+    assert payload["sync"]["configured"] is False
+    assert payload["sync"]["warning"] is None
+    assert payload["sync"]["routes"]["omni_read"]["local_authority"] is True
+    assert payload["sync"]["routes"]["omni_status"]["target"] == "aggregate"
+
+
+def test_omni_status_sync_reports_hybrid_routes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ID", "repo-a")
+    monkeypatch.setenv("OMNICODE_EXECUTOR_MODE", "hybrid")
+    monkeypatch.setenv("OMNICODE_FASTAPI_BASE_URL", "http://cloud")
+
+    raw = _run(_build_status_tool()())
+    payload = json.loads(raw)
+
+    sync = payload["sync"]
+    assert sync["configured"] is True
+    assert sync["workspace_id"] == "repo-a"
+    assert sync["executor_mode"] == "hybrid"
+    assert payload["backend_url"] == "http://cloud"
+    assert sync["backend_url"] == "http://cloud"
+    assert sync["routes"]["omni_read"]["target"] == "local"
+    assert sync["routes"]["omni_read"]["local_authority"] is True
+    assert sync["routes"]["omni_patch"]["local_authority"] is True
+    assert sync["routes"]["omni_search"]["target"] == "cloud"
+    assert sync["routes"]["omni_search"]["requires_barrier"] is True
+    assert sync["routes"]["omni_search"]["barrier_min_revision"] == 0
+
+
+def test_omni_status_prefers_cloud_snapshot_for_index_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ID", "repo-a")
+    monkeypatch.setenv("OMNICODE_EXECUTOR_MODE", "hybrid")
+    monkeypatch.setenv("OMNICODE_FASTAPI_BASE_URL", "http://cloud")
+
+    async def cloud_request(
+        _method: str,
+        endpoint: str,
+        **_kwargs: Any,
+    ) -> Dict[str, Any]:
+        if endpoint == "/sync/status":
+            return {
+                "ok": True,
+                "accepted_revision": 42,
+                "indexed_revision": 42,
+                "snapshot_store": {
+                    "latest_revision": 42,
+                    "accepted_revision": 42,
+                    "indexed_revision": 42,
+                    "files": 6991,
+                    "deletes": 0,
+                },
+            }
+        return {}
+
+    raw = _run(_build_status_tool_with_request(cloud_request)())
+    payload = json.loads(raw)
+
+    sync = payload["sync"]
+    assert sync["accepted_revision"] == 42
+    assert sync["indexed_revision"] == 42
+    assert sync["snapshot_store_source"] == "cloud"
+    assert sync["snapshot_store"]["files"] == 6991
+    readiness = sync["index_readiness"]
+    assert readiness["fresh"] is True
+    assert readiness["indexed_files"] == 6991
+    assert readiness["text_index_ready"] is True
+    assert readiness["symbol_index_ready"] is True
+    assert readiness["graph_index_ready"] is False
+
+
+def test_omni_status_reports_cloud_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ID", "repo-a")
+    monkeypatch.setenv("OMNICODE_EXECUTOR_MODE", "hybrid")
+    monkeypatch.setenv("OMNICODE_FASTAPI_BASE_URL", "http://127.0.0.1:6799")
+
+    async def down_request(
+        _method: str,
+        endpoint: str,
+        **_kwargs: Any,
+    ) -> Dict[str, Any]:
+        if endpoint == "/sync/status":
+            return {
+                "error": "Request failed with status 502",
+                "error_type": "HTTPError",
+                "status_code": 502,
+            }
+        return {}
+
+    raw = _run(_build_status_tool_with_request(down_request)())
+    payload = json.loads(raw)
+
+    assert payload["ok"] is False
+    assert any("cloud_unavailable:" in item for item in payload["warnings"])
+    sync = payload["sync"]
+    assert sync["cloud_available"] is False
+    assert sync["cloud_unavailable"] is True
+    assert "502" in sync["cloud_status_warning"]
+    assert sync["routes"]["omni_search"]["reason"] == "cloud backend is unavailable"
+
+
+def test_omni_status_capability_contract_reports_cloud_availability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OMNICODE_REMOTE", raising=False)
+    monkeypatch.delenv("OMNICODE_FASTAPI_BASE_URL", raising=False)
+    monkeypatch.setenv("OMNICODE_EMBEDDING_MODE", "cloud")
+    monkeypatch.setenv("OMNICODE_LLM_MODE", "remote")
+
+    raw = _run(_build_status_tool()())
+    payload = json.loads(raw)
+
+    contract = payload["capability_contract"]
+    assert contract["cloud_configured"] is False
+    assert contract["embedding"]["target"] == "cloud"
+    assert contract["embedding"]["available"] is False
+    assert contract["llm"]["target"] == "cloud"
+    assert contract["llm"]["available"] is False
+
+
+def test_omni_status_agent_auto_reports_embedded_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ID", "repo-a")
+    monkeypatch.setenv("OMNICODE_EXECUTOR_MODE", "hybrid")
+    monkeypatch.setenv("OMNICODE_FASTAPI_BASE_URL", "http://cloud")
+    monkeypatch.setenv("OMNICODE_SYNC_MODE", "smart")
+    monkeypatch.setenv("OMNICODE_AGENT_MODE", "auto")
+
+    raw = _run(_build_status_tool()())
+    payload = json.loads(raw)
+
+    assert payload["agent_auto"]["target"] == "embedded"
+    assert payload["agent_auto"]["should_start"] is True
+    assert payload["agent_auto"]["initial_sync"] is True

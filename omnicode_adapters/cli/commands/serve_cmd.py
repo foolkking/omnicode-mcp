@@ -21,7 +21,7 @@ _MODE_PRESETS: dict[str, dict[str, str]] = {
     },
     "hybrid": {
         # Cloud index + local apply. The remote process accepts writes
-        # ONLY through the agent endpoints (the local agent is the
+        # ONLY through /sync/batch (the local agent is the
         # source of truth for the codebase) and blocks /patch/apply on
         # the wire — the editor applies patches locally instead.
         "OMNICODE_MODE": "hybrid",
@@ -54,6 +54,11 @@ def run(
     port: int = 6789,
     reload: bool = False,
     mode: str = "local",
+    state_dir: str | None = None,
+    workspace_store: str | None = None,
+    content_store: str | None = None,
+    materialize_mirror: str | None = None,
+    mirror_readonly: str | None = None,
 ):
     """Start the FastAPI server.
 
@@ -66,6 +71,23 @@ def run(
     """
     if headless:
         os.environ["OMNICODE_WEB_CONSOLE"] = "false"
+
+    # Keep backend startup deterministic in offline/local deployments. The MCP
+    # command already sets these defaults; serve needs the same contract so a
+    # cloud-sim backend does not block on HuggingFace metadata probes.
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
+    if state_dir:
+        os.environ["OMNICODE_STATE_DIR"] = state_dir
+    if workspace_store:
+        os.environ["OMNICODE_WORKSPACE_STORE"] = workspace_store
+    if content_store:
+        os.environ["OMNICODE_CONTENT_STORE"] = content_store
+    if materialize_mirror is not None:
+        os.environ["OMNICODE_MATERIALIZE_MIRROR"] = materialize_mirror
+    if mirror_readonly is not None:
+        os.environ["OMNICODE_MIRROR_READONLY"] = mirror_readonly
 
     _apply_mode_preset(mode)
 
@@ -100,6 +122,9 @@ def run(
    deploy mode  : {mode}
    read-only    : {'yes' if read_only else 'no'}
    apply patch  : {'enabled' if allow_apply else 'BLOCKED'}
+   state dir    : {os.environ.get('OMNICODE_STATE_DIR', '(default)')}
+   sync store   : {os.environ.get('OMNICODE_WORKSPACE_STORE', '(state-dir/default)')}
+   mirror       : {os.environ.get('OMNICODE_MATERIALIZE_MIRROR', 'true')}
    URL          : http://{host}:{port}/
 ================================================================================
 """)

@@ -23,6 +23,7 @@ Pinned by the audit:
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any, Dict, List
 
 import pytest
@@ -35,6 +36,7 @@ from omnicode_adapters.mcp_server.high_level_tools import (
     _emit_read_error,
     _guess_language_from_path,
     _next_actions_for_mode,
+    _sanitize_error_text,
 )
 from tests.unit.mcp_harness import (
     build_tools_with_route_keys as _build_tools,
@@ -119,6 +121,147 @@ def test_read_diagnostics_schema_matches_omni_diagnostics() -> None:
     assert read["mode"] == "diagnostics"
     assert read["file"] == "x.py"
     assert "next_actions" in read
+
+
+def test_omni_diagnostics_hybrid_uses_local_workspace_first(
+    tmp_path, monkeypatch,
+) -> None:
+    workspace = tmp_path / "repo"
+    target = workspace / "tests" / "tmp_cloudsim_routing.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        'def cloudsim_route():\n    return "local-v2"\n',
+        encoding="utf-8",
+    )
+
+    class _Guard:
+        async def check(self, file_path: str):
+            assert str(target) == file_path
+            return SimpleNamespace(
+                issues=[],
+                tools_run=["ruff"],
+                tools_skipped=["mypy", "bandit"],
+            )
+
+    import omnicode.guard.analyzer as guard_analyzer
+
+    monkeypatch.setenv("OMNICODE_EXECUTOR_MODE", "hybrid")
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setattr(guard_analyzer, "ProactiveGuard", _Guard)
+
+    tools = _build_tools({})
+    raw = _run(tools["omni_diagnostics"](
+        file="tests/tmp_cloudsim_routing.py",
+        format="json",
+    ))
+    payload = json.loads(raw)
+
+    assert payload["ok"] is True
+    assert payload["source"] == "local_guard"
+    assert payload["local_first"] is True
+    assert payload["local_authority"] is True
+    assert payload["tools_run"] == ["ruff"]
+    assert "lsp:local_mcp_lsp_unavailable" in payload["tools_skipped"]
+
+
+def test_omni_read_symbol_hybrid_uses_local_ast(
+    tmp_path, monkeypatch,
+) -> None:
+    workspace = tmp_path / "repo"
+    target = workspace / "django" / "core" / "handlers" / "base.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "class BaseHandler:\n"
+        "    def load_middleware(self):\n"
+        "        return 'local'\n\n"
+        "class Other:\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("OMNICODE_EXECUTOR_MODE", "hybrid")
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(workspace))
+
+    tools = _build_tools({})
+    raw = _run(tools["omni_read"](
+        file="django/core/handlers/base.py",
+        mode="symbol",
+        symbol="BaseHandler",
+        format="json",
+    ))
+    payload = json.loads(raw)
+
+    assert payload["ok"] is True
+    assert payload["mode"] == "symbol"
+    assert payload["symbol"] == "BaseHandler"
+    assert payload["source"] == "local_ast"
+    assert payload["local_authority"] is True
+    assert "class BaseHandler" in payload["content"]
+    assert "class Other" not in payload["content"]
+
+
+def test_omni_context_hybrid_diagnostics_uses_local_workspace(
+    tmp_path, monkeypatch,
+) -> None:
+    home = tmp_path / "home"
+    workspace = tmp_path / "repo"
+    target = workspace / "tests" / "tmp_cloudsim_routing.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        'def cloudsim_route():\n    return "local-v2"\n',
+        encoding="utf-8",
+    )
+
+    class _Guard:
+        async def check(self, file_path: str):
+            assert str(target) == file_path
+            return SimpleNamespace(
+                issues=[],
+                tools_run=["ruff"],
+                tools_skipped=["mypy", "bandit"],
+            )
+
+    import omnicode.guard.analyzer as guard_analyzer
+    from omnicode_core.workspace.local import LocalWorkspace
+    from omnicode_core.workspace.manifest import LocalManifest
+
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("OMNICODE_EXECUTOR_MODE", "hybrid")
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ID", "repo-a")
+    monkeypatch.setattr(guard_analyzer, "ProactiveGuard", _Guard)
+
+    local_ws = LocalWorkspace(root=workspace, workspace_id="repo-a")
+    manifest = LocalManifest.load(workspace=local_ws)
+    manifest.mark_changed(target)
+    manifest.data["last_accepted_revision"] = manifest.local_revision
+    manifest.data["last_indexed_revision"] = manifest.local_revision
+    manifest.save()
+
+    tools = _build_tools({
+        "/sync/status": {
+            "ok": True,
+            "accepted_revision": manifest.local_revision,
+            "indexed_revision": manifest.local_revision,
+        },
+    })
+    raw = _run(tools["omni_context"](
+        file="tests/tmp_cloudsim_routing.py",
+        format="json",
+        token_budget=2000,
+    ))
+    payload = json.loads(raw)
+
+    assert payload["ok"] is True
+    assert payload["context"]["primary_symbols"][0]["name"] == "cloudsim_route"
+    status = payload["diagnostics_status"]
+    assert status["ran"] is True
+    assert status["source"] == "local_guard"
+    assert status["local_first"] is True
+    assert status["local_authority"] is True
+    assert status["tools_run"] == ["ruff"]
+    assert "lsp:local_mcp_lsp_unavailable" in status["tools_skipped"]
 
 
 def test_read_diagnostics_empty_returns_canonical_envelope() -> None:
@@ -458,7 +601,35 @@ def test_read_path_guard_error_does_not_repeat_unsafe_path() -> None:
 
     assert payload["ok"] is False
     assert "access denied" in payload["error"].lower()
+    assert "C:\\" not in payload["error"]
+    assert "<absolute-path>" in payload["error"]
     _assert_path_guard_next_actions_are_safe(payload)
+
+
+def test_error_text_redacts_known_absolute_paths() -> None:
+    error = (
+        "backend failed at C:\\omnicode-sim\\state-cloud\\cloud-sync\\repo-a "
+        "while reading C:/Users/86182/project/tests/tmp_escape.py"
+    )
+
+    redacted = _sanitize_error_text(error)
+
+    assert "C:\\" not in redacted
+    assert "C:/" not in redacted
+    assert "<absolute-path>" in redacted
+
+
+def test_error_text_keeps_relative_tmp_paths_readable() -> None:
+    text = (
+        "File not found: tests/tmp_cloudsim_file.py; "
+        "rejected ../tmp_cloudsim_escape.py"
+    )
+
+    redacted = _sanitize_error_text(text)
+
+    assert "tests/tmp_cloudsim_file.py" in redacted
+    assert "../tmp_cloudsim_escape.py" in redacted
+    assert "<absolute-path>" not in redacted
 
 
 def test_diagnostics_path_guard_error_does_not_repeat_unsafe_path() -> None:

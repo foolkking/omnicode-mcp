@@ -32,7 +32,6 @@ from omnicode_adapters.mcp_server.high_level_tools import (
     register_high_level_tools,
 )
 
-
 # ---------------------------------------------------------------------------
 # FastMCP shim + scripted backend
 # ---------------------------------------------------------------------------
@@ -365,10 +364,15 @@ def test_omni_edit_alias_top_level_patch_fields() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_omni_edit_ai_edit_json_disabled_or_dry_run_envelope() -> None:
+def test_omni_edit_ai_edit_json_disabled_or_dry_run_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Whether ai_edit is disabled (backend errors out) OR a dry_run is
     requested, format='json' must return parseable JSON with the alias
     envelope — never plain text."""
+    monkeypatch.setenv("OMNICODE_LLM_MODE", "local")
+    monkeypatch.setenv("OMNICODE_LLM_ROUTER", "true")
+
     # Case 1: backend reports the feature is disabled
     routes_disabled = {
         "/edit": {"error": "ai_edit disabled (OMNICODE_LLM_ROUTER=false)"},
@@ -418,9 +422,11 @@ def test_omni_edit_ai_edit_json_disabled_or_dry_run_envelope() -> None:
     assert "/patch/apply" not in tools["__captured__"]
 
 
-def test_omni_edit_ai_edit_path_guard() -> None:
+def test_omni_edit_ai_edit_path_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     """ai_edit must reuse the same path guard (r9) — bad path → ok=false,
     no backend call."""
+    monkeypatch.setenv("OMNICODE_LLM_MODE", "local")
+    monkeypatch.setenv("OMNICODE_LLM_ROUTER", "true")
     tools = _build_tools({})  # no routes; guard must fire first
     raw = _run(tools["omni_edit"](
         action="ai_edit",

@@ -1,33 +1,69 @@
 {
   "mcpServers": {
     "omnicode": {
-      "command": "E:\\anaconda\\envs\\omnicode-env\\python.exe",
+      "command": "E:\\anaconda\\envs\\omnicode-env\\Scripts\\omnicode.exe",
       "args": [
-        "C:\\Users\\86182\\Documents\\antigravity\\dazzling-heisenberg\\codebase-mcp\\mcp_server.py"
+        "mcp",
+        "--transport",
+        "stdio",
+        "--workspace",
+        "C:\\Users\\86182\\Documents\\antigravity\\dazzling-heisenberg\\codebase-mcp",
+        "--workspace-id",
+        "repo-a",
+        "--backend-url",
+        "http://127.0.0.1:6791",
+        "--executor",
+        "hybrid",
+        "--llm-mode",
+        "off",
+        "--embedding-mode",
+        "cloud",
+        "--sync-mode",
+        "smart",
+        "--agent",
+        "auto"
       ],
-      "env": {
-        "ENV_FILE": "C:\\Users\\86182\\Documents\\antigravity\\dazzling-heisenberg\\codebase-mcp\\.env"
-      },
       "autoApprove": [
         "omni_search",
         "discover_tools",
         "omni_read",
         "omni_context",
-        "omni_read",
         "omni_impact",
         "omni_diagnostics",
         "omni_memory",
-        "omni_impact",
-        "omni_diagnostics",
-        "omni_memory",
-        "omni_diagnostics",
-        "omni_memory",
-        "discover_tools",
-        "discover_tools",
-        "discover_tools",
-        "omni_skill",
         "omni_skill",
         "omni_patch",
+        "omni_status"
+      ]
+    },
+    "omnicode-local": {
+      "command": "E:\\anaconda\\envs\\omnicode-env\\Scripts\\omnicode.exe",
+      "args": [
+        "mcp",
+        "--transport",
+        "stdio",
+        "--workspace",
+        "C:\\Users\\86182\\Documents\\antigravity\\dazzling-heisenberg\\codebase-mcp",
+        "--workspace-id",
+        "repo-a-local",
+        "--backend-url",
+        "http://127.0.0.1:6789",
+        "--executor",
+        "local",
+        "--llm-mode",
+        "off",
+        "--embedding-mode",
+        "local"
+      ],
+      "autoApprove": [
+        "omni_search",
+        "discover_tools",
+        "omni_read",
+        "omni_context",
+        "omni_impact",
+        "omni_diagnostics",
+        "omni_memory",
+        "omni_skill",
         "omni_patch",
         "omni_status"
       ]

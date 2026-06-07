@@ -12,11 +12,13 @@ Endpoints:
 
 from __future__ import annotations
 
-from typing import Optional
+import os
+from typing import Any, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Header
 from pydantic import BaseModel, Field
 
+from api.v1.routers.freshness import cloud_freshness_error, cloud_freshness_state
 from omnicode.config.settings import get_settings
 from omnicode_core.intelligence import (
     IntelligenceComposer,
@@ -30,6 +32,159 @@ def _ok(payload):
     return {"result": payload, "success": True}
 
 
+def _llm_runtime_status() -> dict:
+    mode = (os.environ.get("OMNICODE_LLM_MODE") or "off").strip().lower()
+    router_raw = os.environ.get("OMNICODE_LLM_ROUTER")
+    router_enabled = (
+        False
+        if router_raw is not None
+        and router_raw.strip().lower() in {"0", "false", "no", "off"}
+        else True
+    )
+    available = mode != "off" and router_enabled
+    reason = (
+        "LLM mode is off"
+        if mode == "off"
+        else "OMNICODE_LLM_ROUTER is disabled"
+        if not router_enabled
+        else "LLM runtime is enabled"
+    )
+    return {
+        "mode": mode,
+        "available": available,
+        "router_enabled": router_enabled,
+        "reason": reason,
+    }
+
+
+def _apply_llm_runtime_status(statuses: list[dict]) -> tuple[list[dict], dict]:
+    llm = _llm_runtime_status()
+    for item in statuses:
+        if item.get("capability") == "llm_enhancement":
+            item["available"] = bool(llm["available"])
+            item["detail"] = llm["reason"]
+            if not llm["available"]:
+                item["backend"] = ""
+    return statuses, llm
+
+
+def _snapshot_exact_symbol(
+    *,
+    workspace_id: Optional[str],
+    symbol: Optional[str],
+) -> Optional[dict[str, Any]]:
+    if not workspace_id or not symbol or not symbol.strip():
+        return None
+    try:
+        from api.v1.routers.search import _snapshot_symbol_search
+
+        rows = _snapshot_symbol_search(
+            workspace_id=workspace_id,
+            query=symbol.strip(),
+            symbol_type=None,
+            file_pattern=None,
+            fuzzy=False,
+            min_score=1.0,
+            max_results=1,
+            existing_keys=set(),
+        )
+    except Exception:
+        return None
+    return rows[0] if rows else None
+
+
+def _seed_context_from_snapshot_symbol(
+    payload: dict[str, Any],
+    *,
+    row: dict[str, Any],
+    freshness: Optional[dict[str, Any]],
+) -> dict[str, Any]:
+    file_path = row.get("file_path")
+    symbol_name = row.get("symbol_name")
+    search_row = {
+        "file": file_path,
+        "file_path": file_path,
+        "symbol": symbol_name,
+        "score": row.get("relevance_score", 1.0),
+        "snippet": row.get("signature", ""),
+        "start_line": row.get("line_start"),
+        "end_line": row.get("line_end"),
+        "source": row.get("source", "snapshot_store"),
+        "hash": row.get("hash"),
+        "revision": row.get("revision"),
+        "why_matched": row.get("why_matched", []),
+    }
+
+    search = payload.setdefault("search", {})
+    existing = search.get("results") or []
+    deduped = [
+        item
+        for item in existing
+        if not (
+            (item.get("file") or item.get("file_path")) == file_path
+            and item.get("start_line") == row.get("line_start")
+        )
+    ]
+    search["query"] = search.get("query") or symbol_name
+    search["results"] = [search_row, *deduped]
+    search["result_count"] = len(search["results"])
+    search["snapshot_exact_priority"] = True
+
+    code = payload.get("code_understanding") or {}
+    if int(code.get("symbol_count") or 0) == 0:
+        payload["code_understanding"] = {
+            "file": file_path,
+            "language": "python" if str(file_path).endswith(".py") else "",
+            "symbol_count": 1,
+            "symbols": [
+                {
+                    "name": symbol_name,
+                    "kind": row.get("symbol_type"),
+                    "start_line": row.get("line_start"),
+                    "end_line": row.get("line_end"),
+                    "signature": row.get("signature"),
+                    "source": "snapshot_store",
+                    "hash": row.get("hash"),
+                    "revision": row.get("revision"),
+                }
+            ],
+            "source": "snapshot_store",
+        }
+
+    impact = payload.get("impact") or {}
+    if (
+        int(impact.get("affected_count") or 0) == 0
+        and int(impact.get("dependent_count") or 0) == 0
+        and int(impact.get("files_count") or 0) == 0
+        and int(impact.get("total_blast_radius") or 0) <= 1
+    ):
+        impact.update(
+            {
+                "symbol": impact.get("symbol") or symbol_name,
+                "graph_available": False,
+                "graph_status": "unavailable",
+                "impact_status": "unknown",
+                "confidence": "low",
+                "symbol_found": True,
+                "symbol_source": "snapshot_store",
+                "snapshot_symbol": row,
+                "note": (
+                    "Symbol exists in the cloud snapshot, but no call-graph "
+                    "evidence is available for this snapshot workspace."
+                ),
+            }
+        )
+        payload["impact"] = impact
+
+    payload["snapshot_store_used"] = True
+    payload["snapshot_exact_symbol"] = True
+    payload["freshness"] = (freshness or {}).get("freshness", "snapshot_available")
+    payload["semantic_stale"] = bool((freshness or {}).get("semantic_stale", False))
+    payload["accepted_revision"] = (freshness or {}).get("accepted_revision")
+    payload["indexed_revision"] = (freshness or {}).get("indexed_revision")
+    return payload
+
+
 # ---------------------------------------------------------------------------
 # Capability fingerprint
 # ---------------------------------------------------------------------------
@@ -41,13 +196,21 @@ async def get_capabilities():
     decide e.g. whether to skip an LLM-rerank step when the deployment
     has no provider configured.
     """
-    statuses = [s.to_dict() for s in list_capabilities()]
+    statuses, llm = _apply_llm_runtime_status(
+        [s.to_dict() for s in list_capabilities()]
+    )
+    llm_enhancement = next(
+        (s for s in statuses if s.get("capability") == "llm_enhancement"),
+        {"available": False},
+    )
     return _ok(
         {
             "version": get_settings().API_VERSION,
             "capabilities": statuses,
             "total": len(statuses),
             "available": sum(1 for s in statuses if s["available"]),
+            "llm": llm,
+            "llm_enhancement": llm_enhancement,
         }
     )
 
@@ -82,7 +245,14 @@ class IntelligenceRequest(BaseModel):
 
 
 @router.post("/intelligence/context")
-async def build_context(req: IntelligenceRequest):
+async def build_context(
+    req: IntelligenceRequest,
+    x_omnicode_workspace: Optional[str] = Header(default=None),
+    x_omnicode_min_revision: Optional[int] = Header(
+        default=None,
+        alias="X-Omnicode-Min-Revision",
+    ),
+):
     """Single-call multi-capability composer.
 
     Returns a structured ``IntelligenceContext`` payload that fits in
@@ -91,6 +261,34 @@ async def build_context(req: IntelligenceRequest):
     rather than failing the whole call — this keeps editors usable
     even when (say) the call graph hasn't been built yet.
     """
+    effective_workspace_id = None
+    if x_omnicode_workspace:
+        from api.v1.routers.search import _resolve_search_workspace
+
+        effective_workspace_id = _resolve_search_workspace(x_omnicode_workspace)
+    pre_stale = cloud_freshness_error(
+        workspace_id=effective_workspace_id,
+        min_revision=x_omnicode_min_revision,
+        allow_snapshot_fresh=True,
+    )
+    if pre_stale is not None:
+        return pre_stale
+    snapshot_row = _snapshot_exact_symbol(
+        workspace_id=effective_workspace_id,
+        symbol=req.symbol,
+    )
+    if not snapshot_row:
+        stale = cloud_freshness_error(
+            workspace_id=effective_workspace_id,
+            min_revision=x_omnicode_min_revision,
+        )
+        if stale is not None:
+            return stale
+    freshness = cloud_freshness_state(
+        workspace_id=effective_workspace_id,
+        min_revision=x_omnicode_min_revision,
+    )
+
     composer = IntelligenceComposer(working_dir=get_settings().WORKING_DIR)
     ctx = await composer.build(
         task=req.task,
@@ -105,7 +303,19 @@ async def build_context(req: IntelligenceRequest):
         include_impact=req.include_impact,
         include_memory=req.include_memory,
     )
-    return _ok(ctx.to_dict())
+    payload = ctx.to_dict()
+    statuses, llm = _apply_llm_runtime_status(
+        list(payload.get("capability_status") or [])
+    )
+    payload["capability_status"] = statuses
+    payload["llm"] = llm
+    if snapshot_row:
+        payload = _seed_context_from_snapshot_symbol(
+            payload,
+            row=snapshot_row,
+            freshness=freshness,
+        )
+    return _ok(payload)
 
 
 __all__ = ["router"]

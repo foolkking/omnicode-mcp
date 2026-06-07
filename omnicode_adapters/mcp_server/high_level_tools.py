@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 # but omni_read didn't); the omni_status tool reads this constant so the
 # next round can verify which build is actually serving traffic.
 # ---------------------------------------------------------------------------
-_HANDLER_VERSION = "2026.05.31.workspace-bridge.r21"
+_HANDLER_VERSION = "2026.06.04.hybrid-large-repo.r36"
 _HANDLER_FEATURES: Tuple[str, ...] = (
     "search.source_confidence",       # omni_search row stamping
     "read.diagnostics_aligned",       # omni_read[diagnostics] uses _collect_diagnostics_payload
@@ -150,6 +150,22 @@ _HANDLER_FEATURES: Tuple[str, ...] = (
                                       # when the backend doesn't expose a
                                       # canonical root, with a
                                       # workspace_root_warning explaining why.
+    "status.hybrid_sync_aggregate",   # workspace-bridge: omni_status reports
+                                      # local sync revisions, snapshot-store
+                                      # state, and HybridToolRouter decisions
+                                      # for local-authority / cloud-barrier
+                                      # tools.
+    "status.capability_contract",     # workspace-bridge: omni_status exposes
+                                      # the LLM / embedding / diagnostics
+                                      # capability contract derived from
+                                      # RuntimeConfig-compatible env.
+    "status.agent_auto_contract",     # workspace-bridge: omni_status reports
+                                      # whether agent auto mode would start an
+                                      # embedded watcher for hybrid sync.
+    "status.backend_url_visibility",  # workspace-bridge: omni_status exposes
+                                      # the configured FastAPI backend URL so
+                                      # hybrid/local MCP routing can be audited
+                                      # from JSON without reading process logs.
     "alias.edit_validate_gate",       # audit-bundle.r13 (P0 close):
                                       # omni_edit(action='apply') now runs
                                       # the same _do_validate gate as
@@ -167,6 +183,10 @@ _HANDLER_FEATURES: Tuple[str, ...] = (
                                       # omni_edit(action='ai_edit',
                                       # format='json') returns a stamped
                                       # JSON envelope (was plain text).
+    "alias.edit_llm_off_gate",
+                                      # workspace-bridge.r24: omni_edit
+                                      # action=ai_edit checks LLM disabled
+                                      # state before file/backend checks.
     "alias.analyze_unknown_alignment",
                                       # audit-bundle.r13 (P1-A/B close):
                                       # omni_analyze missing-symbol returns
@@ -388,6 +408,190 @@ _HANDLER_FEATURES: Tuple[str, ...] = (
     "workspace.identity_visibility",  # status exposes workspace_id /
                                       # executor_mode for local-cloud
                                       # bridge audits.
+    "workspace.explicit_local_root_priority",
+                                      # workspace-bridge.r22: MCP-local file
+                                      # authority prefers the explicit
+                                      # --workspace / OMNICODE_WORKSPACE_ROOT
+                                      # path over the global registry, so a
+                                      # hybrid workspace_id registered to a
+                                      # cloud mirror cannot redirect
+                                      # omni_read / omni_patch away from the
+                                      # user's real local checkout.
+    "read.local_authority_full_range",
+                                      # workspace-bridge.r23: omni_read
+                                      # mode=full/range now honors the
+                                      # local-authority route by reading from
+                                      # the MCP workspace root before falling
+                                      # back to the configured backend.
+    "search.code_literal_auto_text",
+                                      # workspace-bridge.r23: auto search
+                                      # routes code-like literals such as
+                                      # VALUE = "v2" to text search instead
+                                      # of semantic/hybrid fuzzy search.
+    "patch.hybrid_local_authority",
+                                      # workspace-bridge.r24: in hybrid mode,
+                                      # omni_patch preview / validate / apply
+                                      # / rollback / sessions execute against
+                                      # the explicit local workspace root, not
+                                      # the configured cloud backend.
+    "analysis.freshness_gate",
+                                      # workspace-bridge.r24: hybrid cloud
+                                      # analysis tools check local/cloud
+                                      # revisions before returning search,
+                                      # context, or impact results.
+    "errors.absolute_path_redaction",
+                                      # workspace-bridge.r25: public error
+                                      # text redacts local/backend absolute
+                                      # filesystem paths.
+    "patch.hybrid_sync_flush",
+                                      # workspace-bridge.r26: hybrid local
+                                      # patch apply/rollback immediately
+                                      # flush pending path changes to cloud
+                                      # /sync/batch when configured.
+    "patch.preview_conflict_guard",
+                                      # workspace-bridge.r27: PatchManager
+                                      # records preview baseline hashes and
+                                      # rejects apply when the file changed
+                                      # between preview and apply.
+    "sync.workspace_auto_register",
+                                      # workspace-bridge.r27: /sync endpoints
+                                      # can register a new workspace_id to
+                                      # the active backend root on first use.
+    "sync.strict_content_hash",
+                                      # workspace-bridge.r27: /sync/batch
+                                      # requires sha256:<64 hex> and verifies
+                                      # it against the uploaded content.
+    "search.workspace_guard",
+                                      # workspace-bridge.r27: search endpoints
+                                      # reject workspace headers that do not
+                                      # resolve to the active backend root.
+    "read.local_authority_symbol",
+                                      # workspace-bridge.r28: omni_read
+                                      # mode=symbol honors the local-authority
+                                      # route in hybrid mode, using local AST
+                                      # ranges instead of cloud /read.
+    "sync.initial_walk_observable",
+                                      # workspace-bridge.r28: agent initial
+                                      # sync defaults to no file-count cap,
+                                      # supports
+                                      # OMNICODE_AGENT_MAX_INITIAL_FILES, and
+                                      # sends truncation metadata to
+                                      # /sync/status.
+    "sync.batch_async_index",
+    "sync.index_worker_coalesced",
+    "sync.index_worker_chunked",
+    "status.index_worker_progress",
+    "search.bulk_upsert_contents",
+    "agent.initial_sync_small_batches",
+                                      # workspace-bridge.r28: /sync/batch
+                                      # accepts snapshot/object-store updates
+                                      # quickly and advances indexed_revision
+                                      # from a background index task so
+                                      # health/status remain observable during
+                                      # large sync.
+    "index.bootstrap_cli",
+                                      # workspace-bridge.r29: omnicode index
+                                      # accepts backend/workspace options for
+                                      # explicit cloud bootstrap.
+    "search.snapshot_symbol_bootstrap",
+                                      # workspace-bridge.r29: symbol search can
+                                      # exact-match synced snapshot content
+                                      # before a full vector/symbol index is
+                                      # ready.
+    "status.index_readiness",
+    "search.batch_refresh_once",
+                                      # workspace-bridge.r29: omni_status
+                                      # surfaces text/symbol/graph readiness
+                                      # so AI editors can decide what to trust.
+    "sync.index_worker_stats_refresh",
+                                      # workspace-bridge.r31: background sync
+                                      # indexing refreshes cheap DB stats after
+                                      # a batch instead of reinitializing the
+                                      # semantic search engine.
+    "search.snapshot_symbol_fast_path",
+                                      # workspace-bridge.r31: exact symbol
+                                      # lookup can return snapshot-store hits
+                                      # before touching the semantic engine.
+    "search.snapshot_store_threaded_scan",
+                                      # workspace-bridge.r31: snapshot-store
+                                      # text/symbol scans run off the event
+                                      # loop so health/status stay responsive.
+    "search.snapshot_record_direct_read",
+                                      # workspace-bridge.r31: snapshot exact
+                                      # symbol scans read known object records
+                                      # directly instead of reloading the full
+                                      # snapshot index once per file.
+    "search.snapshot_text_record_direct_read",
+                                      # workspace-bridge.r31: snapshot text
+                                      # scans use the same direct object-read
+                                      # path as symbol scans for large repos.
+    "index.snapshot_bootstrap_marks_revision",
+                                      # workspace-bridge.r31: explicit
+                                      # /search/index over snapshot content
+                                      # marks indexed_revision and updates
+                                      # /sync/status after bootstrap.
+    "index.snapshot_bootstrap_threaded",
+                                      # workspace-bridge.r31: explicit
+                                      # snapshot bootstrap runs in a worker
+                                      # thread so health/status stay live.
+    "index.snapshot_bootstrap_hash_skip",
+                                      # workspace-bridge.r32: explicit
+                                      # snapshot bootstrap skips files whose
+                                      # indexed content_hash already matches
+                                      # the snapshot record.
+    "index.snapshot_bootstrap_revision_skip",
+                                      # workspace-bridge.r32: explicit
+                                      # snapshot bootstrap can trust the
+                                      # persisted indexed_revision watermark
+                                      # when hash metadata is not available.
+    "index.snapshot_bootstrap_background",
+                                      # workspace-bridge.r33: explicit
+                                      # snapshot bootstrap can run as a
+                                      # background job with status polling
+                                      # instead of blocking large-repo CLI
+                                      # calls.
+    "serve.offline_transformers_default",
+                                      # workspace-bridge.r34: omnicode serve
+                                      # sets TRANSFORMERS_OFFLINE and
+                                      # HF_HUB_OFFLINE by default so backend
+                                      # startup does not block on provider
+                                      # metadata probes in offline deployments.
+    "index.snapshot_background_progress",
+                                      # workspace-bridge.r34: background
+                                      # snapshot indexing reports live
+                                      # records_seen/indexed/skipped progress.
+    "analysis.snapshot_freshness_layer",
+                                      # workspace-bridge.r34: snapshot-backed
+                                      # exact text/symbol/context routes may
+                                      # proceed with snapshot_fresh while
+                                      # semantic indexing catches up.
+    "context.snapshot_exact_priority",
+                                      # workspace-bridge.r34:
+                                      # /intelligence/context seeds exact
+                                      # snapshot symbol hits ahead of noisy
+                                      # semantic results.
+    "impact.graph_unknown_no_false_low",
+                                      # workspace-bridge.r34: cloud snapshot
+                                      # impact/risk marks graph unavailable
+                                      # and risk unknown instead of reporting
+                                      # false low risk from zero graph edges.
+    "agent.initial_sync_manifest_handoff",
+                                      # workspace-bridge.r35: embedded/local
+                                      # agent writes LocalManifest after
+                                      # successful /sync/batch acks so MCP
+                                      # freshness gates can see local_revision
+                                      # after large-repo initial sync.
+    "search.index_metadata_hashes",
+                                      # workspace-bridge.r32: sync/search
+                                      # indexing stores snapshot hash,
+                                      # revision, and workspace id in chunk
+                                      # metadata.
+    "status.cloud_snapshot_readiness",
+                                      # workspace-bridge.r36: omni_status
+                                      # prefers cloud /sync/status snapshot
+                                      # counts over the MCP process-local
+                                      # snapshot store when computing
+                                      # index_readiness in hybrid mode.
 )
 _PROCESS_START_TIME = None  # set lazily on first omni_status call
 
@@ -463,6 +667,162 @@ _TOOLS_WITH_JSON_STAMP: Tuple[str, ...] = (
 )
 
 
+_WINDOWS_ABSOLUTE_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:[A-Za-z]:[\\/][^\s'\"<>{}\[\]\|),;]+)"
+)
+_POSIX_ABSOLUTE_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_./:-])/(?:Users|home|tmp|var|opt|mnt|etc|omnicode-sim)"
+    r"(?:/[^\s'\"<>{}\[\]\|),;]+)*"
+)
+
+
+def _path_string_variants(path_text: str) -> List[str]:
+    variants = {
+        path_text,
+        path_text.replace("\\", "/"),
+        path_text.replace("/", "\\"),
+    }
+    return sorted((v for v in variants if v), key=len, reverse=True)
+
+
+def _sanitize_error_text(text: str) -> str:
+    """Redact absolute filesystem paths from public error text.
+
+    Status payloads may intentionally expose roots for deployment audits. Error
+    strings should not: they are often copied into AI-editor prompts and logs.
+    """
+    if not isinstance(text, str) or not text:
+        return text
+
+    redacted = text
+    known_roots: List[Tuple[str, str]] = []
+
+    try:
+        import os as _os
+
+        for env_name, placeholder in (
+            ("OMNICODE_WORKSPACE_ROOT", "<workspace_root>"),
+            ("OMNICODE_STATE_DIR", "<state_dir>"),
+            ("OMNICODE_BACKEND_WORKSPACE_ROOT", "<backend_workspace_root>"),
+        ):
+            value = (_os.environ.get(env_name) or "").strip()
+            if value:
+                known_roots.append((value, placeholder))
+    except Exception:
+        pass
+
+    try:
+        root, _source, _warnings = _get_workspace_root()
+        if root:
+            known_roots.append((str(root), "<workspace_root>"))
+    except Exception:
+        pass
+
+    for root_text, placeholder in sorted(
+        known_roots, key=lambda pair: len(pair[0]), reverse=True
+    ):
+        for variant in _path_string_variants(root_text):
+            redacted = redacted.replace(variant, placeholder)
+
+    redacted = _WINDOWS_ABSOLUTE_PATH_RE.sub("<absolute-path>", redacted)
+    redacted = _POSIX_ABSOLUTE_PATH_RE.sub("<absolute-path>", redacted)
+    return redacted
+
+
+def _sanitize_public_error_fields(payload: Dict[str, Any]) -> None:
+    for key in (
+        "error",
+        "message",
+        "file_marker_warning",
+        "sync_pending_warning",
+        "sync_flush_error",
+        "sync_flush_warning",
+        "new_file_unlink_warning",
+        "warning",
+        "manifest_warning",
+        "status_warning",
+        "reason",
+        "fallback_reason",
+    ):
+        value = payload.get(key)
+        if isinstance(value, str):
+            payload[key] = _sanitize_error_text(value)
+
+    actions = payload.get("next_actions")
+    if isinstance(actions, list):
+        payload["next_actions"] = [
+            _sanitize_error_text(action) if isinstance(action, str) else action
+            for action in actions
+        ]
+
+    for row_key in ("diagnostics", "checks"):
+        rows = payload.get(row_key)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            message = row.get("message")
+            if isinstance(message, str):
+                row["message"] = _sanitize_error_text(message)
+
+
+def _sanitize_public_path_text(text: str) -> str:
+    """Redact absolute paths while keeping workspace-relative hints useful."""
+    if not isinstance(text, str) or not text:
+        return text
+    sanitized = _sanitize_error_text(text)
+    for prefix in (
+        "<workspace_root>/",
+        "<workspace_root>\\",
+        "<backend_workspace_root>/",
+        "<backend_workspace_root>\\",
+    ):
+        sanitized = sanitized.replace(prefix, "")
+    return sanitized.replace("\\", "/")
+
+
+def _sanitize_public_path_ref(value: Any) -> str:
+    """Return a public-safe file reference for memory/context payloads."""
+    text = str(value or "")
+    if not text:
+        return ""
+    try:
+        path = Path(text).expanduser()
+        if path.is_absolute():
+            root, _source, _warnings = _get_workspace_root()
+            resolved = path.resolve()
+            root_resolved = root.resolve()
+            if resolved == root_resolved or root_resolved in resolved.parents:
+                return resolved.relative_to(root_resolved).as_posix()
+    except Exception:
+        pass
+    return _sanitize_public_path_text(text)
+
+
+def _sanitize_memory_match_fields(fields: Any) -> List[Any]:
+    """Sanitize memory match snippets without changing backend shape."""
+    if not isinstance(fields, list):
+        return []
+    sanitized: List[Any] = []
+    for item in fields:
+        if not isinstance(item, dict):
+            sanitized.append(
+                _sanitize_public_path_text(item) if isinstance(item, str) else item
+            )
+            continue
+        row = dict(item)
+        for key in ("snippet", "value", "text", "content", "path", "file"):
+            value = row.get(key)
+            if isinstance(value, str):
+                if key in ("path", "file"):
+                    row[key] = _sanitize_public_path_ref(value)
+                else:
+                    row[key] = _sanitize_public_path_text(value)
+        sanitized.append(row)
+    return sanitized
+
+
 def _stamp(payload: Any, *, tool: str) -> Any:
     """Inject handler_version + contract_version on a payload dict.
 
@@ -476,6 +836,7 @@ def _stamp(payload: Any, *, tool: str) -> Any:
     """
     if not isinstance(payload, dict):
         return payload
+    _sanitize_public_error_fields(payload)
     payload.setdefault("handler_version", _HANDLER_VERSION)
     payload.setdefault("contract_version", _CONTRACT_VERSIONS.get(tool, ""))
     return payload
@@ -514,6 +875,14 @@ _STOPWORDS = frozenset(
         "is", "be", "if", "do", "we", "it", "as", "by", "at", "no",
         "def", "class", "let", "var", "fn", "func", "return",
         "from", "import", "use", "pub",
+    }
+)
+
+_SINGLE_TOKEN_TEXT_LITERALS = frozenset(
+    {
+        "before", "after", "true", "false", "none", "null", "yes", "no",
+        "on", "off", "enabled", "disabled", "pass", "fail", "passed",
+        "failed", "todo", "done",
     }
 )
 
@@ -589,8 +958,15 @@ def _detect_mode(query: str) -> str:
             return "text"
         if q.lower() in _STOPWORDS:
             return "text"
+        if q.lower() in _SINGLE_TOKEN_TEXT_LITERALS:
+            return "text"
+        if re.search(r"[-:/]", q):
+            return "text"
 
     if _CONST_RE.fullmatch(q):
+        return "text"
+
+    if re.search(r"[=;{}()[\]\"']", q):
         return "text"
 
     if _IDENT_RE.fullmatch(q) and len(q) <= 60:
@@ -660,7 +1036,69 @@ async def _run_symbol(
     raw = await make_request("POST", "/search/symbols", params=params)
     data = raw.get("result", raw) if isinstance(raw, dict) else {}
     results = list(data.get("results", []))
+    _refresh_symbol_rows_from_local_outline(results)
     return results, data.get("total_results", len(results))
+
+
+def _refresh_symbol_rows_from_local_outline(results: List[Dict[str, Any]]) -> None:
+    """Repair stale backend symbol line numbers from the local workspace.
+
+    Hybrid/cloud symbol indexes can lag after a repo move or reindex gap. The
+    MCP process has the user's real checkout, so it can cheaply verify exact
+    symbol locations before returning rows to an AI editor. This updates only
+    line/signature metadata and leaves ranking/source semantics intact.
+    """
+    outline_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+    for row in results:
+        if not isinstance(row, dict):
+            continue
+        file_path = str(row.get("file_path") or row.get("file") or "")
+        symbol_name = str(row.get("symbol_name") or row.get("name") or "")
+        if not file_path or not symbol_name or _path_looks_unsafe(file_path):
+            continue
+        if file_path not in outline_cache:
+            outline_cache[file_path] = _build_local_outline_payload(file_path)
+        outline = outline_cache.get(file_path) or {}
+        symbols = outline.get("symbols") or []
+        fresh = next(
+            (
+                s for s in symbols
+                if isinstance(s, dict) and s.get("name") == symbol_name
+            ),
+            None,
+        )
+        if not fresh:
+            continue
+        start = fresh.get("line_start")
+        end = fresh.get("line_end")
+        if not isinstance(start, int) or start <= 0:
+            lines = fresh.get("lines") or []
+            start = lines[0] if lines and isinstance(lines[0], int) else None
+        if not isinstance(end, int) or end <= 0:
+            lines = fresh.get("lines") or []
+            end = lines[1] if len(lines) > 1 and isinstance(lines[1], int) else start
+        if not isinstance(start, int) or start <= 0:
+            continue
+        old_start = row.get("line_start") or row.get("line_number")
+        row["line_start"] = start
+        if row.get("line_number") is not None:
+            row["line_number"] = start
+        if isinstance(end, int) and end > 0:
+            row["line_end"] = end
+        signature = fresh.get("signature")
+        if signature:
+            row["signature"] = signature
+        row["line_source"] = "local_ast"
+        if old_start and old_start != start:
+            row["line_refresh"] = {
+                "from": old_start,
+                "to": start,
+                "source": "local_ast",
+            }
+            why = list(row.get("why_matched") or [])
+            if "local_ast:fresh_line" not in why:
+                why.append("local_ast:fresh_line")
+            row["why_matched"] = why
 
 
 async def _run_text(
@@ -1422,6 +1860,16 @@ def _safe_path_search_query(file: str) -> str:
     return basename or "target file"
 
 
+def _safe_rejected_file_label(file: str) -> str:
+    """Avoid echoing unsafe user-submitted paths in top-level envelopes."""
+    if not _path_looks_unsafe(file):
+        return file
+    basename = _safe_path_search_query(file)
+    if basename and basename != "target file" and not _path_looks_unsafe(basename):
+        return basename
+    return "<rejected-path>"
+
+
 def _path_guard_next_actions(file: str) -> List[str]:
     safe_query = _safe_path_search_query(file)
     safe_query_lit = json.dumps(safe_query, ensure_ascii=False)
@@ -1442,14 +1890,15 @@ def _emit_read_error(*, file: str, mode: str, error: str, fmt: str) -> str:
     try (path check / search / context). Other read errors get a generic
     next_actions hint pointing at outline/symbol/range.
     """
+    safe_error = _sanitize_error_text(error)
     payload: Dict[str, Any] = {
         "ok": False,
         "file": file,
         "mode": mode,
-        "error": error,
+        "error": safe_error,
     }
-    err_lower = (error or "").lower()
-    if _is_path_guard_error(error) or _path_looks_unsafe(file):
+    err_lower = (safe_error or "").lower()
+    if _is_path_guard_error(safe_error) or _path_looks_unsafe(file):
         payload["next_actions"] = _path_guard_next_actions(file)
     elif "file not found" in err_lower or "not found" in err_lower:
         payload["next_actions"] = [
@@ -1467,6 +1916,7 @@ def _emit_read_error(*, file: str, mode: str, error: str, fmt: str) -> str:
         ]
     _stamp(payload, tool="omni_read")
     if (fmt or "json").lower() == "text":
+        error = safe_error
         return f"❌ omni_read[{mode}] {file}: {error}"
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
@@ -1850,6 +2300,182 @@ def _next_actions_for_mode(
     return []
 
 
+def _build_local_read_payload(
+    *,
+    file: str,
+    mode: str,
+    symbol: Optional[str],
+    start_line: Optional[int],
+    end_line: Optional[int],
+    max_tokens: int,
+) -> Optional[Dict[str, Any]]:
+    """Read local-authority full/range/symbol content from the MCP workspace.
+
+    Hybrid status has long declared ``omni_read`` local-authority, but the
+    handler still proxied to the configured backend. In hybrid mode that backend
+    is the cloud mirror, whose filesystem may not contain synced snapshot files.
+    This helper makes the local-authority path real for raw byte reads and
+    symbol-body reads.
+    """
+    if mode not in {"full", "range", "symbol"}:
+        return None
+    if mode == "symbol" and not symbol:
+        return None
+    try:
+        path = _resolve_workspace_path(file)
+    except ValueError:
+        return None
+    if not path.is_file():
+        return None
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+    lines = raw.splitlines()
+    total_lines = len(lines)
+
+    if mode == "symbol":
+        outline = _build_local_outline_payload(file)
+        symbols = outline.get("symbols", []) if outline else []
+        match = next(
+            (
+                row for row in symbols
+                if isinstance(row, dict) and row.get("name") == symbol
+            ),
+            None,
+        )
+        if not match:
+            return None
+        start = int(match.get("line_start") or (match.get("lines") or [1])[0])
+        end = int(match.get("line_end") or (match.get("lines") or [start, start])[-1])
+    else:
+        start = start_line or 1
+        end = end_line if end_line is not None else (
+            total_lines if mode == "full" else start + 50
+        )
+
+    if start < 1 or end < start:
+        return None
+    selected = lines[start - 1:min(end, total_lines)] if start <= total_lines else []
+    content = "\n".join(
+        f"{line_no} | {line}"
+        for line_no, line in enumerate(selected, start=start)
+    )
+    data = {
+        "content": content,
+        "total_lines": total_lines,
+        "start_line": start,
+        "end_line": min(end, total_lines) if total_lines else 0,
+        "language": _guess_language_from_path(file),
+    }
+    if mode == "symbol":
+        data["symbol_name"] = symbol
+    payload = _build_read_payload(
+        file=file,
+        requested_mode=mode,
+        data=data,
+        start_line=start,
+        end_line=end,
+        symbol=symbol if mode == "symbol" else None,
+        query=None,
+        max_tokens=max_tokens,
+    )
+    payload["source"] = "local_ast" if mode == "symbol" else "local_file"
+    payload["confidence"] = "high"
+    payload["local_authority"] = True
+    return payload
+
+
+def _build_local_outline_payload(file: str) -> Optional[Dict[str, Any]]:
+    """Build a small outline directly from the local MCP workspace.
+
+    Hybrid context gathering uses cloud analysis for expensive search/impact,
+    but an explicit ``file=`` anchor must still respect the local checkout as
+    the source of truth. The cloud mirror may be content-addressed or mounted
+    outside the backend ``WORKING_DIR``, so a backend ``/read?mode=outline``
+    can legitimately miss a file that exists locally and has already synced.
+    """
+    try:
+        path = _resolve_workspace_path(file)
+    except ValueError:
+        return None
+    if not path.is_file():
+        return None
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+    lines = raw.splitlines()
+    symbols: List[Dict[str, Any]] = []
+    stack: List[Tuple[int, str]] = []
+    pattern = re.compile(
+        r"^(?P<indent>\s*)(?P<kind>async\s+def|def|class)\s+"
+        r"(?P<name>[A-Za-z_]\w*)"
+    )
+    for line_no, line in enumerate(lines, 1):
+        match = pattern.match(line)
+        if not match:
+            continue
+        indent = len(match.group("indent").replace("\t", "    "))
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        raw_kind = match.group("kind")
+        kind = "class" if raw_kind == "class" else "function"
+        name = match.group("name")
+        signature = line.strip()[:200]
+        parent = stack[-1][1] if stack else None
+        symbols.append({
+            "name": name,
+            "kind": kind,
+            "type": kind,
+            "signature": signature,
+            "doc": "",
+            "lines": [line_no, line_no],
+            "line_start": line_no,
+            "line_end": line_no,
+            "parent": parent,
+            "source": "local_file",
+        })
+        stack.append((indent, name))
+
+    if _guess_language_from_path(file) == "python":
+        try:
+            import ast
+
+            line_ends: Dict[int, int] = {}
+            for node in ast.walk(ast.parse(raw)):
+                if isinstance(
+                    node,
+                    (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+                ):
+                    end_line = getattr(node, "end_lineno", None)
+                    if isinstance(end_line, int):
+                        line_ends[int(node.lineno)] = end_line
+            for symbol_row in symbols:
+                start = symbol_row.get("line_start")
+                end = line_ends.get(start) if isinstance(start, int) else None
+                if isinstance(start, int) and isinstance(end, int) and end >= start:
+                    symbol_row["line_end"] = end
+                    symbol_row["lines"] = [start, end]
+        except Exception:
+            pass
+
+    return {
+        "ok": True,
+        "file": file,
+        "mode": "outline",
+        "total_lines": len(lines),
+        "language": _guess_language_from_path(file),
+        "symbols": symbols,
+        "symbol_count": len(symbols),
+        "source": "local_file",
+        "confidence": "high",
+        "local_authority": True,
+    }
+
+
 # ---------------------------------------------------------------------------
 # omni_context helpers
 # ---------------------------------------------------------------------------
@@ -2047,15 +2673,28 @@ def _normalise_memory_row(
     mem_raw = raw.get("memory")
     mem: Dict[str, Any] = mem_raw if isinstance(mem_raw, dict) else raw
     mid = _extract_memory_id(mem) or _extract_memory_id(raw)
+    related_raw = mem.get("related_files") or []
+    if isinstance(related_raw, str):
+        related_values = [related_raw]
+    elif isinstance(related_raw, (list, tuple, set)):
+        related_values = list(related_raw)
+    else:
+        related_values = []
     out: Dict[str, Any] = {
         "memory_id": mid,
         "id": mid,  # alias
         "category": mem.get("category"),
-        "content": mem.get("content") or "",
+        "content": _sanitize_public_path_text(mem.get("content") or ""),
         "importance": mem.get("importance"),
         "tags": mem.get("tags") or [],
         "timestamp": mem.get("timestamp"),
-        "related_files": mem.get("related_files") or [],
+        "related_files": [
+            ref for ref in (
+                _sanitize_public_path_ref(path)
+                for path in related_values
+            )
+            if ref
+        ],
     }
     eff_score = score if score is not None else raw.get("relevance_score")
     if eff_score is not None:
@@ -2064,11 +2703,13 @@ def _normalise_memory_row(
         except (TypeError, ValueError):
             pass
     if match_reason or raw.get("match_reason"):
-        out["match_reason"] = match_reason or raw.get("match_reason")
+        out["match_reason"] = _sanitize_public_path_text(
+            str(match_reason or raw.get("match_reason") or "")
+        )
     if match_fields is not None:
-        out["match_fields"] = match_fields
+        out["match_fields"] = _sanitize_memory_match_fields(match_fields)
     elif raw.get("match_fields"):
-        out["match_fields"] = raw["match_fields"]
+        out["match_fields"] = _sanitize_memory_match_fields(raw["match_fields"])
     if "score" in out and "confidence" not in out:
         s = out["score"]
         if s >= 0.7:
@@ -2225,9 +2866,12 @@ def _next_actions_for_memory(
     substitute by hand. Empty arguments fall back to the original
     placeholder so the caller can still see the schema.
     """
-    sym_lit = f"'{symbol}'" if symbol else "<symbol>"
-    file_lit = f"'{file}'" if file else "..."
-    task_lit = f"'{task}'" if task else "..."
+    safe_symbol = _sanitize_public_path_text(symbol) if symbol else None
+    safe_file = _sanitize_public_path_ref(file) if file else None
+    safe_task = _sanitize_public_path_text(task) if task else None
+    sym_lit = json.dumps(safe_symbol, ensure_ascii=False) if safe_symbol else "<symbol>"
+    file_lit = json.dumps(safe_file, ensure_ascii=False) if safe_file else "..."
+    task_lit = json.dumps(safe_task, ensure_ascii=False) if safe_task else "..."
     if action == "search":
         if has_results:
             return [
@@ -2271,13 +2915,13 @@ def _next_actions_for_memory(
     if action == "advisory":
         if has_results:
             actions = []
-            if symbol:
+            if safe_symbol:
                 actions.append(
-                    f"omni_search(query='{symbol}', mode='references', "
+                    f"omni_search(query={sym_lit}, mode='references', "
                     f"format='json') to find every callsite affected"
                 )
                 actions.append(
-                    f"omni_impact(symbol='{symbol}', format='json') to "
+                    f"omni_impact(symbol={sym_lit}, format='json') to "
                     "confirm the blast radius"
                 )
             else:
@@ -2344,6 +2988,22 @@ def _get_workspace_root() -> Tuple[Path, str, List[str]]:
         when only the cwd fallback was usable. Surfaced by omni_status.
     """
     warnings: List[str] = []
+
+    # Explicit MCP-local workspace. In hybrid mode this is the user's real
+    # checkout passed by ``omnicode mcp --workspace ...``; it must win over a
+    # registry entry for the same workspace_id that points at a cloud mirror.
+    try:
+        import os as _os
+        explicit = (
+            _os.environ.get("OMNICODE_WORKSPACE_ROOT")
+            or _os.environ.get("OMNICODE_WORKSPACE")
+        )
+        if explicit:
+            p = Path(explicit)
+            if p.is_dir():
+                return p.resolve(), "explicit_local_workspace", warnings
+    except Exception:
+        pass
 
     # 1. Workspace registry — user-configured active bookmark.
     try:
@@ -2464,8 +3124,8 @@ def _patch_path_guard_error(
     return {
         "ok": False,
         "action": action,
-        "file": file,
-        "error": f"path-guard: {exc}",
+        "file": _safe_rejected_file_label(file),
+        "error": f"path-guard: {_sanitize_error_text(str(exc))}",
         "allowed_actions": list(_PATCH_ALLOWED_ACTIONS),
         "allowed_paths_pattern": "<workspace>/<relative-path>",
         "next_actions": [
@@ -2519,7 +3179,7 @@ def _alias_path_guard_error(alias: str, file: str, exc: ValueError) -> Dict[str,
     replacement = _ALIAS_REPLACEMENTS.get(alias, "omni_patch")
     return _alias_envelope(alias, {
         "ok": False,
-        "error": f"path-guard: {exc}",
+        "error": f"path-guard: {_sanitize_error_text(str(exc))}",
         "allowed_paths_pattern": "<workspace>/<relative-path>",
         "next_actions": [
             f"Use {replacement}(action='preview', file='<relative-path>', "
@@ -3375,6 +4035,129 @@ def register_high_level_tools(mcp, make_request):
         make_request: async function(method, endpoint, **kwargs) -> dict
     """
 
+    async def _collect_local_diagnostics_payload(
+        file: str,
+        severity: str = "all",
+        sources: str = "guard,lsp",
+    ) -> Optional[Dict[str, Any]]:
+        """Run local-first diagnostics from the MCP workspace root.
+
+        In hybrid mode diagnostics must not depend on the cloud mirror being
+        mounted at the backend WORKING_DIR. If the file exists in the local
+        checkout, this helper returns the canonical diagnostics envelope and
+        marks LSP as skipped unless a local LSP bridge is wired in later.
+        """
+        try:
+            local_path = _resolve_workspace_path(file)
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "file": file,
+                "error": str(exc),
+                "next_actions": _path_guard_next_actions(file),
+                "source": "local_file",
+                "local_first": True,
+            }
+        if not local_path.is_file():
+            return None
+
+        wanted = {s.strip() for s in (sources or "").split(",") if s.strip()}
+        diagnostics: List[Dict[str, Any]] = []
+        tools_run: List[str] = []
+        tools_skipped: List[str] = []
+
+        if "guard" in wanted:
+            try:
+                from omnicode.guard.analyzer import ProactiveGuard
+
+                guard_result = await ProactiveGuard().check(str(local_path))
+                tools_run.extend(list(getattr(guard_result, "tools_run", []) or []))
+                tools_skipped.extend(
+                    list(getattr(guard_result, "tools_skipped", []) or [])
+                )
+                for issue in getattr(guard_result, "issues", []) or []:
+                    sev_obj = getattr(issue, "severity", "warning")
+                    sev = getattr(sev_obj, "value", str(sev_obj)).lower()
+                    tool_name = (getattr(issue, "tool", "") or "guard").lower()
+                    if tool_name == "mypy" and sev == "info":
+                        continue
+                    diagnostics.append({
+                        "source": getattr(issue, "tool", None) or "guard",
+                        "severity": sev,
+                        "line": getattr(issue, "line", None),
+                        "column": getattr(issue, "column", None),
+                        "rule": getattr(issue, "code", None) or "",
+                        "message": getattr(issue, "message", "") or "",
+                    })
+                if not tools_run and not tools_skipped:
+                    tools_run.append("guard")
+            except Exception as exc:
+                tools_skipped.append(f"guard:{exc.__class__.__name__}")
+
+        if "lsp" in wanted:
+            tools_skipped.append("lsp:local_mcp_lsp_unavailable")
+
+        sev_filter = (severity or "all").lower().strip()
+        if sev_filter not in ("all", ""):
+            if sev_filter == "error":
+                allowed = {"error"}
+            elif sev_filter == "warning":
+                allowed = {"warning", "warn"}
+            else:
+                allowed = {sev_filter}
+            diagnostics = [
+                d for d in diagnostics
+                if (d.get("severity") or "").lower() in allowed
+            ]
+
+        sev_rank = {"error": 0, "warning": 1, "warn": 1, "info": 2, "hint": 3}
+        diagnostics.sort(key=lambda d: (
+            sev_rank.get((d.get("severity") or "").lower(), 4),
+            d.get("line") or 0,
+        ))
+
+        counts = {
+            "error": sum(
+                1 for d in diagnostics
+                if (d.get("severity") or "").lower() == "error"
+            ),
+            "warning": sum(
+                1 for d in diagnostics
+                if (d.get("severity") or "").lower() in ("warning", "warn")
+            ),
+            "info": sum(
+                1 for d in diagnostics
+                if (d.get("severity") or "").lower() in ("info", "hint")
+            ),
+            "total": len(diagnostics),
+        }
+
+        return {
+            "ok": True,
+            "file": file,
+            "severity_filter": severity,
+            "sources": sorted(wanted),
+            "tools_run": tools_run,
+            "tools_skipped": tools_skipped,
+            "diagnostics": diagnostics[:25],
+            "counts": counts,
+            "truncated": len(diagnostics) > 25,
+            "total_count": len(diagnostics),
+            "source": "local_guard",
+            "local_first": True,
+            "local_authority": True,
+        }
+
+    def _current_executor_mode() -> str:
+        """Return the MCP executor mode from the same env surface as runtime config."""
+        import os as _os
+
+        return (
+            _os.environ.get("OMNICODE_EXECUTOR_MODE")
+            or _os.environ.get("OMNICODE_EXECUTOR")
+            or "local"
+        ).strip().lower()
+
     async def _collect_diagnostics_payload(
         file: str,
         severity: str = "all",
@@ -3416,6 +4199,25 @@ def register_high_level_tools(mcp, make_request):
                 ),
                 "next_actions": _path_guard_next_actions(file),
             }
+
+        if not wanted.intersection({"guard", "lsp"}):
+            return {
+                "ok": False,
+                "file": file,
+                "error": f"Unknown sources '{sources}'. Use: guard, lsp",
+            }
+
+        try:
+            if _current_executor_mode() == "hybrid":
+                local_payload = await _collect_local_diagnostics_payload(
+                    file=file,
+                    severity=severity,
+                    sources=sources,
+                )
+                if local_payload is not None:
+                    return local_payload
+        except Exception:
+            pass
 
         tasks = []
         labels = []
@@ -3858,6 +4660,260 @@ def register_high_level_tools(mcp, make_request):
             "memory_count": len(synth["referenced_memories"]),
         }
 
+    def _analysis_freshness_fields(state: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "freshness": state.get("freshness"),
+            "freshness_mode": "strict",
+            "stale": state.get("stale"),
+            "cloud_available": state.get("cloud_available"),
+            "cloud_unavailable": state.get("cloud_unavailable", False),
+            "backend_unreachable": state.get("backend_unreachable", False),
+            "workspace_id": state.get("workspace_id"),
+            "local_revision": state.get("local_revision"),
+            "accepted_revision": state.get("accepted_revision"),
+            "indexed_revision": state.get("indexed_revision"),
+            "required_revision": state.get("required_revision"),
+            "manifest_present": state.get("manifest_present"),
+        }
+
+    def _backend_error_message(data: Any) -> Optional[str]:
+        if not isinstance(data, dict):
+            return None
+        status_code: Optional[int] = None
+        try:
+            raw_status = data.get("status_code")
+            if raw_status is not None:
+                status_code = int(raw_status)
+        except (TypeError, ValueError):
+            status_code = None
+        error_text = data.get("error") or data.get("message")
+        error_type = str(data.get("error_type") or "").lower()
+        if data.get("ok") is False or (status_code is not None and status_code >= 400):
+            if error_text:
+                return str(error_text)
+            if status_code is not None:
+                return f"HTTP {status_code}"
+            return "backend returned an error envelope"
+        if error_text or error_type in {
+            "connectionerror", "timeouterror", "httperror", "unexpectederror",
+        }:
+            return str(error_text or data.get("error_type") or "backend unavailable")
+        return None
+
+    async def _analysis_freshness_state() -> Dict[str, Any]:
+        import os as _os
+
+        executor = (
+            _os.environ.get("OMNICODE_EXECUTOR_MODE") or "local"
+        ).strip().lower()
+        if executor != "hybrid":
+            return {
+                "enabled": False,
+                "freshness": "not_applicable",
+                "stale": False,
+            }
+
+        workspace_id = _os.environ.get("OMNICODE_WORKSPACE_ID") or ""
+        if not workspace_id:
+            return {
+                "enabled": True,
+                "freshness": "unknown",
+                "stale": None,
+                "workspace_id": None,
+                "local_revision": None,
+                "accepted_revision": None,
+                "indexed_revision": None,
+                "required_revision": None,
+                "manifest_present": False,
+                "error": "workspace_id is not configured",
+            }
+
+        local_revision: Optional[int] = None
+        accepted_revision = 0
+        indexed_revision = 0
+        manifest_present = False
+        manifest_warning: Optional[str] = None
+
+        try:
+            from omnicode_core.workspace.local import LocalWorkspace
+            from omnicode_core.workspace.manifest import (
+                LocalManifest,
+                default_manifest_path,
+            )
+
+            local_ws = LocalWorkspace(
+                root=_get_workspace_root()[0],
+                workspace_id=workspace_id,
+            )
+            manifest_path = default_manifest_path(workspace_id)
+            manifest_present = manifest_path.exists()
+            if manifest_present:
+                manifest = LocalManifest.load(workspace=local_ws)
+                local_revision = int(manifest.local_revision)
+                accepted_revision = max(
+                    accepted_revision,
+                    int(manifest.data.get("last_accepted_revision", 0)),
+                )
+                indexed_revision = max(
+                    indexed_revision,
+                    int(manifest.data.get("last_indexed_revision", 0)),
+                )
+        except Exception as exc:
+            manifest_warning = f"{exc.__class__.__name__}: {exc}"
+
+        status_warning: Optional[str] = None
+        try:
+            raw = await make_request(
+                "GET",
+                "/sync/status",
+                params={"workspace_id": workspace_id},
+            )
+            data = raw.get("result", raw) if isinstance(raw, dict) else {}
+            backend_error = _backend_error_message(data)
+            if backend_error:
+                status_warning = backend_error
+            elif isinstance(data, dict) and data.get("ok", True) is not False:
+                accepted_revision = max(
+                    accepted_revision,
+                    int(data.get("accepted_revision") or 0),
+                )
+                indexed_revision = max(
+                    indexed_revision,
+                    int(data.get("indexed_revision") or 0),
+                )
+            else:
+                status_warning = str(
+                    (data or {}).get("error")
+                    if isinstance(data, dict)
+                    else "sync status unavailable"
+                )
+        except Exception as exc:
+            status_warning = f"{exc.__class__.__name__}: {exc}"
+
+        if status_warning:
+            required_revision = (
+                max(local_revision, accepted_revision)
+                if local_revision is not None
+                else None
+            )
+            return {
+                "enabled": True,
+                "freshness": "unavailable",
+                "stale": None,
+                "cloud_available": False,
+                "cloud_unavailable": True,
+                "backend_unreachable": True,
+                "workspace_id": workspace_id,
+                "local_revision": local_revision,
+                "accepted_revision": accepted_revision,
+                "indexed_revision": indexed_revision,
+                "required_revision": required_revision,
+                "manifest_present": manifest_present,
+                "manifest_warning": manifest_warning,
+                "status_warning": status_warning,
+                "error": "cloud backend is unavailable",
+            }
+
+        if local_revision is None:
+            return {
+                "enabled": True,
+                "freshness": "unknown",
+                "stale": None,
+                "cloud_available": True,
+                "cloud_unavailable": False,
+                "backend_unreachable": False,
+                "workspace_id": workspace_id,
+                "local_revision": None,
+                "accepted_revision": accepted_revision,
+                "indexed_revision": indexed_revision,
+                "required_revision": None,
+                "manifest_present": manifest_present,
+                "manifest_warning": manifest_warning,
+                "status_warning": status_warning,
+                "error": "local revision is unknown",
+            }
+
+        required_revision = max(local_revision, accepted_revision)
+        stale = indexed_revision < required_revision
+        return {
+            "enabled": True,
+            "freshness": "stale" if stale else "fresh",
+            "stale": stale,
+            "cloud_available": True,
+            "cloud_unavailable": False,
+            "backend_unreachable": False,
+            "workspace_id": workspace_id,
+            "local_revision": local_revision,
+            "accepted_revision": accepted_revision,
+            "indexed_revision": indexed_revision,
+            "required_revision": required_revision,
+            "manifest_present": manifest_present,
+            "manifest_warning": manifest_warning,
+            "status_warning": status_warning,
+        }
+
+    async def _analysis_freshness_gate(
+        *,
+        tool: str,
+        fmt: str,
+    ) -> Tuple[Optional[str], Dict[str, Any]]:
+        state = await _analysis_freshness_state()
+        if not state.get("enabled"):
+            return None, {}
+        if state.get("freshness") == "fresh":
+            return None, _analysis_freshness_fields(state)
+
+        is_json_fmt = (fmt or "json").lower() == "json"
+        freshness = state.get("freshness") or "unknown"
+        if freshness == "stale":
+            error = "Cloud index is stale"
+        elif freshness == "unavailable":
+            error = "Cloud backend is unavailable"
+        else:
+            error = "Cloud index freshness is unknown"
+        payload = {
+            "ok": False,
+            "tool": tool,
+            "error": error,
+            **_analysis_freshness_fields(state),
+            "freshness_unknown": freshness == "unknown",
+            "next_actions": [
+                (
+                    "Restart or reconnect the cloud backend, then retry this tool."
+                    if freshness == "unavailable"
+                    else "Wait for sync/indexing to finish, then retry this tool."
+                ),
+                "omni_status() to inspect local/cloud revisions.",
+                "GET /sync/status?workspace_id=<workspace_id> to inspect cloud sync state.",
+            ],
+        }
+        if state.get("manifest_warning"):
+            payload["manifest_warning"] = state["manifest_warning"]
+        if state.get("status_warning"):
+            payload["status_warning"] = state["status_warning"]
+        _stamp(payload, tool=tool)
+        if is_json_fmt:
+            return json.dumps(payload, ensure_ascii=False, indent=2), {}
+        return (
+            f"ERROR {tool}: {error} "
+            f"(local={state.get('local_revision')}, "
+            f"accepted={state.get('accepted_revision')}, "
+            f"indexed={state.get('indexed_revision')}, "
+            f"required={state.get('required_revision')})"
+        ), {}
+
+    def _request_with_freshness_headers(freshness_meta: Dict[str, Any]):
+        async def _wrapped(method: str, endpoint: str, **kwargs: Any) -> Dict[str, Any]:
+            required = freshness_meta.get("required_revision")
+            if required:
+                headers = dict(kwargs.pop("headers", {}) or {})
+                headers.setdefault("X-Omnicode-Min-Revision", str(required))
+                kwargs["headers"] = headers
+            result = await make_request(method, endpoint, **kwargs)
+            return result if isinstance(result, dict) else {"result": result}
+
+        return _wrapped
+
     @mcp.tool()
     async def omni_search(
         query: str,
@@ -3942,6 +4998,14 @@ def register_high_level_tools(mcp, make_request):
             # user still sees their literal in the header.
             effective_query = _strip_quotes(query.strip()).strip() if query else query
 
+            freshness_block, freshness_meta = await _analysis_freshness_gate(
+                tool="omni_search",
+                fmt=fmt,
+            )
+            if freshness_block is not None:
+                return freshness_block
+            analysis_request = _request_with_freshness_headers(freshness_meta)
+
             # references-mode probe metadata; populated only when that
             # branch runs. Pre-declared so the JSON envelope assembly
             # below can reference it without a NameError.
@@ -3949,24 +5013,24 @@ def register_high_level_tools(mcp, make_request):
 
             if resolved_mode == "hybrid":
                 results, total = await _run_hybrid(
-                    make_request, effective_query, file_pattern, max_results, rerank
+                    analysis_request, effective_query, file_pattern, max_results, rerank
                 )
             elif resolved_mode == "semantic":
                 results, total = await _run_semantic(
-                    make_request, effective_query, file_pattern, max_results, rerank
+                    analysis_request, effective_query, file_pattern, max_results, rerank
                 )
             elif resolved_mode == "symbol":
                 results, total = await _run_symbol(
-                    make_request, effective_query, file_pattern, max_results
+                    analysis_request, effective_query, file_pattern, max_results
                 )
             elif resolved_mode == "text":
                 results, total = await _run_text(
-                    make_request, effective_query, file_pattern, max_results,
+                    analysis_request, effective_query, file_pattern, max_results,
                     flat=flat,
                 )
             elif resolved_mode == "references":
                 results, total, _ref_meta = await _run_references(
-                    make_request, effective_query, max_results
+                    analysis_request, effective_query, max_results
                 )
                 # Stash for the JSON envelope below.
                 _references_meta = _ref_meta
@@ -4006,6 +5070,8 @@ def register_high_level_tools(mcp, make_request):
                     "count": min(len(results), max_results),
                     "results": structured,
                 }
+                if freshness_meta:
+                    payload.update(freshness_meta)
 
                 # For references mode, also emit the LSP-shaped contract:
                 # ``definition`` + ``references[]`` + ``source`` +
@@ -4437,6 +5503,19 @@ def register_high_level_tools(mcp, make_request):
                     return _render_read_payload_text(payload)
                 return json.dumps(payload, ensure_ascii=False, indent=2)
 
+            local_payload = _build_local_read_payload(
+                file=file,
+                mode=mode_norm,
+                symbol=symbol,
+                start_line=start_line,
+                end_line=end_line,
+                max_tokens=max_tokens,
+            )
+            if local_payload is not None:
+                if (format or "json").lower() == "text":
+                    return _render_read_payload_text(local_payload)
+                return json.dumps(local_payload, ensure_ascii=False, indent=2)
+
             if mode_norm == "range":
                 # ``start_line`` is guaranteed non-None at this point because
                 # the guard above returns early when it's missing. Cast for
@@ -4574,6 +5653,15 @@ def register_high_level_tools(mcp, make_request):
                 else f"❌ {err['error']}"
             )
 
+        fmt = (format or "json").lower()
+        freshness_block, freshness_meta = await _analysis_freshness_gate(
+            tool="omni_impact",
+            fmt=fmt,
+        )
+        if freshness_block is not None:
+            return freshness_block
+        analysis_request = _request_with_freshness_headers(freshness_meta)
+
         try:
             import asyncio
 
@@ -4596,11 +5684,11 @@ def register_high_level_tools(mcp, make_request):
             backend_max_files = max(max_files, _MIN_BACKEND_MAX_FILES)
 
             params = {"symbol": symbol, "depth": depth, "max_files": backend_max_files}
-            risk_task = make_request("GET", "/graph/risk", params={
+            risk_task = analysis_request("GET", "/graph/risk", params={
                 "symbol": symbol, "max_files": backend_max_files,
             })
-            impact_task = make_request("GET", "/graph/impact", params=params)
-            tests_task = make_request("GET", "/graph/related-tests", params={
+            impact_task = analysis_request("GET", "/graph/impact", params=params)
+            tests_task = analysis_request("GET", "/graph/related-tests", params={
                 "symbol": symbol, "max_files": backend_max_files,
             })
             gathered: List[Any] = list(await asyncio.gather(
@@ -4654,19 +5742,56 @@ def register_high_level_tools(mcp, make_request):
             # confirm the symbol exists before trusting anything.
             impact_note: Optional[str] = None
             confidence_caveats: List[str] = []
+            symbol_resolution = "found"
+            symbol_fallback_hit: Optional[Dict[str, Any]] = None
             if files_count == 0 and not callers and not callees:
                 confidence = "low"
                 risk_level = "unknown"
                 risk_reasons = []
                 if "error" not in impact:
-                    impact_note = (
-                        "Symbol not found in call graph or has 0 callers/callees. "
-                        "risk='unknown' until the symbol is confirmed via "
-                        "omni_search(mode='symbol')."
-                    )
+                    symbol_hits: List[Dict[str, Any]] = []
+                    try:
+                        symbol_hits, _symbol_total = await _run_symbol(
+                            analysis_request, symbol, None, 3
+                        )
+                    except Exception as exc:
+                        confidence_caveats.append(
+                            "symbol fallback lookup failed: "
+                            + _sanitize_error_text(str(exc))
+                        )
+                    for hit in symbol_hits:
+                        hit_name = (
+                            hit.get("symbol_name")
+                            or hit.get("name")
+                            or hit.get("symbol")
+                            or ""
+                        )
+                        if hit_name == symbol:
+                            symbol_fallback_hit = hit
+                            break
+                    if symbol_fallback_hit is not None:
+                        symbol_resolution = "found"
+                        impact_note = (
+                            "Symbol exists in the symbol index but has no "
+                            "call-graph edges. risk='unknown' until references "
+                            "or the symbol body are inspected."
+                        )
+                        confidence_caveats.append(
+                            "call graph has no callers/callees for this symbol; "
+                            "use omni_search(mode='references') for line-level use."
+                        )
+                    else:
+                        symbol_resolution = "not_found"
+                        impact_note = (
+                            "Symbol not found in call graph or has 0 callers/callees. "
+                            "risk='unknown' until the symbol is confirmed via "
+                            "omni_search(mode='symbol')."
+                        )
                 else:
+                    symbol_resolution = "not_found"
                     impact_note = impact.get("error") or "graph unavailable"
             else:
+                symbol_resolution = "found"
                 # ---- audit-bundle.r16 (P3-A): honesty about transitive
                 # blast radius and builtin-call noise.
                 #
@@ -4750,16 +5875,32 @@ def register_high_level_tools(mcp, make_request):
                 "truncated": files_truncated,
                 "suggested_tests": test_files,
                 "suggested_commands": suggested_cmds,
-                "source": "graph",
+                "source": (
+                    "graph+symbol_fallback"
+                    if symbol_fallback_hit is not None
+                    else "graph"
+                ),
                 "confidence": confidence,
                 # ---- audit-bundle.r15 (P3): symbol_resolution parity
                 # with omni_intelligence / omni_context. AI editors can
                 # now use a single field across the surface to detect
                 # missing symbols.
-                "symbol_resolution": (
-                    "not_found" if risk_level == "unknown" else "found"
-                ),
+                "symbol_resolution": symbol_resolution,
             }
+            if symbol_fallback_hit is not None:
+                payload["symbol_fallback"] = {
+                    "name": (
+                        symbol_fallback_hit.get("symbol_name")
+                        or symbol_fallback_hit.get("name")
+                        or symbol
+                    ),
+                    "file": (
+                        symbol_fallback_hit.get("file_path")
+                        or symbol_fallback_hit.get("file")
+                    ),
+                    "line": symbol_fallback_hit.get("line"),
+                    "kind": symbol_fallback_hit.get("kind"),
+                }
             # ---- audit-bundle.r16 (P3-A): expose caveats so AI editors
             # can see *why* the confidence band is what it is. Only set
             # the field when we actually have caveats to declare.
@@ -4773,15 +5914,31 @@ def register_high_level_tools(mcp, make_request):
             # editors don't have to mine ``suggested_commands`` or guess.
             next_actions: List[str] = []
             if risk_level == "unknown":
-                next_actions.append(
-                    "omni_search(mode='symbol', query='%s', format='json') "
-                    "to confirm the symbol exists." % symbol
-                )
-                next_actions.append(
-                    "omni_read(file='<defining file>', mode='symbol', "
-                    "symbol='%s', format='json') once the symbol is located."
-                    % symbol
-                )
+                if symbol_resolution == "found":
+                    fallback_file = (
+                        (symbol_fallback_hit or {}).get("file_path")
+                        or (symbol_fallback_hit or {}).get("file")
+                        or "<defining file>"
+                    )
+                    next_actions.append(
+                        "omni_read(file='%s', mode='symbol', symbol='%s', "
+                        "format='json') to inspect the symbol body."
+                        % (fallback_file, symbol)
+                    )
+                    next_actions.append(
+                        "omni_search(query='%s', mode='references', format='json') "
+                        "for line-level callsites." % symbol
+                    )
+                else:
+                    next_actions.append(
+                        "omni_search(mode='symbol', query='%s', format='json') "
+                        "to confirm the symbol exists." % symbol
+                    )
+                    next_actions.append(
+                        "omni_read(file='<defining file>', mode='symbol', "
+                        "symbol='%s', format='json') once the symbol is located."
+                        % symbol
+                    )
             else:
                 if suggested_cmds:
                     next_actions.append(
@@ -4807,8 +5964,10 @@ def register_high_level_tools(mcp, make_request):
                     % max(files_count, max_files * 2)
                 )
             payload["next_actions"] = next_actions
+            if freshness_meta:
+                payload.update(freshness_meta)
 
-            if (format or "json").lower() != "text":
+            if fmt != "text":
                 _stamp(payload, tool="omni_impact")
                 return json.dumps(payload, ensure_ascii=False, indent=2)
 
@@ -4910,6 +6069,8 @@ def register_high_level_tools(mcp, make_request):
 
             if not payload.get("ok", False):
                 err_msg = payload.get("error", "diagnostics failed")
+                err_msg = _sanitize_error_text(str(err_msg))
+                payload["error"] = err_msg
                 # audit-bundle.r10 (read.error_next_actions): file-not-found
                 # errors carry a recovery next_actions list so the agent
                 # can act without parsing the message string.
@@ -5041,6 +6202,7 @@ def register_high_level_tools(mcp, make_request):
             return "\n".join(lines)
 
         except Exception as e:
+            e = Exception(_sanitize_error_text(str(e)))
             err = {"ok": False, "file": file, "error": f"omni_diagnostics failed: {e}"}
             _stamp(err, tool="omni_diagnostics")
             return (
@@ -5095,10 +6257,11 @@ def register_high_level_tools(mcp, make_request):
         is_json = (format or "json").lower() != "text"
 
         def _err(msg: str, **extra: Any) -> str:
+            safe_msg = _sanitize_error_text(msg)
             payload: Dict[str, Any] = {
                 "ok": False,
                 "action": action,
-                "error": msg,
+                "error": safe_msg,
                 "allowed_actions": list(_PATCH_ALLOWED_ACTIONS),
                 **extra,
             }
@@ -5107,11 +6270,232 @@ def register_high_level_tools(mcp, make_request):
                 for a in _PATCH_ALLOWED_ACTIONS
             ])
             _stamp(payload, tool="omni_patch")
+            msg = safe_msg
             return (
                 json.dumps(payload, ensure_ascii=False, indent=2)
                 if is_json
                 else f"❌ {msg}"
             )
+
+        def _hybrid_patch_local_authority() -> bool:
+            try:
+                import os as _os
+
+                return (
+                    (_os.environ.get("OMNICODE_EXECUTOR_MODE") or "local")
+                    .strip()
+                    .lower()
+                    == "hybrid"
+                )
+            except Exception:
+                return False
+
+        def _local_patch_manager() -> Any:
+            from omnicode_core.edit.patch import PatchManager
+
+            workspace_root = _get_workspace_root()[0]
+            return PatchManager(str(workspace_root))
+
+        def _local_marker_envelope(
+            target_file: str,
+            target_path: Path,
+        ) -> Dict[str, Any]:
+            file_exists = target_path.is_file()
+            return {
+                "file_exists": file_exists,
+                "new_file": not file_exists,
+                "file_marker_source": "local_workspace_probe",
+                "file_marker_authoritative": True,
+                "backend_workspace_root": None,
+                "resolved_file_path": target_file,
+                "file_marker_warning": None,
+            }
+
+        def _patch_result_data(result: Any) -> Dict[str, Any]:
+            return {
+                "success": bool(getattr(result, "success", False)),
+                "message": getattr(result, "message", "") or "",
+                "diff": getattr(result, "diff", "") or "",
+                "lines_added": getattr(result, "lines_added", 0) or 0,
+                "lines_removed": getattr(result, "lines_removed", 0) or 0,
+                "session_id": getattr(result, "session_id", None),
+                "rollback_available": bool(
+                    getattr(result, "rollback_available", False)
+                ),
+                "file_path": getattr(result, "file_path", None),
+            }
+
+        async def _do_local_validate(
+            target_file: str,
+            target_content: str,
+        ) -> Dict[str, Any]:
+            try:
+                result = await _local_patch_manager().validate_patch(
+                    target_file,
+                    target_content,
+                )
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "validation_passed": False,
+                    "message": f"local validate failed: {exc}",
+                    "checks": [],
+                    "counts": {"error": 0, "warning": 0, "info": 0, "total": 0},
+                    "tools_run": ["local_patch_manager"],
+                    "tools_skipped": [],
+                    "source": "local",
+                }
+
+            raw_issues = getattr(result, "diagnostics", None) or []
+            checks: List[Dict[str, Any]] = []
+            for it in raw_issues:
+                if not isinstance(it, dict):
+                    checks.append({
+                        "source": "local_guard",
+                        "severity": "error",
+                        "line": None,
+                        "column": None,
+                        "rule": "",
+                        "message": str(it),
+                    })
+                    continue
+                checks.append({
+                    "source": it.get("source") or it.get("tool") or "local_guard",
+                    "severity": (it.get("severity") or "warning").lower(),
+                    "line": it.get("line"),
+                    "column": it.get("column"),
+                    "rule": it.get("rule") or it.get("code") or "",
+                    "message": it.get("message") or "",
+                })
+            counts = {
+                "error": sum(1 for c in checks if c.get("severity") == "error"),
+                "warning": sum(
+                    1 for c in checks
+                    if c.get("severity") in ("warning", "warn")
+                ),
+                "info": sum(1 for c in checks if c.get("severity") == "info"),
+                "total": len(checks),
+            }
+            validation_passed = bool(getattr(result, "success", False)) and (
+                counts["error"] == 0
+            )
+            return {
+                "ok": bool(getattr(result, "success", False)),
+                "validation_passed": validation_passed,
+                "message": getattr(result, "message", "") or (
+                    f"Validation {'passed' if validation_passed else 'failed'}: "
+                    f"{counts['error']} error(s), {counts['warning']} warning(s)"
+                ),
+                "checks": checks,
+                "counts": counts,
+                "tools_run": ["local_patch_manager"],
+                "tools_skipped": [],
+                "source": "local",
+            }
+
+        def _mark_local_sync_pending(target_file: Optional[str]) -> Dict[str, Any]:
+            if not target_file:
+                return {"sync_pending": False, "sync_pending_warning": "no file"}
+            try:
+                import os as _os
+
+                workspace_root = _get_workspace_root()[0]
+                from omnicode_core.workspace.local import LocalWorkspace
+                from omnicode_core.workspace.manifest import LocalManifest
+                from omnicode_core.workspace.sync_client import SyncClient
+                from omnicode_core.workspace.sync_queue import SyncQueue
+
+                workspace_id = (
+                    _os.environ.get("OMNICODE_WORKSPACE_ID")
+                    or workspace_root.name
+                    or "workspace"
+                )
+                local_ws = LocalWorkspace(
+                    root=workspace_root,
+                    workspace_id=workspace_id,
+                )
+                manifest = LocalManifest.load(workspace=local_ws)
+                change = manifest.mark_changed(target_file)
+                if change is not None:
+                    manifest.save()
+                    meta: Dict[str, Any] = {
+                        "sync_pending": True,
+                        "sync_pending_path": change.path,
+                        "sync_pending_op": change.op,
+                        "local_revision": change.revision,
+                    }
+                    remote = (
+                        _os.environ.get("OMNICODE_REMOTE")
+                        or _os.environ.get("OMNICODE_FASTAPI_BASE_URL")
+                        or _os.environ.get("OMNICODE_BACKEND_URL")
+                        or ""
+                    ).strip()
+                    if not remote:
+                        meta["sync_flush_skipped"] = True
+                        meta["sync_flush_warning"] = "backend URL not configured"
+                        return meta
+
+                    queue = SyncQueue(manifest)
+                    batch = queue.next_batch()
+                    if batch is None:
+                        meta["sync_flush_skipped"] = True
+                        meta["sync_skipped_unchanged"] = True
+                        return meta
+
+                    client = SyncClient(
+                        remote=remote,
+                        workspace_id=workspace_id,
+                        token=(
+                            _os.environ.get("OMNICODE_BACKEND_TOKEN")
+                            or _os.environ.get("OMNICODE_CLOUD_TOKEN")
+                            or ""
+                        ),
+                        executor="hybrid",
+                        client_id=batch.client_id,
+                        timeout=10.0,
+                    )
+                    try:
+                        result = client.push_batch(batch)
+                    finally:
+                        client.close()
+                    if result.ok:
+                        queue.mark_accepted(
+                            batch,
+                            accepted_revision=result.accepted_revision,
+                            indexed_revision=result.indexed_revision,
+                        )
+                        manifest.save()
+                        meta.update({
+                            "sync_flushed": True,
+                            "sync_flush_protocol": "/sync/batch",
+                            "accepted_revision": result.accepted_revision,
+                            "indexed_revision": result.indexed_revision,
+                            "sync_paths": sorted(batch.paths),
+                        })
+                        return meta
+
+                    meta.update({
+                        "sync_flushed": False,
+                        "sync_flush_protocol": "/sync/batch",
+                        "sync_flush_error": _sanitize_error_text(
+                            result.error or "sync failed"
+                        ),
+                        "sync_flush_status_code": result.status_code,
+                    })
+                    return meta
+                manifest.save()
+                return {
+                    "sync_pending": False,
+                    "sync_skipped_unchanged": True,
+                    "local_revision": manifest.local_revision,
+                }
+            except Exception as exc:
+                return {
+                    "sync_pending": False,
+                    "sync_pending_warning": (
+                        f"{exc.__class__.__name__}: {exc}"
+                    ),
+                }
 
         # ---- Internal helpers (closures over make_request / _err) -------
         # audit-bundle.r13: ``_do_validate`` lives at the
@@ -5128,6 +6512,7 @@ def register_high_level_tools(mcp, make_request):
                     f"Unknown omni_patch action: {action}. "
                     f"Use: {', '.join(_PATCH_ALLOWED_ACTIONS)}",
                 )
+            local_patch_authority = _hybrid_patch_local_authority()
 
             # ---- Path guard runs for every file-bearing action.
             resolved_path: Optional[Path] = None
@@ -5157,7 +6542,10 @@ def register_high_level_tools(mcp, make_request):
             new_file: Optional[bool] = None
             marker_envelope: Optional[Dict[str, Any]] = None
             if resolved_path is not None and file is not None:
-                marker_envelope = await _get_backend_file_markers(file)
+                if local_patch_authority:
+                    marker_envelope = _local_marker_envelope(file, resolved_path)
+                else:
+                    marker_envelope = await _get_backend_file_markers(file)
                 new_file = marker_envelope.get("new_file")
 
             def _marker_fields() -> Dict[str, Any]:
@@ -5192,10 +6580,15 @@ def register_high_level_tools(mcp, make_request):
             if action == "preview":
                 if not file or content is None:
                     return _err("omni_patch preview needs both file and content.")
-                raw = await make_request("POST", "/patch/preview", json={
-                    "file_path": file, "content": content,
-                })
-                data = raw.get("result", raw) if isinstance(raw, dict) else {}
+                if local_patch_authority:
+                    data = _patch_result_data(
+                        _local_patch_manager().preview_patch(file, content)
+                    )
+                else:
+                    raw = await make_request("POST", "/patch/preview", json={
+                        "file_path": file, "content": content,
+                    })
+                    data = raw.get("result", raw) if isinstance(raw, dict) else {}
                 if not data.get("success", True):
                     # audit-bundle.r12 (patch.backend_file_markers): pass
                     # through the full marker envelope, including the
@@ -5251,6 +6644,8 @@ def register_high_level_tools(mcp, make_request):
                                 "nonexistent file, so the preview was "
                                 "synthesized locally as a creation diff."
                             ),
+                            "source": "local" if local_patch_authority else "backend",
+                            "local_authority": local_patch_authority,
                             "next_actions": [
                                 f"omni_patch(action='validate', file='{file}', "
                                 f"content=...) to verify the new-file content.",
@@ -5303,6 +6698,8 @@ def register_high_level_tools(mcp, make_request):
                     "diff_truncated": diff_truncated,
                     "diff_total_lines": len(diff_lines),
                     "newline_normalized": was_normalised,
+                    "source": "local" if local_patch_authority else "backend",
+                    "local_authority": local_patch_authority,
                     "next_actions": [
                         f"omni_patch(action='validate', file='{file}', content=...)",
                         f"omni_patch(action='apply', file='{file}', content=...)",
@@ -5326,7 +6723,11 @@ def register_high_level_tools(mcp, make_request):
             if action == "validate":
                 if not file or content is None:
                     return _err("omni_patch validate needs both file and content.")
-                v = await _do_validate(file, content)
+                v = (
+                    await _do_local_validate(file, content)
+                    if local_patch_authority
+                    else await _do_validate(file, content)
+                )
                 payload = {
                     "ok": v["validation_passed"],
                     "action": "validate",
@@ -5339,6 +6740,7 @@ def register_high_level_tools(mcp, make_request):
                     "tools_run": v["tools_run"],
                     "tools_skipped": v["tools_skipped"],
                     "source": v["source"],
+                    "local_authority": local_patch_authority,
                     "next_actions": (
                         [
                             f"omni_patch(action='apply', file='{file}', content=...) "
@@ -5382,7 +6784,11 @@ def register_high_level_tools(mcp, make_request):
 
                 # Validate gate — runs by default, refuses on errors
                 # unless the caller set force=True with a reason.
-                v = await _do_validate(file, content)
+                v = (
+                    await _do_local_validate(file, content)
+                    if local_patch_authority
+                    else await _do_validate(file, content)
+                )
                 if not v["validation_passed"] and not force:
                     err_payload = {
                         "ok": False,
@@ -5397,6 +6803,7 @@ def register_high_level_tools(mcp, make_request):
                         "tools_run": v["tools_run"],
                         "tools_skipped": v["tools_skipped"],
                         "source": v["source"],
+                        "local_authority": local_patch_authority,
                         "allowed_actions": list(_PATCH_ALLOWED_ACTIONS),
                         "next_actions": [
                             "Fix the listed errors and retry "
@@ -5417,16 +6824,44 @@ def register_high_level_tools(mcp, make_request):
                         f"Fix and retry."
                     )
 
-                raw = await make_request("POST", "/patch/apply", json={
-                    "file_path": file, "content": content,
-                })
-                data = raw.get("result", raw) if isinstance(raw, dict) else {}
+                if local_patch_authority:
+                    pm = _local_patch_manager()
+                    result = pm.apply_patch(
+                        file,
+                        content,
+                        source="omni_patch:hybrid_local",
+                        metadata={
+                            "executor": "hybrid",
+                            "local_authority": True,
+                            "validation_passed": v["validation_passed"],
+                            "validation_bypassed": (
+                                (not v["validation_passed"]) and force
+                            ),
+                            "force_reason": force_reason if force else None,
+                        },
+                    )
+                    data = _patch_result_data(result)
+                    sid_for_hash = data.get("session_id")
+                    if sid_for_hash:
+                        session_row = pm.get_session(sid_for_hash) or {}
+                        data["original_hash"] = session_row.get("original_hash")
+                        data["new_hash"] = session_row.get("new_hash")
+                else:
+                    raw = await make_request("POST", "/patch/apply", json={
+                        "file_path": file, "content": content,
+                    })
+                    data = raw.get("result", raw) if isinstance(raw, dict) else {}
                 if not data.get("success", False):
                     return _err(f"Apply failed: {data.get('message', 'unknown')}")
                 sid = data.get("session_id")
                 added = data.get("lines_added", 0)
                 removed = data.get("lines_removed", 0)
                 rb = data.get("rollback_available", True)
+                sync_meta = (
+                    _mark_local_sync_pending(file)
+                    if local_patch_authority
+                    else {}
+                )
                 payload = {
                     "ok": True,
                     "action": "apply",
@@ -5441,6 +6876,13 @@ def register_high_level_tools(mcp, make_request):
                     "force_reason": force_reason if force else None,
                     "original_hash": data.get("original_hash"),
                     "new_hash": data.get("new_hash"),
+                    "source": "local" if local_patch_authority else "backend",
+                    "local_authority": local_patch_authority,
+                    "sync_pending": local_patch_authority,
+                    "sync_trigger": (
+                        "filesystem_mtime" if local_patch_authority else None
+                    ),
+                    **sync_meta,
                     "next_actions": (
                         [
                             f"omni_patch(action='rollback', session_id='{sid}') "
@@ -5484,6 +6926,150 @@ def register_high_level_tools(mcp, make_request):
             if action == "rollback":
                 if not session_id:
                     return _err("omni_patch rollback needs session_id.")
+
+                if local_patch_authority:
+                    _EMPTY_CONTENT_SHA256_PREFIX = "e3b0c44298fc1c14"
+                    pm = _local_patch_manager()
+                    session_before = pm.get_session(session_id)
+                    local_legacy_path = (
+                        session_before.get("file_path")
+                        if isinstance(session_before, dict)
+                        else None
+                    )
+                    unsafe_legacy = False
+                    session_was_new_file = False
+                    if local_legacy_path:
+                        try:
+                            _resolve_workspace_path(str(local_legacy_path))
+                        except ValueError:
+                            unsafe_legacy = True
+                        session_was_new_file = (
+                            (session_before.get("original_hash") or "")
+                            == _EMPTY_CONTENT_SHA256_PREFIX
+                        ) if isinstance(session_before, dict) else False
+
+                    if unsafe_legacy:
+                        err_payload = {
+                            "ok": False,
+                            "action": "rollback",
+                            "session_id": session_id,
+                            "error": (
+                                f"unsafe_legacy_session: session {session_id} "
+                                f"targets {local_legacy_path!r}, which sits outside "
+                                "the workspace. Refusing to rollback."
+                            ),
+                            "unsafe_legacy_session": True,
+                            "legacy_file_path": local_legacy_path,
+                            "source": "local",
+                            "local_authority": True,
+                            "allowed_actions": list(_PATCH_ALLOWED_ACTIONS),
+                            "next_actions": [
+                                "omni_patch(action='sessions') to inspect recent "
+                                "sessions and pick a safe one.",
+                            ],
+                        }
+                        _stamp(err_payload, tool="omni_patch")
+                        if is_json:
+                            return json.dumps(err_payload, ensure_ascii=False, indent=2)
+                        return (
+                            f"鉂?Rollback refused: session {session_id} targets "
+                            f"path outside the workspace ({local_legacy_path!r})."
+                        )
+
+                    result = pm.rollback_patch(session_id)
+                    data = _patch_result_data(result)
+                    ok = bool(data.get("success", False))
+                    msg = data.get("message", "")
+
+                    new_file_unlinked = False
+                    local_new_file_unlink_warning: Optional[str] = None
+                    if ok and session_was_new_file and local_legacy_path:
+                        try:
+                            local_target = _resolve_workspace_path(
+                                str(local_legacy_path)
+                            )
+                            if local_target.exists() and local_target.is_file():
+                                try:
+                                    size = local_target.stat().st_size
+                                except OSError:
+                                    size = -1
+                                if size == 0:
+                                    local_target.unlink(missing_ok=True)
+                                    new_file_unlinked = True
+                                else:
+                                    local_new_file_unlink_warning = (
+                                        f"new-file rollback skipped unlink: "
+                                        f"file is {size} bytes, expected 0. "
+                                        "Manual cleanup may be required."
+                                    )
+                        except Exception as exc:
+                            local_new_file_unlink_warning = (
+                                f"new-file rollback unlink failed: "
+                                f"{exc.__class__.__name__}: {exc}"
+                            )
+
+                    sync_meta = (
+                        _mark_local_sync_pending(str(local_legacy_path))
+                        if ok and local_legacy_path
+                        else {}
+                    )
+                    payload = {
+                        "ok": ok,
+                        "action": "rollback",
+                        "session_id": session_id,
+                        "file": local_legacy_path,
+                        "message": msg,
+                        "rolled_back": ok,
+                        "previous_hash": (
+                            session_before.get("new_hash")
+                            if isinstance(session_before, dict)
+                            else None
+                        ),
+                        "restored_hash": (
+                            session_before.get("original_hash")
+                            if isinstance(session_before, dict)
+                            else None
+                        ),
+                        "new_file_unlinked": new_file_unlinked,
+                        "new_file_unlink_warning": local_new_file_unlink_warning,
+                        "source": "local",
+                        "local_authority": True,
+                        "sync_pending": ok,
+                        "sync_trigger": "filesystem_mtime" if ok else None,
+                        **sync_meta,
+                        "next_actions": (
+                            [
+                                f"omni_diagnostics(file='{local_legacy_path}') to confirm "
+                                "the rolled-back state is clean",
+                                f"omni_read(file='{local_legacy_path}', mode='full') to see "
+                                "the restored content",
+                            ]
+                            if ok and local_legacy_path
+                            else [
+                                "omni_patch(action='sessions') to inspect rollback state",
+                            ]
+                        ),
+                    }
+                    if not ok and msg:
+                        payload["error"] = msg
+                        low = msg.lower()
+                        if "not found" in low or "no session" in low:
+                            payload["next_actions"] = [
+                                "omni_patch(action='sessions', format='json') to "
+                                "list valid session_ids.",
+                                "Confirm the session_id was copied from a recent "
+                                "omni_patch(action='apply', ...) response.",
+                            ] + payload["next_actions"]
+                        elif "already" in low and "rolled" in low:
+                            payload["next_actions"] = [
+                                "Session already rolled back 鈥?no further action "
+                                "needed. Verify with omni_read.",
+                            ] + payload["next_actions"]
+                    _stamp(payload, tool="omni_patch")
+                    if is_json:
+                        return json.dumps(payload, ensure_ascii=False, indent=2)
+                    status = "OK" if ok else "ERROR"
+                    return f"{status} Rollback: {msg}"
 
                 # Pre-flight: look up the session, check the file path
                 # is still inside the workspace. Legacy sessions with
@@ -5748,10 +7334,19 @@ def register_high_level_tools(mcp, make_request):
             # =========================================================
             if action == "sessions":
                 _SESSIONS_LIMIT = 20
-                raw = await make_request(
-                    "GET", "/patch/sessions", params={"limit": _SESSIONS_LIMIT},
-                )
-                data = raw.get("result", raw) if isinstance(raw, dict) else {}
+                if local_patch_authority:
+                    local_sessions = _local_patch_manager().list_sessions(
+                        _SESSIONS_LIMIT
+                    )
+                    data = {
+                        "sessions": local_sessions,
+                        "total_count": len(local_sessions),
+                    }
+                else:
+                    raw = await make_request(
+                        "GET", "/patch/sessions", params={"limit": _SESSIONS_LIMIT},
+                    )
+                    data = raw.get("result", raw) if isinstance(raw, dict) else {}
                 sessions = data.get("sessions", []) or []
                 # ---- audit-bundle.r14 (P2): truncation transparency.
                 # Backend may keep growing the session log; we cap
@@ -5801,6 +7396,8 @@ def register_high_level_tools(mcp, make_request):
                     "total_count": backend_total,
                     "truncated": truncated,
                     "sessions": annotated,
+                    "source": "local" if local_patch_authority else "backend",
+                    "local_authority": local_patch_authority,
                     "next_actions": next_actions,
                 }
                 _stamp(payload, tool="omni_patch")
@@ -6234,10 +7831,10 @@ def register_high_level_tools(mcp, make_request):
                     "category": category,
                     "importance": importance,
                     "tags": tag_list,
-                    "file": file,
-                    "symbol": symbol,
-                    "task": task,
-                    "content": content,
+                    "file": _sanitize_public_path_ref(file) if file else file,
+                    "symbol": _sanitize_public_path_text(symbol) if symbol else symbol,
+                    "task": _sanitize_public_path_text(task) if task else task,
+                    "content": _sanitize_public_path_text(content),
                     "duplicate": is_dup,
                     "existing_memory_id": memory_id if is_dup else None,
                     "deduplication_reason": dedup_reason,
@@ -6276,36 +7873,55 @@ def register_high_level_tools(mcp, make_request):
                 if "error" in result:
                     return _err(f"Memory context error: {result['error']}")
                 data = result.get("result", result) or {}
+                sanitized_buckets = {
+                    "recent_progress": [
+                        _normalise_memory_row({"memory": r if isinstance(r, dict) else {}})
+                        for r in (data.get("recent_progress") or [])
+                    ],
+                    "key_learnings": [
+                        _normalise_memory_row({"memory": r if isinstance(r, dict) else {}})
+                        for r in (data.get("key_learnings") or [])
+                    ],
+                    "user_preferences": [
+                        _normalise_memory_row({"memory": r if isinstance(r, dict) else {}})
+                        for r in (data.get("user_preferences") or [])
+                    ],
+                    "important_warnings": [
+                        _normalise_memory_row({"memory": r if isinstance(r, dict) else {}})
+                        for r in (data.get("important_warnings") or [])
+                    ],
+                }
                 # Build the unified ``memories[]`` alias by flattening
                 # the four buckets and normalising every row.
                 buckets = (
-                    ("recent_progress", data.get("recent_progress") or []),
-                    ("key_learnings", data.get("key_learnings") or []),
-                    ("user_preferences", data.get("user_preferences") or []),
-                    ("important_warnings", data.get("important_warnings") or []),
+                    ("recent_progress", sanitized_buckets["recent_progress"]),
+                    ("key_learnings", sanitized_buckets["key_learnings"]),
+                    ("user_preferences", sanitized_buckets["user_preferences"]),
+                    ("important_warnings", sanitized_buckets["important_warnings"]),
                 )
                 memories_alias: List[Dict[str, Any]] = []
                 for bucket_name, rows in buckets:
                     for r in rows:
-                        # context endpoint hands back flat memory dicts
-                        # (not search-result wrappers), so wrap them so
-                        # _normalise_memory_row sees the right shape.
-                        wrapper = {"memory": r if isinstance(r, dict) else {}}
-                        norm = _normalise_memory_row(
-                            wrapper,
-                            match_reason=f"context:{bucket_name}",
-                        )
+                        norm = dict(r)
+                        norm["match_reason"] = f"context:{bucket_name}"
                         memories_alias.append(norm)
 
                 payload = {
                     "ok": True,
                     "action": "context",
-                    "recent_progress": data.get("recent_progress") or [],
-                    "key_learnings": data.get("key_learnings") or [],
-                    "user_preferences": data.get("user_preferences") or [],
-                    "important_warnings": data.get("important_warnings") or [],
-                    "current_focus": data.get("current_focus"),
-                    "next_priorities": data.get("next_priorities") or [],
+                    "recent_progress": sanitized_buckets["recent_progress"],
+                    "key_learnings": sanitized_buckets["key_learnings"],
+                    "user_preferences": sanitized_buckets["user_preferences"],
+                    "important_warnings": sanitized_buckets["important_warnings"],
+                    "current_focus": _sanitize_public_path_text(
+                        str(data.get("current_focus") or "")
+                    ) if isinstance(data.get("current_focus"), str)
+                    else data.get("current_focus"),
+                    "next_priorities": [
+                        _sanitize_public_path_text(item)
+                        if isinstance(item, str) else item
+                        for item in (data.get("next_priorities") or [])
+                    ],
                     "memories": memories_alias,
                     "memory_count": len(memories_alias),
                     "next_actions": _next_actions_for_memory(
@@ -6537,6 +8153,67 @@ def register_high_level_tools(mcp, make_request):
                 else f"❌ {err['error']}"
             )
 
+        fmt = (format or "json").lower()
+        if file and _path_looks_unsafe(file):
+            safe_file = _safe_rejected_file_label(file)
+            err = {
+                "ok": False,
+                "file": safe_file,
+                "symbol": symbol,
+                "task": task,
+                "error": (
+                    "Path access denied: omni_context only accepts "
+                    "workspace-relative paths inside the active workspace."
+                ),
+                "file_status": "path_rejected",
+                "confidence": "low",
+                "context": {
+                    "primary_symbols": [],
+                    "related_files": [],
+                    "diagnostics": [],
+                    "memories": [],
+                    "recent_changes": [],
+                    "references": [],
+                },
+                "diagnostics_status": {
+                    "ran": False,
+                    "source": "path_guard",
+                    "reason": "rejected unsafe file path before analysis",
+                },
+                "memory_status": {
+                    "ran": False,
+                    "source": "memory.v2.advisory",
+                    "reason": "skipped: unsafe file path",
+                },
+                "symbol_resolution": "n/a",
+                "token_budget": token_budget,
+                "budget": token_budget,
+                "budget_utilization": 0.0,
+                "why_selected": [
+                    "file path rejected by workspace path guard before context gathering"
+                ],
+                "truncation_reasons": [],
+                "truncated": False,
+                "token_estimate": 0,
+                "next_actions": _path_guard_next_actions(file),
+            }
+            _stamp(err, tool="omni_context")
+            return (
+                json.dumps(err, ensure_ascii=False, indent=2)
+                if fmt == "json"
+                else (
+                    "Context request rejected: use a workspace-relative path "
+                    "inside the active workspace."
+                )
+            )
+        freshness_block, freshness_meta = await _analysis_freshness_gate(
+            tool="omni_context",
+            fmt=fmt,
+        )
+        if freshness_block is not None:
+            return freshness_block
+        analysis_request = _request_with_freshness_headers(freshness_meta)
+
         try:
             # ----- 1. Token budget bookkeeping -------------------------
             ctx: Dict[str, Any] = {
@@ -6584,7 +8261,7 @@ def register_high_level_tools(mcp, make_request):
             if symbol:
                 try:
                     sym_results, _total = await _run_symbol(
-                        make_request, symbol, None, max_results=5,
+                        analysis_request, symbol, None, max_results=5,
                     )
                 except Exception as exc:
                     logger.debug("omni_context symbol resolve failed: %s", exc)
@@ -6649,17 +8326,19 @@ def register_high_level_tools(mcp, make_request):
             # ----- 3. Outline of the anchor file -----------------------
             outline_symbols: List[Dict[str, Any]] = []
             if anchor_file:
-                try:
-                    outline = await make_request("POST", "/read", params={
-                        "file_path": anchor_file,
-                        "mode": "outline",
-                        "with_line_numbers": True,
-                    })
-                    odata = outline.get("result") or {}
-                    outline_symbols = odata.get("symbols", []) or []
-                except Exception as exc:
-                    logger.debug("omni_context outline failed: %s", exc)
-                    outline_symbols = []
+                odata = _build_local_outline_payload(anchor_file)
+                if odata is None:
+                    try:
+                        outline = await make_request("POST", "/read", params={
+                            "file_path": anchor_file,
+                            "mode": "outline",
+                            "with_line_numbers": True,
+                        })
+                        odata = outline.get("result") or {}
+                    except Exception as exc:
+                        logger.debug("omni_context outline failed: %s", exc)
+                        odata = {}
+                outline_symbols = (odata or {}).get("symbols", []) or []
 
                 # Only emit outline when caller asked for the file
                 # explicitly OR when symbol mode needs it; the goal is
@@ -6684,7 +8363,8 @@ def register_high_level_tools(mcp, make_request):
                         section_added += 1
                     if section_added:
                         why.append(
-                            f"outline:file={anchor_file} ({section_added} symbols)"
+                            f"outline:file={anchor_file} ({section_added} symbols, "
+                            f"source={(odata or {}).get('source') or 'backend'})"
                         )
 
             # ----- 4. References (symbol mode) -------------------------
@@ -6728,13 +8408,13 @@ def register_high_level_tools(mcp, make_request):
             impact_payload: Dict[str, Any] = {}
             if symbol and symbol_resolution == "found":
                 try:
-                    risk_t = make_request("GET", "/graph/risk", params={
+                    risk_t = analysis_request("GET", "/graph/risk", params={
                         "symbol": symbol, "max_files": 200,
                     })
-                    impact_t = make_request("GET", "/graph/impact", params={
+                    impact_t = analysis_request("GET", "/graph/impact", params={
                         "symbol": symbol, "depth": 1, "max_files": 200,
                     })
-                    tests_t = make_request("GET", "/graph/related-tests", params={
+                    tests_t = analysis_request("GET", "/graph/related-tests", params={
                         "symbol": symbol, "max_files": 200,
                     })
                     import asyncio
@@ -6836,7 +8516,9 @@ def register_high_level_tools(mcp, make_request):
                     if diag_payload.get("ok"):
                         diagnostics_status = {
                             "ran": True,
-                            "source": "guard+lsp",
+                            "source": diag_payload.get("source") or "guard+lsp",
+                            "local_first": diag_payload.get("local_first"),
+                            "local_authority": diag_payload.get("local_authority"),
                             "tools_run": diag_payload.get("tools_run") or [],
                             "tools_skipped": diag_payload.get("tools_skipped") or [],
                             "total_count": diag_payload.get("total_count") or 0,
@@ -6976,7 +8658,7 @@ def register_high_level_tools(mcp, make_request):
                 for term in lex_terms:
                     try:
                         sym_hits, _t = await _run_symbol(
-                            make_request, term, None, max_results=3,
+                            analysis_request, term, None, max_results=3,
                         )
                     except Exception:
                         sym_hits = []
@@ -7039,7 +8721,7 @@ def register_high_level_tools(mcp, make_request):
 
                 # 8b. Semantic search.
                 try:
-                    srsp = await make_request("POST", "/search", json={
+                    srsp = await analysis_request("POST", "/search", json={
                         "query": task,
                         "search_type": "semantic",
                         "max_results": max_files * 2,
@@ -7244,6 +8926,8 @@ def register_high_level_tools(mcp, make_request):
                 "token_estimate": spent,
                 "next_actions": next_actions,
             }
+            if freshness_meta:
+                payload.update(freshness_meta)
             if note:
                 payload["note"] = note
 
@@ -7272,8 +8956,13 @@ def register_high_level_tools(mcp, make_request):
                 and not ctx.get("primary_symbols")
                 and (not anchor_resolved or anchor_file == file)
             ):
+                file_for_error = file or ""
+                safe_file = _safe_rejected_file_label(file_for_error)
+                safe_query = _safe_path_search_query(file_for_error)
+                safe_query_lit = json.dumps(safe_query, ensure_ascii=False)
                 payload["ok"] = False
-                payload["error"] = f"File not found: {file}"
+                payload["file"] = safe_file
+                payload["error"] = f"File not found: {safe_file}"
                 payload["file_status"] = "not_found"
                 # Drop memory rows so we don't surface unrelated lessons
                 # under a failed call. Keep the slot present for shape
@@ -7290,14 +8979,14 @@ def register_high_level_tools(mcp, make_request):
                 }
                 payload["next_actions"] = [
                     f"Check the workspace-relative path and retry: "
-                    f"omni_read(file='{file}', mode='outline', format='json').",
-                    f"omni_search(query='{file}', mode='text', format='json') "
+                    f"omni_read(file='{safe_file}', mode='outline', format='json').",
+                    f"omni_search(query={safe_query_lit}, mode='text', format='json') "
                     "to locate a similar file.",
                     "omni_context(symbol='<name>', task='<intent>', "
                     "format='json') if you can anchor on a symbol instead.",
                 ]
                 payload["why_selected"] = [
-                    f"file:{file} requested but could not be resolved "
+                    f"file:{safe_file} requested but could not be resolved "
                     "(omni_context refused to fabricate context)."
                 ]
 
@@ -7419,7 +9108,44 @@ def register_high_level_tools(mcp, make_request):
                 ensure_ascii=False, default=str,
             )
 
+        def _llm_edit_disabled() -> Tuple[bool, Dict[str, Any]]:
+            import os as _os
+
+            llm_mode = (
+                _os.environ.get("OMNICODE_LLM_MODE") or "off"
+            ).strip().lower()
+            router_raw = _os.environ.get("OMNICODE_LLM_ROUTER")
+            router_enabled = not (
+                router_raw is not None
+                and router_raw.strip().lower() in {"0", "false", "no", "off"}
+            )
+            disabled = llm_mode == "off" or not router_enabled
+            return disabled, {
+                "llm_mode": llm_mode,
+                "llm_router_enabled": router_enabled,
+            }
+
         try:
+            if action == "ai_edit":
+                disabled, llm_state = _llm_edit_disabled()
+                if disabled:
+                    payload = {
+                        "ok": False,
+                        "action": "ai_edit",
+                        "error": "LLM editing is disabled",
+                        "llm_disabled": True,
+                        **llm_state,
+                        "next_actions": [
+                            "Use omni_patch(action='preview', file='...', "
+                            "content='...', format='json') for a deterministic edit.",
+                            "Set OMNICODE_LLM_MODE to local/remote/auto and "
+                            "OMNICODE_LLM_ROUTER=true only if LLM editing is intended.",
+                        ],
+                    }
+                    if fmt == "json":
+                        return _alias_json(payload)
+                    return "ERROR ai_edit: LLM editing is disabled"
+
             # ---------------------------------------------------------------
             # Path guard — applies to every action that takes a file and may
             # touch disk (ai_edit / preview / validate / apply). Runs BEFORE
@@ -8370,6 +10096,18 @@ def register_high_level_tools(mcp, make_request):
                 module_mtime = _dt.datetime.fromtimestamp(
                     p.stat().st_mtime, tz=_dt.timezone.utc,
                 ).isoformat()
+                try:
+                    started_at = _dt.datetime.fromisoformat(
+                        str(_PROCESS_START_TIME).replace("Z", "+00:00")
+                    )
+                    module_mtime_dt = _dt.datetime.fromisoformat(module_mtime)
+                    if module_mtime_dt > started_at + _dt.timedelta(seconds=1):
+                        warnings_list.append(
+                            "module_mtime_after_process_start: source changed "
+                            "after MCP host started; restart the MCP host."
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    warnings_list.append(f"module_staleness_check_failed: {exc}")
         except Exception as exc:  # noqa: BLE001
             warnings_list.append(f"module_identity_failed: {exc}")
 
@@ -8500,6 +10238,272 @@ def register_high_level_tools(mcp, make_request):
                 f"backend root probe failed: {exc.__class__.__name__}"
             )
 
+        # workspace-bridge step 12: aggregate local sync state, cloud snapshot
+        # state, and HybridToolRouter decisions. This is deliberately
+        # best-effort: a workspace without sync configured should still have
+        # a clean omni_status response.
+        workspace_id = _os.environ.get("OMNICODE_WORKSPACE_ID") or None
+        executor_mode = _os.environ.get("OMNICODE_EXECUTOR_MODE") or "local"
+        backend_url = (
+            _os.environ.get("OMNICODE_REMOTE")
+            or _os.environ.get("OMNICODE_FASTAPI_BASE_URL")
+            or None
+        )
+        sync_payload: Dict[str, Any] = {
+            "configured": bool(workspace_id),
+            "workspace_id": workspace_id,
+            "executor_mode": executor_mode,
+            "backend_url": backend_url,
+            "cloud_available": bool(backend_url),
+            "cloud_unavailable": False,
+            "cloud_status_warning": None,
+            "local_revision": 0,
+            "accepted_revision": 0,
+            "indexed_revision": 0,
+            "manifest_present": False,
+            "pending_count": 0,
+            "pending_paths": [],
+            "snapshot_store": None,
+            "routes": {},
+            "warning": None,
+        }
+        try:
+            from dataclasses import asdict as _asdict
+
+            from omnicode_core.workspace import (
+                HybridToolRouter,
+                SyncRevisionState,
+            )
+
+            local_revision = 0
+            accepted_revision = 0
+            indexed_revision = 0
+            snapshot_status: Optional[Dict[str, Any]] = None
+            snapshot_store_source: Optional[str] = None
+            cloud_available = bool(backend_url)
+            cloud_status_warning: Optional[str] = None
+
+            if workspace_id:
+                try:
+                    from omnicode_core.workspace.local import LocalWorkspace
+                    from omnicode_core.workspace.manifest import (
+                        LocalManifest,
+                        default_manifest_path,
+                    )
+
+                    local_ws = LocalWorkspace(root=ws_root, workspace_id=workspace_id)
+                    manifest_path = default_manifest_path(workspace_id)
+                    sync_payload["manifest_path"] = str(manifest_path)
+                    if manifest_path.exists():
+                        manifest = LocalManifest.load(workspace=local_ws)
+                        local_revision = int(manifest.local_revision)
+                        accepted_revision = int(
+                            manifest.data.get("last_accepted_revision", 0)
+                        )
+                        indexed_revision = int(
+                            manifest.data.get("last_indexed_revision", 0)
+                        )
+                        pending_entries = manifest.data.get("pending") or []
+                        if isinstance(pending_entries, list):
+                            sync_payload["pending_count"] = len(pending_entries)
+                            sync_payload["pending_paths"] = [
+                                str(row.get("path"))
+                                for row in pending_entries
+                                if isinstance(row, dict) and row.get("path")
+                            ][:20]
+                        sync_payload["manifest_present"] = True
+                except Exception as exc:  # noqa: BLE001
+                    sync_payload["manifest_warning"] = (
+                        f"{exc.__class__.__name__}: {exc}"
+                    )
+
+                if backend_url and executor_mode in {"hybrid", "remote"}:
+                    try:
+                        raw_status = await make_request(
+                            "GET",
+                            "/sync/status",
+                            params={"workspace_id": workspace_id},
+                        )
+                        cloud_status = (
+                            raw_status.get("result", raw_status)
+                            if isinstance(raw_status, dict)
+                            else {}
+                        )
+                        backend_error = _backend_error_message(cloud_status)
+                        if backend_error:
+                            cloud_available = False
+                            cloud_status_warning = backend_error
+                        elif isinstance(cloud_status, dict) and cloud_status:
+                            accepted_revision = max(
+                                accepted_revision,
+                                int(cloud_status.get("accepted_revision") or 0),
+                            )
+                            indexed_revision = max(
+                                indexed_revision,
+                                int(cloud_status.get("indexed_revision") or 0),
+                            )
+                            cloud_snapshot = cloud_status.get("snapshot_store")
+                            if isinstance(cloud_snapshot, dict):
+                                snapshot_status = dict(cloud_snapshot)
+                                snapshot_store_source = "cloud"
+                                accepted_revision = max(
+                                    accepted_revision,
+                                    int(
+                                        snapshot_status.get("accepted_revision")
+                                        or snapshot_status.get("latest_revision")
+                                        or 0
+                                    ),
+                                )
+                                indexed_revision = max(
+                                    indexed_revision,
+                                    int(
+                                        snapshot_status.get("indexed_revision")
+                                        or 0
+                                    ),
+                                )
+                    except Exception as exc:  # noqa: BLE001
+                        cloud_available = False
+                        cloud_status_warning = f"{exc.__class__.__name__}: {exc}"
+
+                try:
+                    from omnicode_core.workspace.snapshot_store import (
+                        CloudSnapshotStore,
+                    )
+
+                    local_snapshot = CloudSnapshotStore().status(workspace_id)
+                    if snapshot_status is None:
+                        snapshot_status = local_snapshot
+                        snapshot_store_source = "local"
+                        accepted_revision = max(
+                            accepted_revision,
+                            int(local_snapshot.get("accepted_revision", 0)),
+                        )
+                        indexed_revision = max(
+                            indexed_revision,
+                            int(local_snapshot.get("indexed_revision", 0)),
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    sync_payload["snapshot_warning"] = (
+                        f"{exc.__class__.__name__}: {exc}"
+                    )
+
+            sync_state = SyncRevisionState(
+                local_revision=local_revision,
+                accepted_revision=accepted_revision,
+                indexed_revision=indexed_revision,
+                cloud_available=cloud_available,
+            )
+            indexed_file_count = 0
+            if isinstance(snapshot_status, dict):
+                indexed_file_count = int(
+                    snapshot_status.get("files")
+                    or snapshot_status.get("file_count")
+                    or snapshot_status.get("indexed_files")
+                    or 0
+                )
+            index_fresh = (
+                bool(workspace_id)
+                and cloud_available
+                and accepted_revision > 0
+                and indexed_revision >= accepted_revision
+            )
+            index_readiness = {
+                "text_index_ready": bool(indexed_file_count and index_fresh),
+                "symbol_index_ready": bool(indexed_file_count and index_fresh),
+                "graph_index_ready": False,
+                "fresh": bool(index_fresh),
+                "indexed_files": indexed_file_count,
+                "accepted_revision": accepted_revision,
+                "indexed_revision": indexed_revision,
+                "graph_index_reason": (
+                    "graph bootstrap is not persisted yet; omni_impact may "
+                    "run a bounded live graph scan and report caveats."
+                ),
+            }
+            router = HybridToolRouter(executor=executor_mode)
+            route_tools = (
+                "omni_read", "omni_patch", "omni_diagnostics",
+                "omni_search", "omni_context", "omni_impact",
+                "omni_status",
+            )
+            sync_payload.update(
+                {
+                    "local_revision": local_revision,
+                    "accepted_revision": accepted_revision,
+                    "indexed_revision": indexed_revision,
+                    "cloud_available": cloud_available,
+                    "cloud_unavailable": not cloud_available,
+                    "cloud_status_warning": cloud_status_warning,
+                    "snapshot_store": snapshot_status,
+                    "snapshot_store_source": snapshot_store_source,
+                    "index_readiness": index_readiness,
+                    "routes": {
+                        tool: _asdict(router.route(tool, sync_state=sync_state))
+                        for tool in route_tools
+                    },
+                }
+            )
+            if cloud_status_warning:
+                sync_payload["warning"] = (
+                    "cloud backend unavailable: " + cloud_status_warning
+                )
+                warnings_list.append(
+                    "cloud_unavailable:" + cloud_status_warning
+                )
+        except Exception as exc:  # noqa: BLE001
+            sync_payload["warning"] = f"{exc.__class__.__name__}: {exc}"
+
+        capability_contract: Dict[str, Any]
+        try:
+            from omnicode_core.config.capabilities import (
+                build_capability_contract,
+            )
+            from omnicode_core.config.runtime import RuntimeConfig
+
+            runtime_for_status = RuntimeConfig(
+                workspace_root=ws_root,
+                workspace_id=workspace_id or ws_root.name or "workspace",
+                executor=executor_mode,
+                backend_url=backend_url,
+                llm_mode=_os.environ.get("OMNICODE_LLM_MODE") or "off",
+                embedding_mode=(
+                    _os.environ.get("OMNICODE_EMBEDDING_MODE") or "cloud"
+                ),
+                diagnostics_mode=(
+                    _os.environ.get("OMNICODE_DIAGNOSTICS_MODE")
+                    or "local-first"
+                ),
+            )
+            capability_contract = build_capability_contract(
+                runtime_for_status,
+            ).to_dict()
+        except Exception as exc:  # noqa: BLE001
+            capability_contract = {
+                "warning": f"{exc.__class__.__name__}: {exc}",
+            }
+
+        agent_auto: Dict[str, Any]
+        try:
+            from omnicode_core.config.runtime import RuntimeConfig
+            from omnicode_core.workspace.agent_auto import decide_agent_auto
+
+            runtime_for_agent = RuntimeConfig(
+                workspace_root=ws_root,
+                workspace_id=workspace_id or ws_root.name or "workspace",
+                executor=executor_mode,
+                backend_url=backend_url,
+                sync_mode=_os.environ.get("OMNICODE_SYNC_MODE") or "smart",
+                agent_mode=_os.environ.get("OMNICODE_AGENT_MODE") or "auto",
+                debounce_ms=int(
+                    _os.environ.get("OMNICODE_AGENT_DEBOUNCE_MS") or "1200"
+                ),
+            )
+            agent_auto = decide_agent_auto(runtime_for_agent).to_dict()
+        except Exception as exc:  # noqa: BLE001
+            agent_auto = {
+                "warning": f"{exc.__class__.__name__}: {exc}",
+            }
+
         payload: Dict[str, Any] = {
             "ok": not warnings_list,
             "pid": _os.getpid(),
@@ -8517,13 +10521,17 @@ def register_high_level_tools(mcp, make_request):
             "tools_with_json_stamp": list(_TOOLS_WITH_JSON_STAMP),
             "workspace_root": str(ws_root),
             "workspace_root_source": ws_source,
-            "workspace_id": _os.environ.get("OMNICODE_WORKSPACE_ID") or None,
-            "executor_mode": _os.environ.get("OMNICODE_EXECUTOR_MODE") or None,
+            "workspace_id": workspace_id,
+            "executor_mode": executor_mode,
+            "backend_url": backend_url,
             "local_workspace_root": (
                 _os.environ.get("OMNICODE_WORKSPACE_ROOT")
                 or _os.environ.get("OMNICODE_WORKSPACE")
                 or None
             ),
+            "sync": sync_payload,
+            "capability_contract": capability_contract,
+            "agent_auto": agent_auto,
             "cwd": str(cwd_path),
             "workspace_root_matches_cwd": ws_root == cwd_path,
             "backend_workspace_root": backend_workspace_root,

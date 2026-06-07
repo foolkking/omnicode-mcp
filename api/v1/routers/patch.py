@@ -159,6 +159,17 @@ async def apply_patch(
             metadata=request.metadata,
         )
 
+    if not result.success:
+        message = result.message or "Patch apply failed"
+        status_code = 409 if "conflict" in message.lower() else 400
+        metrics.inc("patch_apply_total", labels={"outcome": "error"})
+        audit.emit(
+            actor="anonymous", action="POST /patch/apply",
+            target=request.file_path, ip=actor_ip,
+            outcome="error", extra=message[:200],
+        )
+        return create_error_response(message, status_code=status_code)
+
     response_payload = {
         "success": result.success,
         "message": result.message,

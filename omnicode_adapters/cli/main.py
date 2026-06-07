@@ -32,6 +32,32 @@ def main():
     # --- index ---
     idx_parser = subparsers.add_parser("index", help="Run incremental index")
     idx_parser.add_argument("--force", action="store_true", help="Force full rebuild")
+    idx_parser.add_argument(
+        "--background",
+        action="store_true",
+        help="Start snapshot indexing in the background when supported.",
+    )
+    idx_parser.add_argument(
+        "--backend-url",
+        default=None,
+        help="FastAPI backend URL to index (default: http://127.0.0.1:6789).",
+    )
+    idx_parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Shortcut for --backend-url http://127.0.0.1:<port>.",
+    )
+    idx_parser.add_argument(
+        "--workspace",
+        default=None,
+        help="Workspace root to register before indexing.",
+    )
+    idx_parser.add_argument(
+        "--workspace-id",
+        default=None,
+        help="Logical workspace id to index.",
+    )
 
     # --- status ---
     subparsers.add_parser("status", help="Show index and service status")
@@ -41,7 +67,7 @@ def main():
     mcp_parser.add_argument(
         "--transport",
         choices=("stdio", "sse", "streamable-http"),
-        default="stdio",
+        default=None,
         help="MCP transport (default: stdio).",
     )
     mcp_parser.add_argument(
@@ -89,8 +115,32 @@ def main():
     mcp_parser.add_argument(
         "--executor",
         choices=("local", "remote", "hybrid", "auto"),
-        default="remote",
+        default=None,
         help="Execution locality policy for workspace-aware MCP calls.",
+    )
+    mcp_parser.add_argument(
+        "--sync-mode",
+        choices=("off", "watch", "smart", "strict"),
+        default=None,
+        help="Local sync policy for hybrid MCP sessions.",
+    )
+    mcp_parser.add_argument(
+        "--agent",
+        choices=("auto", "external", "off"),
+        default=None,
+        help="Embedded local watcher policy for hybrid MCP sessions.",
+    )
+    mcp_parser.add_argument(
+        "--llm-mode",
+        choices=("off", "local", "remote", "auto"),
+        default=None,
+        help="LLM capability policy exposed to MCP tools.",
+    )
+    mcp_parser.add_argument(
+        "--embedding-mode",
+        choices=("off", "local", "cloud"),
+        default=None,
+        help="Embedding capability policy for local/hybrid search.",
     )
 
     # --- serve ---
@@ -100,6 +150,34 @@ def main():
     serve_parser.add_argument("--host", default="127.0.0.1", help="Bind host")
     serve_parser.add_argument("--port", type=int, default=6789, help="Bind port")
     serve_parser.add_argument("--reload", action="store_true", help="Auto-reload on file changes")
+    serve_parser.add_argument(
+        "--state-dir",
+        default=None,
+        help="Root directory for server state such as cloud sync snapshots.",
+    )
+    serve_parser.add_argument(
+        "--workspace-store",
+        default=None,
+        help="Explicit cloud workspace snapshot store root.",
+    )
+    serve_parser.add_argument(
+        "--content-store",
+        choices=("object",),
+        default=None,
+        help="Cloud sync content store backend. Currently only 'object'.",
+    )
+    serve_parser.add_argument(
+        "--materialize-mirror",
+        choices=("true", "false"),
+        default=None,
+        help="Write a readonly mirror tree beside the object store.",
+    )
+    serve_parser.add_argument(
+        "--mirror-readonly",
+        choices=("true", "false"),
+        default=None,
+        help="Mark materialized mirror files readonly after sync writes.",
+    )
     serve_parser.add_argument(
         "--mode",
         choices=("local", "cloud", "hybrid", "local-readonly"),
@@ -200,7 +278,14 @@ def main():
         run()
     elif args.command == "index":
         from omnicode_adapters.cli.commands.index_cmd import run
-        run(force=args.force)
+        run(
+            force=args.force,
+            background=args.background,
+            backend_url=args.backend_url,
+            port=args.port,
+            workspace=args.workspace,
+            workspace_id=args.workspace_id,
+        )
     elif args.command == "status":
         from omnicode_adapters.cli.commands.status_cmd import run
         run()
@@ -217,6 +302,10 @@ def main():
             workspace=args.workspace,
             workspace_id=args.workspace_id,
             executor=args.executor,
+            sync_mode=args.sync_mode,
+            agent=args.agent,
+            llm_mode=args.llm_mode,
+            embedding_mode=args.embedding_mode,
         )
     elif args.command == "serve":
         from omnicode_adapters.cli.commands.serve_cmd import run
@@ -226,6 +315,11 @@ def main():
             port=args.port,
             reload=args.reload,
             mode=args.mode,
+            state_dir=args.state_dir,
+            workspace_store=args.workspace_store,
+            content_store=args.content_store,
+            materialize_mirror=args.materialize_mirror,
+            mirror_readonly=args.mirror_readonly,
         )
     elif args.command == "dev":
         from omnicode_adapters.cli.commands.serve_cmd import run

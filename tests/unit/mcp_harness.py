@@ -28,7 +28,7 @@ class _MCPStub:
 
 
 def run(coro: Any) -> Any:
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 def build_tools_from_request(
@@ -63,7 +63,7 @@ def build_tools(
             return {"success": True, "result": payload}
         return {"result": payload}
 
-    tools = build_tools_from_request(make_request)
+    tools: Dict[str, Any] = build_tools_from_request(make_request)
     tools["__captured__"] = captured
     return tools
 

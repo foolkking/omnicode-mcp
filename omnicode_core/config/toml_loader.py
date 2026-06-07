@@ -71,7 +71,27 @@ _SECTION_KEY_MAP: Dict[tuple[str, str], str] = {
     ("server", "port"): "API_PORT",
     ("server", "auth"): "OMNICODE_MCP_REQUIRE_AUTH",
     ("workspace", "root"): "WORKING_DIR",
+    ("workspace", "id"): "OMNICODE_WORKSPACE_ID",
     ("workspace", "read_only"): "OMNICODE_READ_ONLY",
+    ("mcp", "executor"): "OMNICODE_EXECUTOR_MODE",
+    ("mcp", "transport"): "OMNICODE_MCP_TRANSPORT",
+    ("cloud", "url"): "OMNICODE_REMOTE",
+    ("cloud", "auth_mode"): "OMNICODE_CLOUD_AUTH_MODE",
+    ("cloud", "token_env"): "OMNICODE_CLOUD_TOKEN_ENV",
+    ("sync", "mode"): "OMNICODE_SYNC_MODE",
+    ("sync", "agent"): "OMNICODE_AGENT_MODE",
+    ("sync", "debounce_ms"): "OMNICODE_AGENT_DEBOUNCE_MS",
+    ("sync", "max_file_bytes"): "OMNICODE_SYNC_MAX_FILE_BYTES",
+    ("sync", "batch_max_files"): "OMNICODE_SYNC_BATCH_MAX_FILES",
+    ("sync", "batch_max_bytes"): "OMNICODE_SYNC_BATCH_MAX_BYTES",
+    ("storage", "state_dir"): "OMNICODE_STATE_DIR",
+    ("storage", "workspace_store"): "OMNICODE_WORKSPACE_STORE",
+    ("storage", "content_store"): "OMNICODE_CONTENT_STORE",
+    ("storage", "materialize_mirror"): "OMNICODE_MATERIALIZE_MIRROR",
+    ("storage", "mirror_readonly"): "OMNICODE_MIRROR_READONLY",
+    ("capabilities", "llm_mode"): "OMNICODE_LLM_MODE",
+    ("capabilities", "embedding_mode"): "OMNICODE_EMBEDDING_MODE",
+    ("capabilities", "diagnostics_mode"): "OMNICODE_DIAGNOSTICS_MODE",
     ("features", "web_console"): "OMNICODE_WEB_CONSOLE",
     ("features", "mcp_http"): "OMNICODE_MCP_HTTP",
     ("features", "llm_router"): "OMNICODE_LLM_ROUTER",
@@ -94,6 +114,23 @@ _SECTION_KEY_MAP: Dict[tuple[str, str], str] = {
     ("search", "reranker"): "OMNICODE_RERANKER",
     ("search", "reranker_model"): "OMNICODE_RERANKER_MODEL",
 }
+
+
+def _tomllib_module():
+    try:
+        import tomllib  # Python 3.11+
+
+        return tomllib
+    except ImportError:  # pragma: no cover - codebase pins 3.11
+        try:
+            import tomli as tomllib  # type: ignore[import-not-found,no-redef]
+
+            return tomllib
+        except ImportError:
+            logger.warning(
+                "TOML loader: tomllib/tomli not available; skipping omnicode.toml."
+            )
+            return None
 
 
 def _stringify(value: Any) -> str:
@@ -129,6 +166,25 @@ def _resolve_path(start: Optional[str | Path] = None) -> Optional[Path]:
     return cwd_file if cwd_file.is_file() else None
 
 
+def read_toml_config(start: Optional[str | Path] = None) -> Dict[str, Any]:
+    """Read the active TOML file without mutating the process env."""
+    tomllib = _tomllib_module()
+    if tomllib is None:
+        return {}
+
+    path = _resolve_path(start)
+    if path is None:
+        return {}
+
+    try:
+        with path.open("rb") as f:
+            data = tomllib.load(f)
+    except Exception as exc:
+        logger.warning("TOML loader: failed to parse %s — %s", path, exc)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def load_toml_config(start: Optional[str | Path] = None) -> Dict[str, str]:
     """Read the TOML file and apply env vars (using ``setdefault``).
 
@@ -139,27 +195,13 @@ def load_toml_config(start: Optional[str | Path] = None) -> Dict[str, str]:
     actually applied, useful for diagnostics. Empty when no file found
     or when ``tomllib`` isn't available (Python < 3.11).
     """
-    try:
-        import tomllib  # Python 3.11+
-    except ImportError:  # pragma: no cover - codebase pins 3.11
-        try:
-            import tomli as tomllib  # type: ignore[no-redef]
-        except ImportError:
-            logger.warning(
-                "TOML loader: tomllib/tomli not available; skipping omnicode.toml."
-            )
-            return {}
-
     path = _resolve_path(start)
     if path is None:
         logger.debug("TOML loader: no omnicode.toml found.")
         return {}
 
-    try:
-        with path.open("rb") as f:
-            data = tomllib.load(f)
-    except Exception as exc:
-        logger.warning("TOML loader: failed to parse %s — %s", path, exc)
+    data = read_toml_config(start=start)
+    if not data:
         return {}
 
     applied: Dict[str, str] = {}
@@ -192,4 +234,4 @@ def load_toml_config(start: Optional[str | Path] = None) -> Dict[str, str]:
     return applied
 
 
-__all__ = ["load_toml_config"]
+__all__ = ["load_toml_config", "read_toml_config"]

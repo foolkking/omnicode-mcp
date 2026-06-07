@@ -83,6 +83,12 @@ ignore = [
     "E701",  # multiple statements on one line — used for short guard returns
 ]
 
+[tool.pytest.ini_options]
+markers = [
+    "integration: tests that exercise integration-level API behavior",
+    "large_repo: live large-repository benchmark tests; not part of the default unit suite",
+]
+
 [tool.mypy]
 python_version = "3.11"
 warn_return_any = true

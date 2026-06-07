@@ -161,6 +161,106 @@ because `/health` is on the public allow-list.
 
 ---
 
+### Hybrid MCP + cloud sync
+
+Hybrid mode keeps file authority local while allowing cloud compute for
+search, context, and impact analysis. The local MCP process owns
+`omni_read` and `omni_patch`; cloud-backed tools run only after
+`/sync/barrier` confirms the indexed revision is current.
+
+Local `omnicode.toml`:
+
+```toml
+[workspace]
+root = "C:/repo/project-a"
+id = "project-a"
+
+[mcp]
+executor = "hybrid"
+transport = "stdio"
+
+[cloud]
+url = "https://omnicode.example.com"
+auth_mode = "token"
+token_env = "OMNICODE_API_KEY"
+
+[sync]
+mode = "smart"
+agent = "auto"
+debounce_ms = 1200
+max_file_bytes = 1000000
+batch_max_files = 25
+batch_max_bytes = 250000
+
+[capabilities]
+llm_mode = "off"
+embedding_mode = "cloud"
+diagnostics_mode = "local-first"
+```
+
+Cloud side must register the same workspace id:
+
+```bash
+curl -X POST https://omnicode.example.com/workspaces \
+  -H "X-API-Key: $OMNICODE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "workspace_id": "project-a",
+    "name": "project-a",
+    "path": "/srv/omnicode/workspaces/project-a-cache",
+    "set_active": true
+  }'
+```
+
+Run local MCP:
+
+```bash
+omnicode mcp \
+  --workspace C:/repo/project-a \
+  --workspace-id project-a \
+  --executor hybrid \
+  --backend-url https://omnicode.example.com \
+  --backend-token "$OMNICODE_API_KEY" \
+  --sync-mode smart \
+  --agent auto \
+  --embedding-mode cloud \
+  --diagnostics-mode local-first
+```
+
+The sync protocol uses:
+
+- `POST /sync/batch` for accepted file/deletion batches.
+- `GET /sync/status` for `accepted_revision`, `indexed_revision`, and
+  snapshot counts.
+- `POST /sync/barrier` before cloud `omni_search`, `omni_context`, or
+  `omni_impact` execution.
+
+Verification:
+
+```bash
+curl -H "X-API-Key: $OMNICODE_API_KEY" \
+     -H "X-Omnicode-Workspace: project-a" \
+     https://omnicode.example.com/sync/status
+```
+
+Then call MCP `omni_status()`. A healthy hybrid setup reports:
+
+- `sync.configured = true`
+- `sync.routes.omni_read.local_authority = true`
+- `sync.routes.omni_patch.local_authority = true`
+- `sync.routes.omni_search.requires_barrier = true`
+- `capability_contract.embedding.target = "cloud"` with
+  `available = true` only when the cloud backend URL is configured
+- `agent_auto.target = "embedded"` and `should_start = true` when
+  `agent = "auto"`, `executor = "hybrid"`, sync is enabled, and cloud is
+  configured
+
+Cloud storage for accepted sync snapshots lives under
+`~/.omnicode/cloud-sync/workspaces/<workspace_id>/`. It is
+content-addressed and stores only workspace-relative paths in the index.
+
+---
+
 ### Pattern B — Docker Compose with Caddy
 
 Suitable when your VM already runs other Docker workloads or you

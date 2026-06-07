@@ -77,7 +77,7 @@ def _build_tools(routes: Dict[str, Any]) -> Dict[str, Callable[..., Any]]:
 
 
 def _run(coro: Any) -> Any:
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 # ---------------------------------------------------------------------------

@@ -19,9 +19,19 @@ port = 6789
 auth = false              # set true to refuse anonymous MCP-over-HTTP
 
 [workspace]
+id = "repo-a"
 # Absolute path to the codebase. Leave commented out to use ``$PWD``.
 # root = "/srv/omnicode/workspaces/project-a"
 read_only = false
+
+[mcp]
+executor = "hybrid"          # "local" | "hybrid" | "remote" | "auto"
+transport = "stdio"
+
+[cloud]
+# url = "http://cloud:6789"
+auth_mode = "off"            # "off" | "token"
+token_env = "OMNICODE_API_KEY"
 
 [features]
 web_console = true
@@ -42,6 +52,29 @@ embedding_model = "sentence-transformers/all-MiniLM-L6-v2"
 # queries. Default model: BAAI/bge-reranker-v2-m3 (~560 MB on first run).
 reranker = false
 # reranker_model = "BAAI/bge-reranker-v2-m3"
+
+[sync]
+mode = "smart"               # "off" | "watch" | "smart" | "strict"
+agent = "auto"               # "auto" | "external" | "off"
+debounce_ms = 1200
+max_file_bytes = 1000000
+batch_max_files = 25
+batch_max_bytes = 250000
+
+[capabilities]
+llm_mode = "off"             # "off" | "local" | "remote" | "auto"
+embedding_mode = "cloud"     # "off" | "local" | "cloud"
+diagnostics_mode = "local-first"
+
+[ignore]
+paths = [
+  ".git/",
+  ".data/",
+  "node_modules/",
+  ".venv/",
+  "dist/",
+  "build/",
+]
 
 [security]
 # Easiest single-key auth: set the legacy header. Anyone presenting
