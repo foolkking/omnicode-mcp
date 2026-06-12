@@ -68,8 +68,30 @@ _LEGACY_DIRS: tuple[str, ...] = (
 DEFAULT_SHARD_ID = "default"
 
 
-def _shards_root(working_dir: str | os.PathLike) -> Path:
+def _legacy_shards_root(working_dir: str | os.PathLike) -> Path:
     return Path(working_dir) / ".data" / "shards"
+
+
+def _shards_root(working_dir: str | os.PathLike) -> Path:
+    explicit = os.environ.get("OMNICODE_SEARCH_STORE", "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    content_store = os.environ.get("OMNICODE_CONTENT_STORE", "").strip()
+    if content_store:
+        return Path(content_store).expanduser() / "search-indexes"
+    state_dir = os.environ.get("OMNICODE_STATE_DIR", "").strip()
+    if state_dir:
+        return Path(state_dir).expanduser() / "search-indexes"
+    return _legacy_shards_root(working_dir)
+
+
+def _uses_external_shards_root(working_dir: str | os.PathLike) -> bool:
+    try:
+        return _shards_root(working_dir).resolve() != _legacy_shards_root(
+            working_dir
+        ).resolve()
+    except OSError:
+        return True
 
 
 def resolve_shard_dir(
@@ -94,6 +116,13 @@ def auto_migrate_legacy(working_dir: str | os.PathLike) -> dict:
     files OR when no legacy artefacts exist.
     """
     wd = Path(working_dir)
+    if _uses_external_shards_root(wd):
+        return {
+            "migrated_files": 0,
+            "migrated_dirs": 0,
+            "skipped": "external shard root configured",
+            "default_shard_dir": str(_shards_root(wd) / DEFAULT_SHARD_ID),
+        }
     legacy_dir = wd / ".data"
     if not legacy_dir.is_dir():
         return {"migrated_files": 0, "migrated_dirs": 0, "skipped": "no .data"}

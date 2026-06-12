@@ -45,8 +45,8 @@ class RuntimeConfig:
     agent_mode: str = "auto"
     debounce_ms: int = 1200
     max_file_bytes: int = 1_000_000
-    batch_max_files: int = 25
-    batch_max_bytes: int = 250_000
+    batch_max_files: int = 100
+    batch_max_bytes: int = 1_000_000
     llm_mode: str = "off"
     embedding_mode: str = "cloud"
     diagnostics_mode: str = "local-first"
@@ -160,7 +160,7 @@ def build_runtime_config(
 ) -> RuntimeConfig:
     """Build a RuntimeConfig with CLI > env > TOML > defaults precedence."""
     cli = dict(cli_overrides or {})
-    env = environ or os.environ
+    env = os.environ if environ is None else environ
     toml = read_toml_config(start=start)
     sources: dict[str, str] = {}
 
@@ -275,21 +275,21 @@ def build_runtime_config(
 
     batch_max_files = _coerce_int(_select(
         key="batch_max_files",
-        default=25,
+        default=100,
         toml_value=_toml_get(toml, "sync", "batch_max_files"),
         env_value=_env_get(env, "OMNICODE_SYNC_BATCH_MAX_FILES"),
         cli_value=cli.get("batch_max_files"),
         sources=sources,
-    ), default=25, field_name="batch_max_files")
+    ), default=100, field_name="batch_max_files")
 
     batch_max_bytes = _coerce_int(_select(
         key="batch_max_bytes",
-        default=250_000,
+        default=1_000_000,
         toml_value=_toml_get(toml, "sync", "batch_max_bytes"),
         env_value=_env_get(env, "OMNICODE_SYNC_BATCH_MAX_BYTES"),
         cli_value=cli.get("batch_max_bytes"),
         sources=sources,
-    ), default=250_000, field_name="batch_max_bytes")
+    ), default=1_000_000, field_name="batch_max_bytes")
 
     llm_mode = _validate_choice(str(_select(
         key="llm_mode",

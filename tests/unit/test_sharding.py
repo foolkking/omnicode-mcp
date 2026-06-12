@@ -38,6 +38,65 @@ def test_resolve_shard_dir_idempotent(tmp_path: Path):
     assert Path(a).is_dir()
 
 
+def test_resolve_shard_dir_uses_state_dir_when_configured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    workspace = tmp_path / "repo"
+    state_dir = tmp_path / "state"
+    workspace.mkdir()
+    monkeypatch.setenv("OMNICODE_STATE_DIR", str(state_dir))
+    monkeypatch.delenv("OMNICODE_CONTENT_STORE", raising=False)
+    monkeypatch.delenv("OMNICODE_SEARCH_STORE", raising=False)
+
+    out = Path(resolve_shard_dir(workspace, "wk_state"))
+
+    assert out == state_dir / "search-indexes" / "wk_state"
+    assert out.is_dir()
+    assert not (workspace / ".data" / "shards").exists()
+    assert list(list_shards(workspace)) == ["wk_state"]
+
+
+def test_resolve_shard_dir_prefers_explicit_search_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    workspace = tmp_path / "repo"
+    search_store = tmp_path / "custom-search"
+    workspace.mkdir()
+    monkeypatch.setenv("OMNICODE_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("OMNICODE_CONTENT_STORE", str(tmp_path / "content"))
+    monkeypatch.setenv("OMNICODE_SEARCH_STORE", str(search_store))
+
+    out = Path(resolve_shard_dir(workspace, "wk_search"))
+
+    assert out == search_store / "wk_search"
+    assert out.is_dir()
+
+
+def test_auto_migrate_skips_when_external_state_dir_configured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    workspace = tmp_path / "repo"
+    legacy = workspace / ".data"
+    legacy.mkdir(parents=True)
+    (legacy / "vector_store.faiss").write_bytes(b"FAKEFAISS")
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("OMNICODE_STATE_DIR", str(state_dir))
+    monkeypatch.delenv("OMNICODE_SEARCH_STORE", raising=False)
+    monkeypatch.delenv("OMNICODE_CONTENT_STORE", raising=False)
+
+    report = auto_migrate_legacy(workspace)
+
+    assert report["skipped"] == "external shard root configured"
+    assert (legacy / "vector_store.faiss").read_bytes() == b"FAKEFAISS"
+    assert report["default_shard_dir"] == str(
+        state_dir / "search-indexes" / DEFAULT_SHARD_ID
+    )
+    assert not (state_dir / "search-indexes").exists()
+
+
 def test_auto_migrate_legacy_moves_known_files(tmp_path: Path):
     legacy = tmp_path / ".data"
     legacy.mkdir()

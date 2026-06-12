@@ -274,11 +274,11 @@ def run_agent(
         excludes=tuple(excludes),
         batch_max_files=_positive_int_from_env(
             "OMNICODE_AGENT_BATCH_MAX_FILES",
-            25,
+            100,
         ),
         batch_max_bytes=_positive_int_from_env(
             "OMNICODE_AGENT_BATCH_MAX_BYTES",
-            250_000,
+            1_000_000,
         ),
     )
     if not client.health():

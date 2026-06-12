@@ -94,7 +94,7 @@ def _build_tools(routes: Dict[str, Any]) -> Dict[str, Callable[..., Any]]:
 
 
 def _run(coro: Any) -> Any:
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 def _now_iso() -> str:
@@ -329,6 +329,54 @@ def test_memory_search_redacts_absolute_paths(
     assert "omnicode_adapters/mcp_server/high_level_tools.py" in row["content"]
     assert "<absolute-path>" in serialized
     assert row["related_files"][0] == "omnicode_adapters/mcp_server/high_level_tools.py"
+
+
+def test_memory_advisory_redacts_absolute_paths_in_echo_and_synthesis(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    inside = root / "omnicode_adapters" / "mcp_server" / "high_level_tools.py"
+    inside.parent.mkdir(parents=True)
+    inside.write_text("# marker\n", encoding="utf-8")
+    outside = tmp_path / "outside" / "secret.py"
+    outside.parent.mkdir()
+    outside.write_text("# secret\n", encoding="utf-8")
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(root))
+
+    memories = [
+        {
+            "id": 31,
+            "category": "mistake",
+            "content": f"Check {inside} and never leak {outside}.",
+            "importance": 5,
+            "tags": ["paths"],
+            "timestamp": _now_iso(),
+            "_score": 0.95,
+        }
+    ]
+    tools = _build_tools(_advisory_routes(memories))
+    raw = _run(tools["omni_memory"](
+        action="advisory",
+        file=str(inside),
+        task=f"Review {outside} before editing",
+        format="json",
+    ))
+    payload = json.loads(raw)
+    serialized = json.dumps(payload, ensure_ascii=False)
+
+    assert payload["ok"] is True
+    assert str(root) not in serialized
+    assert str(outside) not in serialized
+    assert payload["file"] == "omnicode_adapters/mcp_server/high_level_tools.py"
+    assert "<absolute-path>" in payload["task"]
+    assert "omnicode_adapters/mcp_server/high_level_tools.py" in payload["advisory_text"]
+    assert "<absolute-path>" in payload["advisory_text"]
+    assert payload["why_recalled"] == [
+        "file:omnicode_adapters/mcp_server/high_level_tools.py",
+        "task:Review <absolute-path> before editing",
+    ]
 
 
 # ---------------------------------------------------------------------------

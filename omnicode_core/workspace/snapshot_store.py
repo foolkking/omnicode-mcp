@@ -374,15 +374,28 @@ class CloudSnapshotStore:
             delete_count=len(tombstones),
         )
 
-    def mark_indexed(self, *, workspace_id: str, revision: int) -> int:
+    def mark_indexed(
+        self,
+        *,
+        workspace_id: str,
+        revision: int,
+        semantic_coverage: Optional[str] = None,
+    ) -> int:
         workspace = _validate_workspace_id(workspace_id)
         with self._workspace_lock(workspace):
             return self._mark_indexed_unlocked(
                 workspace_id=workspace,
                 revision=revision,
+                semantic_coverage=semantic_coverage,
             )
 
-    def _mark_indexed_unlocked(self, *, workspace_id: str, revision: int) -> int:
+    def _mark_indexed_unlocked(
+        self,
+        *,
+        workspace_id: str,
+        revision: int,
+        semantic_coverage: Optional[str] = None,
+    ) -> int:
         workspace = _validate_workspace_id(workspace_id)
         index = self._load_index(workspace)
         accepted = int(index.get("accepted_revision", index.get("latest_revision", 0)))
@@ -393,6 +406,23 @@ class CloudSnapshotStore:
         indexed = max(int(index.get("indexed_revision", 0)), revision)
         index["indexed_revision"] = indexed
         index["workspace_id"] = workspace
+        coverage = (semantic_coverage or "").strip()
+        if coverage:
+            if coverage in {
+                "initial_sync_exact_only",
+                "initial_sync_large_repo_exact_only",
+                "exact_only_initial_sync",
+            }:
+                index["semantic_initial_exact_only"] = True
+                index["semantic_index_coverage"] = "exact_only_initial_sync"
+            elif index.get("semantic_initial_exact_only"):
+                if coverage == "semantic_full":
+                    index["semantic_initial_exact_only"] = False
+                    index["semantic_index_coverage"] = "semantic_full"
+                else:
+                    index["semantic_index_coverage"] = "partial_after_exact_only"
+            elif coverage not in {"unchanged", "deletes_only"}:
+                index["semantic_index_coverage"] = coverage
         self._save_index(workspace, index)
         return indexed
 
@@ -412,6 +442,12 @@ class CloudSnapshotStore:
             "latest_revision": accepted,
             "accepted_revision": accepted,
             "indexed_revision": indexed,
+            "semantic_index_coverage": str(
+                index.get("semantic_index_coverage") or "unknown"
+            ),
+            "semantic_initial_exact_only": bool(
+                index.get("semantic_initial_exact_only", False)
+            ),
             "file_count": len(files) if isinstance(files, dict) else 0,
             "delete_count": len(deletes) if isinstance(deletes, dict) else 0,
         }

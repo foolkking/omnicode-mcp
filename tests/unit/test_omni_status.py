@@ -140,7 +140,7 @@ def test_omni_status_lists_flagship_tools() -> None:
     flagship = {
         "omni_search", "omni_read", "omni_impact",
         "omni_diagnostics", "omni_patch", "omni_memory",
-        "omni_context", "omni_skill", "discover_tools",
+        "omni_context", "omni_skill", "omni_index", "discover_tools",
         "omni_status",
     }
     missing = flagship - set(payload["registered_tools"])
@@ -206,6 +206,7 @@ def test_omni_status_sync_reports_hybrid_routes(
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setenv("OMNICODE_WORKSPACE_ID", "repo-a")
     monkeypatch.setenv("OMNICODE_EXECUTOR_MODE", "hybrid")
+    monkeypatch.delenv("OMNICODE_REMOTE", raising=False)
     monkeypatch.setenv("OMNICODE_FASTAPI_BASE_URL", "http://cloud")
 
     raw = _run(_build_status_tool()())
@@ -238,6 +239,7 @@ def test_omni_status_prefers_cloud_snapshot_for_index_readiness(
     monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(workspace))
     monkeypatch.setenv("OMNICODE_WORKSPACE_ID", "repo-a")
     monkeypatch.setenv("OMNICODE_EXECUTOR_MODE", "hybrid")
+    monkeypatch.delenv("OMNICODE_REMOTE", raising=False)
     monkeypatch.setenv("OMNICODE_FASTAPI_BASE_URL", "http://cloud")
 
     async def cloud_request(
@@ -250,6 +252,23 @@ def test_omni_status_prefers_cloud_snapshot_for_index_readiness(
                 "ok": True,
                 "accepted_revision": 42,
                 "indexed_revision": 42,
+                "exact_indexed_revision": 42,
+                "exact_index_ready": True,
+                "semantic_index_ready": False,
+                "semantic_index_coverage": "exact_only_initial_sync",
+                "semantic_initial_exact_only": True,
+                "recommended_query_mode": "exact_first",
+                "query_mode_reason": "exact_only_initial_sync",
+                "supported_query_modes": ["local", "snapshot", "exact_text", "exact_symbol"],
+                "exact_query_safe": True,
+                "strict_semantic_safe": False,
+                "search_degraded": True,
+                "exact_index": {
+                    "files": 6991,
+                    "symbols": 45279,
+                    "lines": 1189358,
+                    "line_fts_available": False,
+                },
                 "snapshot_store": {
                     "latest_revision": 42,
                     "accepted_revision": 42,
@@ -273,6 +292,13 @@ def test_omni_status_prefers_cloud_snapshot_for_index_readiness(
     assert readiness["indexed_files"] == 6991
     assert readiness["text_index_ready"] is True
     assert readiness["symbol_index_ready"] is True
+    assert readiness["exact_index_ready"] is True
+    assert readiness["semantic_index_ready"] is False
+    assert readiness["recommended_query_mode"] == "exact_first"
+    assert readiness["query_mode_reason"] == "exact_only_initial_sync"
+    assert readiness["strict_semantic_safe"] is False
+    assert readiness["exact_query_safe"] is True
+    assert readiness["semantic_index_coverage"] == "exact_only_initial_sync"
     assert readiness["graph_index_ready"] is False
 
 
@@ -289,6 +315,7 @@ def test_omni_status_reports_cloud_unavailable(
     monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(workspace))
     monkeypatch.setenv("OMNICODE_WORKSPACE_ID", "repo-a")
     monkeypatch.setenv("OMNICODE_EXECUTOR_MODE", "hybrid")
+    monkeypatch.delenv("OMNICODE_REMOTE", raising=False)
     monkeypatch.setenv("OMNICODE_FASTAPI_BASE_URL", "http://127.0.0.1:6799")
 
     async def down_request(
@@ -340,6 +367,7 @@ def test_omni_status_agent_auto_reports_embedded_start(
 ) -> None:
     monkeypatch.setenv("OMNICODE_WORKSPACE_ID", "repo-a")
     monkeypatch.setenv("OMNICODE_EXECUTOR_MODE", "hybrid")
+    monkeypatch.delenv("OMNICODE_REMOTE", raising=False)
     monkeypatch.setenv("OMNICODE_FASTAPI_BASE_URL", "http://cloud")
     monkeypatch.setenv("OMNICODE_SYNC_MODE", "smart")
     monkeypatch.setenv("OMNICODE_AGENT_MODE", "auto")

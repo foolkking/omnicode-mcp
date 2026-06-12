@@ -1,0 +1,102 @@
+{
+  "installMethod": "global",
+  "unpinOpus47LaunchEffort": true,
+  "unpinOpus48LaunchEffort": true,
+  "unpinFable5LaunchEffort": true,
+  "firstStartTime": "2026-05-18T07:43:14.282Z",
+  "opusProMigrationComplete": true,
+  "sonnet1m45MigrationComplete": true,
+  "seenNotifications": {},
+  "migrationVersion": 13,
+  "userID": "91a4451ee887d1a6615579e3662047914212be5cf2cc6ca38366a0f928eb7ed8",
+  "changelogLastFetched": 1779090210467,
+  "mcpServers": {
+    "omnicode_local": {
+      "type": "stdio",
+      "command": "E:\\anaconda\\envs\\omnicode-env\\Scripts\\omnicode.exe",
+      "args": [
+        "mcp",
+        "--transport",
+        "stdio",
+        "--workspace",
+        "C:\\Users\\86182\\Documents\\antigravity\\dazzling-heisenberg\\codebase-mcp",
+        "--workspace-id",
+        "repo-a-local",
+        "--backend-url",
+        "http://127.0.0.1:6789",
+        "--executor",
+        "local",
+        "--llm-mode",
+        "off",
+        "--embedding-mode",
+        "local"
+      ],
+      "enabled": true,
+      "startup_timeout_sec": 120
+    },
+    "omnicode": {
+      "type": "stdio",
+      "command": "E:\\anaconda\\envs\\omnicode-env\\Scripts\\omnicode.exe",
+      "args": [
+        "mcp",
+        "--transport",
+        "stdio",
+        "--workspace",
+        "C:\\Users\\86182\\Documents\\antigravity\\dazzling-heisenberg\\codebase-mcp",
+        "--workspace-id",
+        "repo-a",
+        "--backend-url",
+        "http://127.0.0.1:6791",
+        "--executor",
+        "hybrid",
+        "--llm-mode",
+        "off",
+        "--embedding-mode",
+        "cloud",
+        "--sync-mode",
+        "smart",
+        "--agent",
+        "auto"
+      ],
+      "enabled": true,
+      "startup_timeout_sec": 120
+    }
+  },
+  "projects": {
+    "c:/Users/86182/Documents/antigravity/dazzling-heisenberg/codebase-mcp": {
+      "allowedTools": [],
+      "mcpContextUris": [],
+      "mcpServers": {},
+      "enabledMcpjsonServers": [],
+      "disabledMcpjsonServers": [],
+      "hasTrustDialogAccepted": false,
+      "projectOnboardingSeenCount": 0,
+      "hasClaudeMdExternalIncludesApproved": false,
+      "hasClaudeMdExternalIncludesWarningShown": false,
+      "hasUnseenTeamArtifacts": false
+    },
+    "C:\\Users\\86182\\Documents\\antigravity\\dazzling-heisenberg\\codebase-mcp": {
+      "allowedTools": [],
+      "mcpContextUris": [],
+      "enabledMcpjsonServers": [],
+      "disabledMcpjsonServers": [],
+      "hasTrustDialogAccepted": true,
+      "projectOnboardingSeenCount": 0,
+      "hasClaudeMdExternalIncludesApproved": false,
+      "hasClaudeMdExternalIncludesWarningShown": false
+    }
+  },
+  "pluginUsage": {
+    "anthropic-skills@inline": {
+      "usageCount": 0,
+      "lastUsedAt": 1781262568288,
+      "lastUsedNumStartups": 0
+    }
+  },
+  "skillUsage": {
+    "claude-api": {
+      "usageCount": 1,
+      "lastUsedAt": 1781262569785
+    }
+  }
+}

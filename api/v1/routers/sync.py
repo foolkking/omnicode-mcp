@@ -28,6 +28,17 @@ from omnicode_core.workspace.request import (
     WorkspaceResolutionError,
     resolve_workspace_request,
 )
+from omnicode_core.workspace.readiness import (
+    build_index_readiness_contract,
+    contract_summary,
+)
+from omnicode_core.workspace.exact_index import SnapshotExactIndex
+from omnicode_core.workspace.semantic_index_policy import (
+    merge_semantic_coverages,
+    semantic_coverage_for_batch,
+    semantic_index_decision,
+    semantic_index_policy_payload,
+)
 from omnicode_core.workspace.snapshot_store import (
     CloudSnapshotStore,
     SnapshotStoreError,
@@ -81,6 +92,7 @@ class _IndexJob:
     revision: int
     changed_files: list[tuple[str, str] | tuple[str, str, dict[str, Any]]]
     deleted_paths: list[str]
+    semantic_coverage: str = "unknown"
 
 
 @dataclass
@@ -94,6 +106,7 @@ class _CoalescedIndexJob:
     changed_file_bytes: Dict[str, int] = field(default_factory=dict)
     changed_bytes: int = 0
     deleted_paths: set[str] = field(default_factory=set)
+    semantic_coverages: set[str] = field(default_factory=set)
     job_count: int = 0
 
 
@@ -121,6 +134,9 @@ class _SyncWorkspaceState:
     last_batch_elapsed_ms: Optional[int] = None
     last_batch_files: int = 0
     last_batch_deletes: int = 0
+    last_semantic_files_enqueued: int = 0
+    last_semantic_files_skipped: int = 0
+    last_semantic_skip_reasons: Dict[str, int] = field(default_factory=dict)
     last_sync_metadata: Dict[str, Any] = field(default_factory=dict)
     state_loaded: bool = False
     file_count: int = 0
@@ -134,6 +150,10 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _INDEX_QUEUE: Optional[asyncio.Queue[_IndexJob]] = None
 _INDEX_WORKER_TASK: Optional[asyncio.Task[None]] = None
 _INDEX_LOOP: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _exact_index() -> SnapshotExactIndex:
+    return SnapshotExactIndex(store=_SNAPSHOT_STORE)
 
 
 def _error(message: str, **extra):
@@ -275,8 +295,54 @@ def record_external_indexed_revision(workspace_id: str, revision: int) -> None:
         state.last_index_error = None
 
 
-def _status_payload(state: _SyncWorkspaceState, snapshot_status: dict) -> dict:
+def _status_payload(
+    state: _SyncWorkspaceState,
+    snapshot_status: dict,
+    exact_status: Optional[dict[str, Any]] = None,
+) -> dict:
     pending_files = max(state.accepted_revision - state.indexed_revision, 0)
+    exact_status = exact_status or {}
+    snapshot_file_count = int(snapshot_status.get("file_count", state.file_count) or 0)
+    snapshot_delete_count = int(
+        snapshot_status.get("delete_count", state.delete_count) or 0
+    )
+    exact_indexed_revision = int(exact_status.get("exact_indexed_revision") or 0)
+    semantic_initial_exact_only = bool(
+        snapshot_status.get("semantic_initial_exact_only", False)
+    )
+    semantic_index_coverage = str(
+        snapshot_status.get("semantic_index_coverage") or "unknown"
+    )
+    index_worker_busy = bool(
+        state.index_worker_running
+        or state.index_queue_depth > 0
+        or state.indexing
+        or pending_files > 0
+    )
+    readiness_contract = build_index_readiness_contract(
+        workspace_id=state.workspace_id,
+        accepted_revision=state.accepted_revision,
+        semantic_indexed_revision=state.indexed_revision,
+        exact_indexed_revision=exact_indexed_revision,
+        snapshot_files=snapshot_file_count,
+        snapshot_deletes=snapshot_delete_count,
+        exact_files=exact_status.get("files") or 0,
+        exact_symbols=exact_status.get("symbols") or 0,
+        exact_lines=exact_status.get("lines") or 0,
+        exact_line_fts_available=bool(
+            exact_status.get("line_fts_available", False)
+        ),
+        semantic_index_coverage=semantic_index_coverage,
+        semantic_initial_exact_only=semantic_initial_exact_only,
+        index_worker_busy=index_worker_busy,
+        last_index_error=state.last_index_error,
+        graph_index_ready=False,
+    )
+    readiness_summary = contract_summary(readiness_contract)
+    exact_index_ready = readiness_summary["exact_index_ready"]
+    exact_pending_revisions = readiness_summary["exact_pending_revisions"]
+    semantic_index_ready = readiness_summary["semantic_index_ready"]
+    search_degraded = readiness_summary["search_degraded"]
     current_index_elapsed_ms = None
     if state.current_index_started_at is not None:
         current_index_elapsed_ms = int(
@@ -288,6 +354,29 @@ def _status_payload(state: _SyncWorkspaceState, snapshot_status: dict) -> dict:
         "accepted_revision": state.accepted_revision,
         "indexed_revision": state.indexed_revision,
         "indexing": state.indexing or state.indexed_revision < state.accepted_revision,
+        "exact_indexed_revision": exact_indexed_revision,
+        "exact_index_ready": exact_index_ready,
+        "exact_pending_revisions": exact_pending_revisions,
+        "exact_index": {
+            "files": int(exact_status.get("files") or 0),
+            "symbols": int(exact_status.get("symbols") or 0),
+            "lines": int(exact_status.get("lines") or 0),
+            "line_fts_available": bool(exact_status.get("line_fts_available", False)),
+        },
+        "semantic_index_ready": semantic_index_ready,
+        "semantic_index_coverage": semantic_index_coverage,
+        "semantic_initial_exact_only": semantic_initial_exact_only,
+        "snapshot_ready": readiness_summary["snapshot_ready"],
+        "index_worker_busy": index_worker_busy,
+        "search_degraded": search_degraded,
+        "recommended_query_mode": readiness_summary["recommended_query_mode"],
+        "query_mode_reason": readiness_summary["query_mode_reason"],
+        "supported_query_modes": readiness_summary["supported_query_modes"],
+        "exact_query_safe": readiness_summary["exact_query_safe"],
+        "strict_semantic_safe": readiness_summary["strict_semantic_safe"],
+        "semantic_query_safe": readiness_summary["semantic_query_safe"],
+        "index_readiness_contract": readiness_contract,
+        "semantic_pending_revisions": pending_files,
         "pending_files": pending_files,
         "last_index_error": state.last_index_error,
         "last_index_elapsed_ms": state.last_index_elapsed_ms,
@@ -296,6 +385,10 @@ def _status_payload(state: _SyncWorkspaceState, snapshot_status: dict) -> dict:
         "index_worker_running": state.index_worker_running,
         "index_jobs_enqueued": state.index_jobs_enqueued,
         "index_jobs_completed": state.index_jobs_completed,
+        "last_semantic_files_enqueued": state.last_semantic_files_enqueued,
+        "last_semantic_files_skipped": state.last_semantic_files_skipped,
+        "last_semantic_skip_reasons": dict(state.last_semantic_skip_reasons),
+        "semantic_index_policy": semantic_index_policy_payload(),
         "current_index_revision": state.current_index_revision,
         "current_index_files": state.current_index_files,
         "current_index_bytes": state.current_index_bytes,
@@ -428,6 +521,7 @@ def _coalesce_index_jobs(jobs: list[_IndexJob]) -> list[_CoalescedIndexJob]:
             group.changed_bytes += content_bytes
             group.changed_file_bytes[path] = content_bytes
             group.changed_files[path] = (path, content, metadata)
+        group.semantic_coverages.add(job.semantic_coverage)
     completed_groups.extend(
         group for group in active_groups.values() if group.job_count > 0
     )
@@ -440,6 +534,7 @@ async def _enqueue_index_update(
     revision: int,
     changed_files: list[tuple[str, str] | tuple[str, str, dict[str, Any]]],
     deleted_paths: list[str],
+    semantic_coverage: str = "unknown",
 ) -> int:
     queue = _ensure_index_worker()
     job = _IndexJob(
@@ -447,6 +542,7 @@ async def _enqueue_index_update(
         revision=revision,
         changed_files=changed_files,
         deleted_paths=deleted_paths,
+        semantic_coverage=semantic_coverage,
     )
     with _LOCK:
         state = _state_for(workspace_id)
@@ -492,6 +588,7 @@ async def _index_worker(queue: asyncio.Queue[_IndexJob]) -> None:
                     group.revision,
                     list(group.changed_files.values()),
                     sorted(group.deleted_paths),
+                    merge_semantic_coverages(group.semantic_coverages),
                 )
                 elapsed_ms = int((time.monotonic() - started) * 1000)
                 with _LOCK:
@@ -536,10 +633,13 @@ def _run_index_update_blocking(
     revision: int,
     changed_files: list[tuple[str, str] | tuple[str, str, dict[str, Any]]],
     deleted_paths: list[str],
+    semantic_coverage: str = "unknown",
 ) -> int:
     async def _update_index() -> None:
-        engine = get_search_engine()
-        if engine is not None:
+        if changed_files or deleted_paths:
+            engine = get_search_engine()
+            if engine is None:
+                return
             if changed_files:
                 upsert_many = getattr(engine, "upsert_contents", None)
                 if callable(upsert_many):
@@ -593,6 +693,7 @@ def _run_index_update_blocking(
         _SNAPSHOT_STORE.mark_indexed(
             workspace_id=workspace_id,
             revision=revision,
+            semantic_coverage=semantic_coverage,
         )
     )
 
@@ -653,6 +754,7 @@ async def push_sync_batch(
         )
 
     batch_result = None
+    exact_indexed_revision = 0
     if has_effective_changes:
         store_files = [
             {
@@ -676,6 +778,20 @@ async def push_sync_batch(
         except SnapshotStoreError as exc:
             return _error(
                 str(exc),
+                workspace_id=workspace.workspace_id,
+                accepted_revision=_state_for(workspace.workspace_id).accepted_revision,
+            )
+        try:
+            exact_indexed_revision = await asyncio.to_thread(
+                _exact_index().update_batch,
+                workspace_id=workspace.workspace_id,
+                changed_files=store_files,
+                deleted_paths=normalized_deletes,
+                revision=accepted,
+            )
+        except Exception as exc:
+            return _error(
+                f"exact index update failed: {exc}",
                 workspace_id=workspace.workspace_id,
                 accepted_revision=_state_for(workspace.workspace_id).accepted_revision,
             )
@@ -714,35 +830,73 @@ async def push_sync_batch(
         state.last_sync_metadata = dict(body.metadata or {})
         indexed_revision = state.indexed_revision
 
+    if not has_effective_changes:
+        try:
+            exact_status = await asyncio.to_thread(
+                _exact_index().status,
+                workspace_id=workspace.workspace_id,
+            )
+            exact_indexed_revision = int(
+                exact_status.get("exact_indexed_revision") or 0
+            )
+        except Exception:
+            exact_indexed_revision = 0
+
+    semantic_files_enqueued = 0
+    semantic_files_skipped = 0
+    semantic_skip_reasons: dict[str, int] = {}
     queued_depth = 0
+    semantic_coverage = "unchanged"
     if has_effective_changes:
-        index_files = [
-            (
+        index_files = []
+        for path, item in changed_files:
+            include_semantic, reason = semantic_index_decision(
                 path,
                 item.content,
-                {
-                    "content_hash": item.hash,
-                    "snapshot_hash": item.hash,
-                    "snapshot_revision": accepted,
-                    "workspace_id": workspace.workspace_id,
-                },
+                body.metadata or {},
             )
-            for path, item in changed_files
-        ]
+            if not include_semantic:
+                semantic_files_skipped += 1
+                semantic_skip_reasons[reason] = semantic_skip_reasons.get(reason, 0) + 1
+                continue
+            semantic_files_enqueued += 1
+            index_files.append(
+                (
+                    path,
+                    item.content,
+                    {
+                        "content_hash": item.hash,
+                        "snapshot_hash": item.hash,
+                        "snapshot_revision": accepted,
+                        "workspace_id": workspace.workspace_id,
+                    },
+                )
+            )
+        semantic_coverage = semantic_coverage_for_batch(
+            files_enqueued=semantic_files_enqueued,
+            files_skipped=semantic_files_skipped,
+            skip_reasons=semantic_skip_reasons,
+            deletes=len(normalized_deletes),
+        )
         queued_depth = await _enqueue_index_update(
             workspace_id=workspace.workspace_id,
             revision=accepted,
             changed_files=index_files,
             deleted_paths=normalized_deletes,
+            semantic_coverage=semantic_coverage,
         )
 
     with _LOCK:
         state = _state_for(workspace.workspace_id)
+        state.last_semantic_files_enqueued = semantic_files_enqueued
+        state.last_semantic_files_skipped = semantic_files_skipped
+        state.last_semantic_skip_reasons = dict(semantic_skip_reasons)
         return {
             "ok": True,
             "workspace_id": workspace.workspace_id,
             "accepted_revision": state.accepted_revision,
             "indexed_revision": indexed_revision,
+            "exact_indexed_revision": exact_indexed_revision,
             "indexing": state.indexing,
             "index_queue_depth": state.index_queue_depth,
             "index_worker_running": state.index_worker_running,
@@ -752,6 +906,9 @@ async def push_sync_batch(
             "files_accepted": len(changed_files),
             "deletes_accepted": len(normalized_deletes),
             "skipped_unchanged": len(skipped_unchanged),
+            "semantic_files_enqueued": state.last_semantic_files_enqueued,
+            "semantic_files_skipped": state.last_semantic_files_skipped,
+            "semantic_skip_reasons": dict(state.last_semantic_skip_reasons),
             "accepted_files": [
                 {"path": path, "hash": item.hash, "revision": accepted}
                 for path, item in changed_files
@@ -770,8 +927,24 @@ async def sync_status(
     await _ensure_state_loaded(state)
     with _LOCK:
         state = _state_for(workspace.workspace_id)
-        snapshot_status = _snapshot_status_from_state(state)
-        return _status_payload(state, snapshot_status)
+    try:
+        exact_status = await asyncio.to_thread(
+            _exact_index().status,
+            workspace_id=workspace.workspace_id,
+        )
+    except Exception:
+        exact_status = {}
+    try:
+        snapshot_status = await asyncio.to_thread(
+            _SNAPSHOT_STORE.status,
+            workspace.workspace_id,
+        )
+    except Exception:
+        with _LOCK:
+            snapshot_status = _snapshot_status_from_state(_state_for(workspace.workspace_id))
+    with _LOCK:
+        state = _state_for(workspace.workspace_id)
+        return _status_payload(state, snapshot_status, exact_status)
 
 
 @router.post("/barrier")

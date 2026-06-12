@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import sys
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -157,3 +159,19 @@ def test_resolve_backend_hybrid_without_url_falls_back(monkeypatch):
     out = resolve_backend("any")
     # The factory must not raise — it should degrade to local.
     assert out is fake
+
+
+def test_configure_torch_threads_from_env(monkeypatch):
+    import omnicode_core.embeddings.backend as mod
+
+    calls: list[tuple[str, int]] = []
+    fake_torch = SimpleNamespace(
+        set_num_threads=lambda value: calls.append(("threads", value)),
+        set_num_interop_threads=lambda value: calls.append(("interop", value)),
+    )
+    monkeypatch.setenv("OMNICODE_EMBEDDING_TORCH_THREADS", "2")
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    mod._configure_torch_threads()
+
+    assert calls == [("threads", 2), ("interop", 2)]

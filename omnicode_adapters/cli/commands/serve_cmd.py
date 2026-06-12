@@ -27,6 +27,16 @@ _MODE_PRESETS: dict[str, dict[str, str]] = {
         "OMNICODE_MODE": "hybrid",
         "OMNICODE_READ_ONLY": "false",
         "OMNICODE_ALLOW_APPLY_PATCH": "false",
+        "OMNICODE_EMBEDDING_TORCH_THREADS": "2",
+    },
+    "cloud-index": {
+        # Preferred remote backend for local-MCP + cloud-analysis deployments.
+        # It must accept /sync/batch writes into the content-addressed snapshot
+        # store, but direct patch application remains disabled.
+        "OMNICODE_MODE": "hybrid",
+        "OMNICODE_READ_ONLY": "false",
+        "OMNICODE_ALLOW_APPLY_PATCH": "false",
+        "OMNICODE_EMBEDDING_TORCH_THREADS": "2",
     },
     "local-readonly": {
         # Like 'local' but writes are off. Use case: demoing the
@@ -65,7 +75,7 @@ def run(
     Parameters
     ----------
     headless: True hides the Web Console (API-only).
-    mode:     'local' | 'cloud' | 'hybrid'. Drives default
+    mode:     'local' | 'cloud' | 'hybrid' | 'cloud-index'. Drives default
               ``OMNICODE_READ_ONLY`` / ``OMNICODE_ALLOW_APPLY_PATCH``
               presets, see ``_MODE_PRESETS``.
     """

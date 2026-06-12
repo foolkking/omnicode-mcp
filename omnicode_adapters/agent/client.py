@@ -32,6 +32,7 @@ import httpx
 
 from omnicode_core.workspace.local import LocalWorkspace
 from omnicode_core.workspace.manifest import LocalManifest
+from omnicode_core.workspace.sync_queue import SyncQueue
 
 logger = logging.getLogger(__name__)
 
@@ -152,8 +153,8 @@ class AgentClient:
         timeout: float = 30.0,
         max_retries: int = 3,
         max_file_bytes: int = 1_000_000,
-        batch_max_files: int = 25,
-        batch_max_bytes: int = 250_000,
+        batch_max_files: int = 100,
+        batch_max_bytes: int = 1_000_000,
         excludes: Sequence[str] = (),
         manifest_path: Optional[Path] = None,
         record_manifest: bool = True,
@@ -337,6 +338,34 @@ class AgentClient:
             ]
         manifest.save()
 
+    def _record_manifest_failure(
+        self,
+        *,
+        files: list[dict[str, Any]],
+        deletes: list[str],
+    ) -> None:
+        """Persist failed sync operations so a later push can drain them."""
+        manifest = self._load_manifest()
+        if manifest is None:
+            return
+
+        changed = False
+        for payload in files:
+            try:
+                rel = manifest.workspace.normalize_rel(str(payload.get("path") or ""))
+                changed = manifest.mark_changed(rel) is not None or changed
+            except Exception:
+                continue
+        for raw in deletes:
+            try:
+                rel = manifest.workspace.normalize_rel(str(raw))
+                changed = manifest.mark_changed(rel) is not None or changed
+            except Exception:
+                continue
+
+        if changed:
+            manifest.save()
+
     def _push_sync_batch(
         self,
         *,
@@ -366,16 +395,21 @@ class AgentClient:
         except Exception as exc:
             result.errors.append(f"sync batch: {exc}")
             result.elapsed_ms = int((time.monotonic() - started) * 1000)
+            self._record_manifest_failure(files=files, deletes=deletes)
             return result
         if r.status_code != 200:
-            result.errors.append(f"sync batch: HTTP {r.status_code} — {r.text[:200]}")
+            result.errors.append(
+                f"sync batch: HTTP {r.status_code}: {r.text[:200]}"
+            )
             result.elapsed_ms = int((time.monotonic() - started) * 1000)
+            self._record_manifest_failure(files=files, deletes=deletes)
             return result
         try:
             payload = r.json()
         except ValueError:
             result.errors.append(f"sync batch: non-JSON response {r.text[:200]}")
             result.elapsed_ms = int((time.monotonic() - started) * 1000)
+            self._record_manifest_failure(files=files, deletes=deletes)
             return result
         body_out = payload.get("result", payload)
         if not isinstance(body_out, dict) or not body_out.get("ok", False):
@@ -384,6 +418,7 @@ class AgentClient:
                 message = str(body_out.get("error") or body_out.get("message") or message)
             result.errors.append(f"sync batch: {message}")
             result.elapsed_ms = int((time.monotonic() - started) * 1000)
+            self._record_manifest_failure(files=files, deletes=deletes)
             return result
         pushed_raw = (
             body_out.get("files_accepted")
@@ -415,10 +450,58 @@ class AgentClient:
         except Exception:
             return False
 
+    def flush_pending(self, *, max_batches: int = 10) -> AgentResult:
+        """Retry manifest pending operations before sending newer changes."""
+        result = AgentResult()
+        started = time.monotonic()
+        manifest = self._load_manifest()
+        if manifest is None or not manifest.pending:
+            result.elapsed_ms = int((time.monotonic() - started) * 1000)
+            return result
+
+        for _ in range(max(1, int(max_batches or 1))):
+            queue = SyncQueue(manifest)
+            batch = queue.next_batch(
+                max_files=self._batch_max_files,
+                max_bytes=self._batch_max_bytes,
+            )
+            if batch is None:
+                break
+            batch_result = self._push_sync_batch(
+                files=[
+                    {
+                        "path": item.path,
+                        "hash": item.hash,
+                        "size": item.size,
+                        "mtime_ms": item.mtime_ms,
+                        "encoding": item.encoding,
+                        "content": item.content,
+                    }
+                    for item in batch.files
+                ],
+                deletes=[item.path for item in batch.deletes],
+                started=time.monotonic(),
+                metadata={"phase": "pending_flush"},
+            )
+            result.merge(batch_result)
+            if batch_result.errors:
+                break
+            manifest = self._load_manifest()
+            if manifest is None or not manifest.pending:
+                break
+
+        if not result.sync_protocol:
+            result.elapsed_ms = int((time.monotonic() - started) * 1000)
+        return result
+
     def push_file(self, path: str | Path) -> AgentResult:
         """Upload a single file body through /sync/batch."""
         result = AgentResult()
         started = time.monotonic()
+
+        result.merge(self.flush_pending())
+        if result.errors:
+            return result
 
         rel = self._rel(Path(path)) if not isinstance(path, str) else path
         if _is_excluded(rel, self._excludes) or _is_binary_path(rel):
@@ -432,11 +515,14 @@ class AgentClient:
             result.elapsed_ms = int((time.monotonic() - started) * 1000)
             return result
 
-        return self._push_sync_batch(
-            files=[self._sync_file_payload(rel, text)],
-            deletes=[],
-            started=started,
+        result.merge(
+            self._push_sync_batch(
+                files=[self._sync_file_payload(rel, text)],
+                deletes=[],
+                started=started,
+            )
         )
+        return result
 
     def push_batch(
         self,
@@ -449,6 +535,10 @@ class AgentClient:
         started = time.monotonic()
         batch: list[dict[str, Any]] = []
         batch_bytes = 0
+
+        result.merge(self.flush_pending())
+        if result.errors:
+            return result
 
         def _flush() -> None:
             nonlocal batch, batch_bytes
@@ -496,8 +586,14 @@ class AgentClient:
     def delete_file(self, path: str | Path) -> AgentResult:
         """Tell the remote to drop ``path`` through /sync/batch."""
         started = time.monotonic()
+        result = self.flush_pending()
+        if result.errors:
+            return result
         rel = self._rel(Path(path)) if not isinstance(path, str) else path
-        return self._push_sync_batch(files=[], deletes=[rel], started=started)
+        result.merge(
+            self._push_sync_batch(files=[], deletes=[rel], started=started)
+        )
+        return result
 
     def sync_status(self) -> dict:
         """Read the remote sync headline."""

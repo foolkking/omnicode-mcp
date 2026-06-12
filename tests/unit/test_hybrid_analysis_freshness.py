@@ -137,6 +137,61 @@ def test_hybrid_search_allows_fresh_cloud_index(
     assert "/search" in captured
 
 
+def test_hybrid_symbol_search_allows_exact_fresh_when_semantic_lags(
+    hybrid_env: Path,
+) -> None:
+    _write_manifest(
+        hybrid_env,
+        local_revision=8,
+        accepted_revision=8,
+        indexed_revision=7,
+    )
+    tools = build_tools({
+        "/sync/status": {
+            "ok": True,
+            "workspace_id": "repo-a",
+            "accepted_revision": 8,
+            "indexed_revision": 7,
+            "exact_indexed_revision": 8,
+        },
+        "/search/symbols": {
+            "results": [
+                {
+                    "file_path": "django/core/handlers/base.py",
+                    "symbol_name": "BaseHandler",
+                    "line_start": 33,
+                    "line_end": 33,
+                    "relevance_score": 1.0,
+                    "source": "exact_index",
+                    "confidence": "high",
+                    "why_matched": ["symbol:exact", "exact_index"],
+                }
+            ],
+            "total_results": 1,
+            "freshness": "exact_fresh",
+            "semantic_stale": True,
+            "exact_indexed_revision": 8,
+        },
+    })
+
+    payload = _payload(run(tools["omni_search"](
+        query="BaseHandler",
+        mode="symbol",
+        format="json",
+        max_results=1,
+    )))
+
+    assert payload["ok"] is True
+    assert payload["freshness"] == "exact_fresh"
+    assert payload["freshness_mode"] == "exact"
+    assert payload["stale"] is False
+    assert payload["semantic_stale"] is True
+    assert payload["exact_indexed_revision"] == 8
+    assert payload["results"][0]["file"] == "django/core/handlers/base.py"
+    captured: Dict[str, List[Dict[str, Any]]] = tools["__captured__"]
+    assert "/search/symbols" in captured
+
+
 def test_hybrid_analysis_blocks_when_local_revision_is_unknown(
     hybrid_env: Path,
 ) -> None:

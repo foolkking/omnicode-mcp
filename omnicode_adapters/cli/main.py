@@ -38,6 +38,20 @@ def main():
         help="Start snapshot indexing in the background when supported.",
     )
     idx_parser.add_argument(
+        "--scope",
+        choices=("semantic", "exact_policy"),
+        default="semantic",
+        help=(
+            "Snapshot indexing scope. 'semantic' forces full semantic bootstrap; "
+            "'exact_policy' indexes only files allowed by the semantic policy."
+        ),
+    )
+    idx_parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Show background snapshot indexing job status instead of starting one.",
+    )
+    idx_parser.add_argument(
         "--backend-url",
         default=None,
         help="FastAPI backend URL to index (default: http://127.0.0.1:6789).",
@@ -180,7 +194,7 @@ def main():
     )
     serve_parser.add_argument(
         "--mode",
-        choices=("local", "cloud", "hybrid", "local-readonly"),
+        choices=("local", "cloud", "hybrid", "cloud-index", "local-readonly"),
         default="local",
         help=(
             "Deployment mode (Wave 1, gap §13). "
@@ -281,6 +295,8 @@ def main():
         run(
             force=args.force,
             background=args.background,
+            scope=args.scope,
+            status=args.status,
             backend_url=args.backend_url,
             port=args.port,
             workspace=args.workspace,

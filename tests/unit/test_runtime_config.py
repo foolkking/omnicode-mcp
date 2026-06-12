@@ -49,6 +49,8 @@ def test_runtime_config_reads_workspace_toml_from_any_cwd(
     assert cfg.backend_url == "http://cloud:6789"
     assert cfg.sync_mode == "strict"
     assert cfg.debounce_ms == 1500
+    assert cfg.batch_max_files == 100
+    assert cfg.batch_max_bytes == 1_000_000
     assert cfg.sources["workspace_root"] == "toml"
 
 

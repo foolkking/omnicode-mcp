@@ -58,6 +58,12 @@ def _validate_workspace_id(workspace_id: str) -> str:
 
 
 def _default_store_path() -> Path:
+    explicit = os.environ.get("OMNICODE_WORKSPACE_REGISTRY", "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    state_dir = os.environ.get("OMNICODE_STATE_DIR", "").strip()
+    if state_dir:
+        return Path(state_dir).expanduser() / "workspaces.json"
     return Path.home() / ".kiro" / "codebase-mcp" / "workspaces.json"
 
 
@@ -221,13 +227,16 @@ class WorkspaceRegistry:
 
 
 _DEFAULT_REGISTRY: Optional[WorkspaceRegistry] = None
+_DEFAULT_REGISTRY_PATH: Optional[Path] = None
 
 
 def get_workspace_registry() -> WorkspaceRegistry:
     """Return the process-wide default registry (lazy)."""
-    global _DEFAULT_REGISTRY
-    if _DEFAULT_REGISTRY is None:
-        _DEFAULT_REGISTRY = WorkspaceRegistry()
+    global _DEFAULT_REGISTRY, _DEFAULT_REGISTRY_PATH
+    store_path = _default_store_path()
+    if _DEFAULT_REGISTRY is None or _DEFAULT_REGISTRY_PATH != store_path:
+        _DEFAULT_REGISTRY = WorkspaceRegistry(store_path=store_path)
+        _DEFAULT_REGISTRY_PATH = store_path
     return _DEFAULT_REGISTRY
 
 

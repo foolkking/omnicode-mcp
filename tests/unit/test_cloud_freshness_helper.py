@@ -26,6 +26,15 @@ class _Store:
         return self._status
 
 
+class _Exact:
+    def __init__(self, status: dict[str, Any]) -> None:
+        self._status = status
+
+    def status(self, *, workspace_id: str) -> dict[str, Any]:
+        assert workspace_id == "repo-a"
+        return self._status
+
+
 def test_cloud_freshness_allows_when_indexed_revision_meets_min(
     monkeypatch,
 ) -> None:
@@ -57,7 +66,7 @@ def test_cloud_freshness_returns_structured_stale_error(monkeypatch) -> None:
     assert payload["ok"] is False
     assert payload["success"] is False
     assert payload["stale"] is True
-    assert payload["freshness"] == "stale"
+    assert payload["freshness"] == "snapshot_fresh"
     assert payload["accepted_revision"] == 5
     assert payload["indexed_revision"] == 4
     assert payload["required_revision"] == 5
@@ -85,6 +94,91 @@ def test_cloud_freshness_allows_snapshot_fresh_when_semantic_lags(
     assert state is not None
     assert state["freshness"] == "snapshot_fresh"
     assert state["semantic_stale"] is True
+
+
+def test_cloud_freshness_allows_exact_fresh_when_semantic_lags(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        freshness,
+        "CloudSnapshotStore",
+        lambda: _Store({"accepted_revision": 5, "indexed_revision": 4}),
+    )
+    monkeypatch.setattr(
+        freshness,
+        "SnapshotExactIndex",
+        lambda: _Exact({"exact_indexed_revision": 5}),
+    )
+
+    assert freshness.cloud_freshness_error(
+        workspace_id="repo-a",
+        min_revision=5,
+        allow_exact_fresh=True,
+    ) is None
+
+    strict = freshness.cloud_freshness_error(
+        workspace_id="repo-a",
+        min_revision=5,
+    )
+    assert strict is not None
+    assert strict["freshness"] == "exact_fresh"
+    assert strict["error"] == "Cloud semantic index is stale"
+    assert strict["exact_indexed_revision"] == 5
+    assert strict["recommended_query_mode"] == "exact_first"
+    assert strict["exact_query_safe"] is True
+    assert strict["strict_semantic_safe"] is False
+    assert "exact symbol/text search" in strict["next_actions"][0]
+
+
+def test_cloud_freshness_treats_exact_only_initial_sync_as_semantic_stale(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        freshness,
+        "CloudSnapshotStore",
+        lambda: _Store(
+            {
+                "accepted_revision": 5,
+                "indexed_revision": 5,
+                "semantic_initial_exact_only": True,
+                "semantic_index_coverage": "exact_only_initial_sync",
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        freshness,
+        "SnapshotExactIndex",
+        lambda: _Exact({"exact_indexed_revision": 5}),
+    )
+
+    state = freshness.cloud_freshness_state(
+        workspace_id="repo-a",
+        min_revision=5,
+    )
+    assert state is not None
+    assert state["freshness"] == "exact_fresh"
+    assert state["semantic_fresh"] is False
+    assert state["semantic_stale"] is True
+    assert state["semantic_initial_exact_only"] is True
+    assert state["semantic_index_coverage"] == "exact_only_initial_sync"
+
+    exact_allowed = freshness.cloud_freshness_error(
+        workspace_id="repo-a",
+        min_revision=5,
+        allow_exact_fresh=True,
+    )
+    assert exact_allowed is None
+
+    strict = freshness.cloud_freshness_error(
+        workspace_id="repo-a",
+        min_revision=5,
+    )
+    assert strict is not None
+    assert strict["freshness"] == "exact_fresh"
+    assert strict["semantic_initial_exact_only"] is True
+    assert strict["semantic_index_coverage"] == "exact_only_initial_sync"
+    assert strict["recommended_query_mode"] == "exact_first"
+    assert strict["query_mode_reason"] == "exact_only_initial_sync"
 
 
 def test_cloud_freshness_is_noop_without_min_revision() -> None:

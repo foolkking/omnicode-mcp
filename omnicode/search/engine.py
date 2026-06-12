@@ -184,33 +184,6 @@ class SemanticSearchEngine:
             "index_size": 0
         }
 
-    def refresh_stats(self) -> None:
-        """Refresh cheap DB-backed index stats without reinitializing models."""
-        try:
-            cursor = self.vector_store.conn.cursor()
-            cursor.execute("SELECT COUNT(DISTINCT file_path), COUNT(*) FROM chunks")
-            row = cursor.fetchone()
-            if row:
-                self.stats["total_files"] = row[0]
-                self.stats["total_chunks"] = row[1]
-                if row[1] > 0:
-                    self.stats["last_indexed"] = time.strftime("%Y-%m-%d %H:%M:%S")
-
-            cursor.execute(
-                "SELECT COUNT(*) FROM chunks WHERE chunk_type IN "
-                "('function', 'class', 'method', 'function_definition', "
-                "'class_definition', 'method_definition', 'function_declaration')"
-            )
-            row = cursor.fetchone()
-            if row:
-                self.stats["total_symbols"] = row[0]
-
-            db_file = os.path.join(self.db_dir, "vector_store.db")
-            if os.path.exists(db_file):
-                self.stats["index_size"] = os.path.getsize(db_file)
-        except Exception as e:
-            logger.warning(f"Failed to load search stats from DB: {e}")
-
     async def initialize(self) -> None:
         """Initialize the embedding model and verify DB files"""
         logger.info("Initializing Semantic Search Engine...")
@@ -236,34 +209,7 @@ class SemanticSearchEngine:
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("Legacy path dedupe skipped: %s", exc)
 
-        # Fetch index statistics from database
-        try:
-            cursor = self.vector_store.conn.cursor()
-            cursor.execute("SELECT COUNT(DISTINCT file_path), COUNT(*) FROM chunks")
-            row = cursor.fetchone()
-            if row:
-                self.stats["total_files"] = row[0]
-                self.stats["total_chunks"] = row[1]
-                if row[1] > 0:
-                    self.stats["last_indexed"] = time.strftime("%Y-%m-%d %H:%M:%S")
-
-            # Symbols = chunks whose chunk_type is a code symbol
-            # (function / class / method / etc).  Excludes 'whole-file' or
-            # 'comment' chunks if any.
-            cursor.execute(
-                "SELECT COUNT(*) FROM chunks WHERE chunk_type IN "
-                "('function', 'class', 'method', 'function_definition', "
-                "'class_definition', 'method_definition', 'function_declaration')"
-            )
-            row = cursor.fetchone()
-            if row:
-                self.stats["total_symbols"] = row[0]
-
-            db_file = os.path.join(self.db_dir, "vector_store.db")
-            if os.path.exists(db_file):
-                self.stats["index_size"] = os.path.getsize(db_file)
-        except Exception as e:
-            logger.warning(f"Failed to load search stats from DB: {e}")
+        self.refresh_stats()
 
         # Auto-recover semantic search index when chunks exist on disk but
         # FAISS knows nothing about them (legacy DB without embedding BLOB,
@@ -282,6 +228,35 @@ class SemanticSearchEngine:
                 self.stats["last_indexed"] = time.strftime("%Y-%m-%d %H:%M:%S")
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("Automatic semantic reindex failed: %s", exc)
+
+    def refresh_stats(self) -> None:
+        """Refresh cheap index statistics without reinitializing heavy services."""
+        try:
+            cursor = self.vector_store.conn.cursor()
+            cursor.execute("SELECT COUNT(DISTINCT file_path), COUNT(*) FROM chunks")
+            row = cursor.fetchone()
+            if row:
+                self.stats["total_files"] = row[0]
+                self.stats["total_chunks"] = row[1]
+                self.stats["last_indexed"] = (
+                    time.strftime("%Y-%m-%d %H:%M:%S") if row[1] > 0 else "never"
+                )
+
+            cursor.execute(
+                "SELECT COUNT(*) FROM chunks WHERE chunk_type IN "
+                "('function', 'class', 'method', 'function_definition', "
+                "'class_definition', 'method_definition', 'function_declaration')"
+            )
+            row = cursor.fetchone()
+            if row:
+                self.stats["total_symbols"] = row[0]
+
+            db_file = os.path.join(self.db_dir, "vector_store.db")
+            self.stats["index_size"] = (
+                os.path.getsize(db_file) if os.path.exists(db_file) else 0
+            )
+        except Exception as e:
+            logger.warning(f"Failed to refresh search stats from DB: {e}")
 
     def get_stats(self) -> dict:
         return self.stats
@@ -411,7 +386,7 @@ class SemanticSearchEngine:
 
         # Refresh stats lazily — caller can request /index/stats afterwards.
         if refresh:
-            await self.initialize()
+            self.refresh_stats()
         return len(chunks)
 
     async def upsert_contents(
@@ -451,7 +426,7 @@ class SemanticSearchEngine:
 
         if not chunk_rows:
             if refresh:
-                await self.initialize()
+                self.refresh_stats()
             return 0
 
         embeddings = self.embedding_model.encode(chunk_texts)
@@ -480,7 +455,7 @@ class SemanticSearchEngine:
                 await self.vector_store.add(**item)
 
         if refresh:
-            await self.initialize()
+            self.refresh_stats()
         return len(add_items)
 
     def indexed_file_hashes(
@@ -530,7 +505,7 @@ class SemanticSearchEngine:
         if legacy != file_path:
             existed = await self.vector_store.delete_by_file(legacy) or existed
         if refresh:
-            await self.initialize()
+            self.refresh_stats()
         return bool(existed)
 
     async def index_codebase(self) -> None:
@@ -580,7 +555,7 @@ class SemanticSearchEngine:
                 logger.warning(f"Failed to index {change.path}: {e}")
 
         # Recalculate stats
-        await self.initialize()
+        self.refresh_stats()
         logger.info("Codebase indexing completed successfully.")
 
     async def list_symbols_in_file(self, file_path: str) -> dict:

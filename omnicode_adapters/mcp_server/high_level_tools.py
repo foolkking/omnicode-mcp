@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 # but omni_read didn't); the omni_status tool reads this constant so the
 # next round can verify which build is actually serving traffic.
 # ---------------------------------------------------------------------------
-_HANDLER_VERSION = "2026.06.04.hybrid-large-repo.r36"
+_HANDLER_VERSION = "2026.06.05.quality-polish-r48"
 _HANDLER_FEATURES: Tuple[str, ...] = (
     "search.source_confidence",       # omni_search row stamping
     "read.diagnostics_aligned",       # omni_read[diagnostics] uses _collect_diagnostics_payload
@@ -592,6 +592,105 @@ _HANDLER_FEATURES: Tuple[str, ...] = (
                                       # counts over the MCP process-local
                                       # snapshot store when computing
                                       # index_readiness in hybrid mode.
+    "status.semantic_index_readiness",
+                                      # workspace-bridge.r37: omni_status
+                                      # surfaces semantic_index_ready,
+                                      # index_worker_busy,
+                                      # search_degraded, and
+                                      # semantic_pending_revisions from
+                                      # cloud /sync/status so AI editors can
+                                      # degrade gracefully while large-repo
+                                      # indexing catches up.
+    "search.snapshot_exact_fuzzy_fast_path",
+                                      # workspace-bridge.r37: default fuzzy
+                                      # symbol search returns exact
+                                      # snapshot-store hits before touching
+                                      # the semantic engine, so large repos
+                                      # can resolve class/function names
+                                      # while embedding bootstrap catches up.
+    "search.exact_index_freshness_gate",
+                                      # workspace-bridge.r38: hybrid
+                                      # symbol/text search may proceed when
+                                      # the lightweight exact index is fresh
+                                      # even if semantic indexing is still
+                                      # catching up.
+    "sync.semantic_index_filter",
+                                      # workspace-bridge.r39: cloud sync keeps
+                                      # full snapshot/exact coverage while
+                                      # routing only source-like files into
+                                      # semantic indexing by default. Large
+                                      # repos remain exact-searchable without
+                                      # embedding every locale/data artifact.
+    "sync.semantic_initial_exact_only_auto",
+                                      # workspace-bridge.r40: initial syncs
+                                      # over the configured file-count limit
+                                      # default to exact-only semantic policy.
+                                      # Later edits still update semantic
+                                      # indexing; full initial semantic
+                                      # bootstrap is an explicit opt-in.
+    "search.state_dir_shard_isolation",
+                                      # workspace-bridge.r41: when
+                                      # OMNICODE_STATE_DIR / content/search
+                                      # store is configured, FAISS/SQLite
+                                      # search shards live outside the user
+                                      # workspace and legacy .data migration is
+                                      # skipped to avoid mutating project files.
+    "freshness.semantic_coverage_exact_only",
+                                      # workspace-bridge.r42: exact-only large
+                                      # initial sync records semantic coverage
+                                      # separately so exact search can be fresh
+                                      # without claiming semantic/hybrid search
+                                      # has full repo coverage.
+    "search.explicit_semantic_bootstrap",
+                                      # workspace-bridge.r43: /search/index on
+                                      # snapshot workspaces supports explicit
+                                      # semantic bootstrap and records
+                                      # semantic_full coverage when complete;
+                                      # exact-policy bootstrap remains
+                                      # available for constrained deployments.
+    "status.index_readiness_contract",
+                                      # workspace-bridge.r44: omni_status and
+                                      # /sync/status expose the same
+                                      # exact-vs-semantic readiness contract,
+                                      # including recommended_query_mode, so
+                                      # AI editors know whether to trust exact
+                                      # lookup, semantic enrichment, or local
+                                      # fallback.
+    "index.semantic_bootstrap_tool",
+                                      # workspace-bridge.r46: semantic
+                                      # bootstrap has first-class CLI/MCP
+                                      # entry points via omnicode index
+                                      # --scope semantic and omni_index.
+    "agent.pending_auto_flush",
+                                      # workspace-bridge.r47: failed agent
+                                      # upsert/delete sync operations are
+                                      # persisted to LocalManifest pending and
+                                      # retried before newer changes.
+    "workspace.multi_workspace_isolation_contract",
+                                      # workspace-bridge.r47: exact/snapshot
+                                      # search contracts prove workspace_id
+                                      # queries cannot read another registered
+                                      # workspace's snapshot/index rows.
+    "sync.rename_move_contract",
+                                      # workspace-bridge.r47: move/rename sync
+                                      # is modeled as new-path upsert plus
+                                      # old-path delete, with snapshot mirror
+                                      # and exact index stale rows removed.
+    "search.exact_index_semantic_rank",
+                                      # workspace-bridge.r48: semantic search
+                                      # boosts exact-index symbol hits ahead
+                                      # of semantic/vector noise and explains
+                                      # the rank_reason.
+    "context.snapshot_same_file_promotion",
+                                      # workspace-bridge.r48: snapshot exact
+                                      # symbol context promotes same-file
+                                      # rows ahead of unrelated semantic
+                                      # results and reports context_quality.
+    "memory.advisory_seed_redaction",
+                                      # workspace-bridge.r48: memory advisory
+                                      # redacts absolute paths from echoed
+                                      # file/task seeds, why_recalled, and
+                                      # synthesized advisory text.
 )
 _PROCESS_START_TIME = None  # set lazily on first omni_status call
 
@@ -618,6 +717,7 @@ _CONTRACT_VERSIONS: Dict[str, str] = {
     "omni_memory":      "memory.v2",
     "omni_context":     "context.v2",
     "omni_skill":       "skill.v2",
+    "omni_index":       "index.v1",
     "omni_status":      "status.v1",
     "discover_tools":   "discover.v1",
 }
@@ -662,6 +762,7 @@ _TOOLS_WITH_JSON_STAMP: Tuple[str, ...] = (
     "omni_memory",
     "omni_context",
     "omni_skill",
+    "omni_index",
     "omni_status",
     "discover_tools",
 )
@@ -4612,8 +4713,21 @@ def register_high_level_tools(mcp, make_request):
         """
         seen_ids: set = set()
         merged: List[Dict[str, Any]] = []
-        seeds = [s for s in (symbol, file, task, query) if s]
-        for seed in seeds:
+        safe_symbol = _sanitize_public_path_text(symbol) if symbol else None
+        safe_file = _sanitize_public_path_ref(file) if file else None
+        safe_task = _sanitize_public_path_text(task) if task else None
+        safe_query = _sanitize_public_path_text(query) if query else None
+        seed_pairs = [
+            (raw, safe)
+            for raw, safe in (
+                (symbol, safe_symbol),
+                (file, safe_file),
+                (task, safe_task),
+                (query, safe_query),
+            )
+            if raw
+        ]
+        for seed, safe_seed in seed_pairs:
             try:
                 srsp = await make_request("POST", "/memory/search", json={
                     "query": seed,
@@ -4627,7 +4741,7 @@ def register_high_level_tools(mcp, make_request):
                 norm = _normalise_memory_row(
                     raw,
                     match_reason=raw.get("match_reason")
-                    or f"seed:{seed[:32]}",
+                    or f"seed:{str(safe_seed or '')[:32]}",
                 )
                 mid = norm.get("memory_id")
                 if mid is None or mid in seen_ids:
@@ -4645,7 +4759,7 @@ def register_high_level_tools(mcp, make_request):
         merged = merged[:max_memories]
 
         synth = _synthesise_advisory(
-            symbol=symbol, file=file, task=task or query,
+            symbol=safe_symbol, file=safe_file, task=safe_task or safe_query,
             memories=merged,
         )
         return {
@@ -4660,11 +4774,25 @@ def register_high_level_tools(mcp, make_request):
             "memory_count": len(synth["referenced_memories"]),
         }
 
-    def _analysis_freshness_fields(state: Dict[str, Any]) -> Dict[str, Any]:
+    def _analysis_freshness_fields(
+        state: Dict[str, Any],
+        *,
+        freshness_mode: str = "strict",
+    ) -> Dict[str, Any]:
+        semantic_stale = bool(state.get("semantic_stale", state.get("stale")))
+        exact_fresh = bool(state.get("exact_fresh", False))
+        visible_stale = (
+            False
+            if freshness_mode == "exact" and exact_fresh
+            else state.get("stale")
+        )
         return {
             "freshness": state.get("freshness"),
-            "freshness_mode": "strict",
-            "stale": state.get("stale"),
+            "freshness_mode": freshness_mode,
+            "stale": visible_stale,
+            "semantic_stale": semantic_stale,
+            "exact_fresh": exact_fresh,
+            "exact_stale": state.get("exact_stale"),
             "cloud_available": state.get("cloud_available"),
             "cloud_unavailable": state.get("cloud_unavailable", False),
             "backend_unreachable": state.get("backend_unreachable", False),
@@ -4672,6 +4800,7 @@ def register_high_level_tools(mcp, make_request):
             "local_revision": state.get("local_revision"),
             "accepted_revision": state.get("accepted_revision"),
             "indexed_revision": state.get("indexed_revision"),
+            "exact_indexed_revision": state.get("exact_indexed_revision"),
             "required_revision": state.get("required_revision"),
             "manifest_present": state.get("manifest_present"),
         }
@@ -4731,6 +4860,7 @@ def register_high_level_tools(mcp, make_request):
         local_revision: Optional[int] = None
         accepted_revision = 0
         indexed_revision = 0
+        exact_indexed_revision = 0
         manifest_present = False
         manifest_warning: Optional[str] = None
 
@@ -4781,6 +4911,10 @@ def register_high_level_tools(mcp, make_request):
                     indexed_revision,
                     int(data.get("indexed_revision") or 0),
                 )
+                exact_indexed_revision = max(
+                    exact_indexed_revision,
+                    int(data.get("exact_indexed_revision") or 0),
+                )
             else:
                 status_warning = str(
                     (data or {}).get("error")
@@ -4807,6 +4941,7 @@ def register_high_level_tools(mcp, make_request):
                 "local_revision": local_revision,
                 "accepted_revision": accepted_revision,
                 "indexed_revision": indexed_revision,
+                "exact_indexed_revision": exact_indexed_revision,
                 "required_revision": required_revision,
                 "manifest_present": manifest_present,
                 "manifest_warning": manifest_warning,
@@ -4826,6 +4961,7 @@ def register_high_level_tools(mcp, make_request):
                 "local_revision": None,
                 "accepted_revision": accepted_revision,
                 "indexed_revision": indexed_revision,
+                "exact_indexed_revision": exact_indexed_revision,
                 "required_revision": None,
                 "manifest_present": manifest_present,
                 "manifest_warning": manifest_warning,
@@ -4834,11 +4970,22 @@ def register_high_level_tools(mcp, make_request):
             }
 
         required_revision = max(local_revision, accepted_revision)
-        stale = indexed_revision < required_revision
+        semantic_stale = indexed_revision < required_revision
+        exact_fresh = exact_indexed_revision >= required_revision
+        freshness = (
+            "stale"
+            if semantic_stale and not exact_fresh
+            else "exact_fresh"
+            if semantic_stale and exact_fresh
+            else "fresh"
+        )
         return {
             "enabled": True,
-            "freshness": "stale" if stale else "fresh",
-            "stale": stale,
+            "freshness": freshness,
+            "stale": semantic_stale,
+            "semantic_stale": semantic_stale,
+            "exact_fresh": exact_fresh,
+            "exact_stale": not exact_fresh,
             "cloud_available": True,
             "cloud_unavailable": False,
             "backend_unreachable": False,
@@ -4846,6 +4993,7 @@ def register_high_level_tools(mcp, make_request):
             "local_revision": local_revision,
             "accepted_revision": accepted_revision,
             "indexed_revision": indexed_revision,
+            "exact_indexed_revision": exact_indexed_revision,
             "required_revision": required_revision,
             "manifest_present": manifest_present,
             "manifest_warning": manifest_warning,
@@ -4856,17 +5004,25 @@ def register_high_level_tools(mcp, make_request):
         *,
         tool: str,
         fmt: str,
+        allow_exact: bool = False,
     ) -> Tuple[Optional[str], Dict[str, Any]]:
         state = await _analysis_freshness_state()
         if not state.get("enabled"):
             return None, {}
         if state.get("freshness") == "fresh":
             return None, _analysis_freshness_fields(state)
+        if allow_exact and state.get("exact_fresh"):
+            return None, _analysis_freshness_fields(
+                state,
+                freshness_mode="exact",
+            )
 
         is_json_fmt = (fmt or "json").lower() == "json"
         freshness = state.get("freshness") or "unknown"
         if freshness == "stale":
             error = "Cloud index is stale"
+        elif freshness == "exact_fresh":
+            error = "Cloud semantic index is stale"
         elif freshness == "unavailable":
             error = "Cloud backend is unavailable"
         else:
@@ -4881,7 +5037,12 @@ def register_high_level_tools(mcp, make_request):
                 (
                     "Restart or reconnect the cloud backend, then retry this tool."
                     if freshness == "unavailable"
-                    else "Wait for sync/indexing to finish, then retry this tool."
+                    else (
+                        "Use mode='symbol' or mode='text' for exact-index lookup, "
+                        "or wait for semantic indexing to finish."
+                        if freshness == "exact_fresh"
+                        else "Wait for sync/indexing to finish, then retry this tool."
+                    )
                 ),
                 "omni_status() to inspect local/cloud revisions.",
                 "GET /sync/status?workspace_id=<workspace_id> to inspect cloud sync state.",
@@ -5001,6 +5162,7 @@ def register_high_level_tools(mcp, make_request):
             freshness_block, freshness_meta = await _analysis_freshness_gate(
                 tool="omni_search",
                 fmt=fmt,
+                allow_exact=resolved_mode in {"symbol", "text"},
             )
             if freshness_block is not None:
                 return freshness_block
@@ -7963,13 +8125,21 @@ def register_high_level_tools(mcp, make_request):
                     max_memories=max(1, max_memories),
                 )
                 merged = advisory_data["memories"]
+                safe_file = _sanitize_public_path_ref(file) if file else file
+                safe_symbol = (
+                    _sanitize_public_path_text(symbol) if symbol else symbol
+                )
+                safe_task = (
+                    _sanitize_public_path_text(task or query)
+                    if (task or query) else (task or query)
+                )
 
                 payload = {
                     "ok": True,
                     "action": "advisory",
-                    "file": file,
-                    "symbol": symbol,
-                    "task": task or query,
+                    "file": safe_file,
+                    "symbol": safe_symbol,
+                    "task": safe_task,
                     "advisory": {
                         "summary": advisory_data["summary"],
                         "action_items": advisory_data["action_items"],
@@ -8038,6 +8208,10 @@ def register_high_level_tools(mcp, make_request):
                 _stamp(payload, tool="omni_memory")
                 if is_json:
                     return json.dumps(payload, ensure_ascii=False, indent=2)
+                symbol = safe_symbol
+                file = safe_file
+                task = safe_task
+                query = None
                 # Text rendering keeps the emoji header for humans —
                 # JSON path stays clean.
                 if not merged:
@@ -10036,6 +10210,178 @@ def register_high_level_tools(mcp, make_request):
             return _err(f"omni_skill failed: {exc}")
 
     @mcp.tool()
+    async def omni_index(
+        action: str = "status",
+        scope: str = "semantic",
+        workspace_id: Optional[str] = None,
+        force: bool = False,
+        background: bool = True,
+        format: str = "json",
+    ) -> str:
+        """Manage cloud snapshot indexing for hybrid analysis.
+
+        Use this when ``omni_status`` reports ``recommended_query_mode`` as
+        ``exact_first`` and you want to opt into semantic enrichment.
+
+        Actions:
+          - status:    inspect the current background snapshot-index job
+          - bootstrap: start explicit snapshot indexing
+
+        Scopes:
+          - semantic:     full semantic bootstrap over snapshot content
+          - exact_policy: index only policy-selected source-like files
+        """
+
+        fmt = (format or "json").lower()
+        action_value = (action or "status").strip().lower()
+        scope_value = (scope or "semantic").strip().lower()
+        valid_actions = ("status", "bootstrap")
+        valid_scopes = ("semantic", "exact_policy")
+
+        def _render(payload: Dict[str, Any]) -> str:
+            _stamp(payload, tool="omni_index")
+            if fmt == "text":
+                if not payload.get("ok", False):
+                    return f"ERROR omni_index: {payload.get('error', 'unknown')}"
+                if payload.get("action") == "status":
+                    job = payload.get("job") or {}
+                    return (
+                        "omni_index status\n"
+                        f"  workspace_id: {payload.get('workspace_id')}\n"
+                        f"  state:        {payload.get('state')}\n"
+                        f"  job:          {job.get('job_id', '-')}\n"
+                        f"  scope:        {job.get('scope', payload.get('scope'))}\n"
+                    )
+                job = payload.get("job") or {}
+                return (
+                    "omni_index bootstrap\n"
+                    f"  workspace_id: {payload.get('workspace_id')}\n"
+                    f"  scope:        {payload.get('scope')}\n"
+                    f"  background:   {payload.get('background')}\n"
+                    f"  state:        {payload.get('state', job.get('state'))}\n"
+                    f"  job:          {job.get('job_id', '-')}\n"
+                )
+            return json.dumps(payload, ensure_ascii=False, indent=2)
+
+        if action_value not in valid_actions:
+            return _render(
+                {
+                    "ok": False,
+                    "action": action_value,
+                    "error": "action must be one of: status, bootstrap",
+                    "allowed_actions": list(valid_actions),
+                    "next_actions": [
+                        "omni_index(action='status', format='json')",
+                        "omni_index(action='bootstrap', scope='semantic', background=True, format='json')",
+                    ],
+                }
+            )
+        if scope_value not in valid_scopes:
+            return _render(
+                {
+                    "ok": False,
+                    "action": action_value,
+                    "scope": scope_value,
+                    "error": "scope must be one of: semantic, exact_policy",
+                    "allowed_scopes": list(valid_scopes),
+                    "next_actions": [
+                        "omni_index(action='bootstrap', scope='semantic', background=True, format='json')",
+                    ],
+                }
+            )
+
+        import os as _os
+
+        effective_workspace_id = (
+            workspace_id or _os.environ.get("OMNICODE_WORKSPACE_ID") or ""
+        ).strip() or None
+        params: Dict[str, Any] = {}
+        headers: Dict[str, str] = {}
+        if effective_workspace_id:
+            params["workspace_id"] = effective_workspace_id
+            headers["X-Omnicode-Workspace"] = effective_workspace_id
+
+        try:
+            if action_value == "status":
+                raw = await make_request(
+                    "GET",
+                    "/search/index/status",
+                    params=params,
+                    headers=headers,
+                )
+            else:
+                raw = await make_request(
+                    "POST",
+                    "/search/index",
+                    params={
+                        **params,
+                        "force": bool(force),
+                        "background": bool(background),
+                        "scope": scope_value,
+                    },
+                    headers=headers,
+                )
+
+            data = raw.get("result", raw) if isinstance(raw, dict) else {}
+            backend_error = _backend_error_message(data)
+            if backend_error:
+                return _render(
+                    {
+                        "ok": False,
+                        "action": action_value,
+                        "scope": scope_value,
+                        "workspace_id": effective_workspace_id,
+                        "error": _sanitize_error_text(str(backend_error)),
+                        "next_actions": [
+                            "omni_status(format='json') to inspect backend availability.",
+                            "Check workspace_id and backend_url, then retry omni_index.",
+                        ],
+                    }
+                )
+
+            payload: Dict[str, Any] = {
+                "ok": True,
+                "action": action_value,
+                "scope": scope_value,
+                "workspace_id": effective_workspace_id,
+                "backend_action": (
+                    "GET /search/index/status"
+                    if action_value == "status"
+                    else "POST /search/index"
+                ),
+            }
+            if isinstance(data, dict):
+                payload.update(data)
+            payload["next_actions"] = (
+                [
+                    "omni_status(format='json') to confirm semantic_index_ready and recommended_query_mode.",
+                    "omni_search(query='<task>', mode='semantic', format='json') after semantic indexing completes.",
+                ]
+                if action_value == "bootstrap"
+                else [
+                    "omni_index(action='bootstrap', scope='semantic', background=True, format='json') to start full semantic bootstrap.",
+                    "omni_status(format='json') to inspect index_readiness_contract.",
+                ]
+            )
+            return _render(payload)
+        except Exception as exc:  # noqa: BLE001
+            return _render(
+                {
+                    "ok": False,
+                    "action": action_value,
+                    "scope": scope_value,
+                    "workspace_id": effective_workspace_id,
+                    "error": _sanitize_error_text(
+                        f"{exc.__class__.__name__}: {exc}"
+                    ),
+                    "next_actions": [
+                        "omni_status(format='json') to inspect backend availability.",
+                        "Retry omni_index after the backend is reachable.",
+                    ],
+                }
+            )
+
+    @mcp.tool()
     async def omni_status() -> str:
         """Runtime self-check for the live MCP host.
 
@@ -10167,7 +10513,7 @@ def register_high_level_tools(mcp, make_request):
         flagship = (
             "omni_search", "omni_read", "omni_impact",
             "omni_diagnostics", "omni_patch", "omni_memory",
-            "omni_context", "omni_skill", "discover_tools",
+            "omni_context", "omni_skill", "omni_index", "discover_tools",
             "omni_status",
         )
         missing_flagship = [
@@ -10282,6 +10628,7 @@ def register_high_level_tools(mcp, make_request):
             snapshot_store_source: Optional[str] = None
             cloud_available = bool(backend_url)
             cloud_status_warning: Optional[str] = None
+            cloud_index_status: Dict[str, Any] = {}
 
             if workspace_id:
                 try:
@@ -10342,6 +10689,40 @@ def register_high_level_tools(mcp, make_request):
                                 indexed_revision,
                                 int(cloud_status.get("indexed_revision") or 0),
                             )
+                            cloud_index_status = {
+                                key: cloud_status.get(key)
+                                for key in (
+                                    "semantic_index_ready",
+                                    "semantic_index_coverage",
+                                    "semantic_initial_exact_only",
+                                    "exact_index_ready",
+                                    "snapshot_ready",
+                                    "index_worker_busy",
+                                    "search_degraded",
+                                    "semantic_pending_revisions",
+                                    "exact_pending_revisions",
+                                    "pending_files",
+                                    "index_queue_depth",
+                                    "index_worker_running",
+                                    "last_index_error",
+                                    "last_index_elapsed_ms",
+                                    "current_index_files",
+                                    "current_index_bytes",
+                                    "current_index_elapsed_ms",
+                                    "recommended_query_mode",
+                                    "query_mode_reason",
+                                    "supported_query_modes",
+                                    "exact_query_safe",
+                                    "strict_semantic_safe",
+                                    "semantic_query_safe",
+                                    "index_readiness_contract",
+                                )
+                                if key in cloud_status
+                            }
+                            if isinstance(cloud_status.get("exact_index"), dict):
+                                cloud_index_status["exact_index"] = dict(
+                                    cloud_status["exact_index"]
+                                )
                             cloud_snapshot = cloud_status.get("snapshot_store")
                             if isinstance(cloud_snapshot, dict):
                                 snapshot_status = dict(cloud_snapshot)
@@ -10407,14 +10788,76 @@ def register_high_level_tools(mcp, make_request):
                 and accepted_revision > 0
                 and indexed_revision >= accepted_revision
             )
+            exact_query_safe = bool(
+                cloud_index_status.get("exact_query_safe")
+                or cloud_index_status.get("exact_index_ready")
+            )
+            strict_semantic_safe = bool(
+                cloud_index_status.get("strict_semantic_safe")
+                or cloud_index_status.get("semantic_index_ready", index_fresh)
+            )
+            recommended_query_mode = str(
+                cloud_index_status.get("recommended_query_mode")
+                or (
+                    "semantic_first"
+                    if strict_semantic_safe
+                    else "exact_first"
+                    if exact_query_safe
+                    else "snapshot_only"
+                    if indexed_file_count
+                    else "local_only"
+                )
+            )
             index_readiness = {
-                "text_index_ready": bool(indexed_file_count and index_fresh),
-                "symbol_index_ready": bool(indexed_file_count and index_fresh),
+                "text_index_ready": bool(
+                    exact_query_safe
+                    or cloud_index_status.get("snapshot_ready", indexed_file_count)
+                ),
+                "symbol_index_ready": bool(
+                    exact_query_safe or strict_semantic_safe
+                ),
                 "graph_index_ready": False,
                 "fresh": bool(index_fresh),
+                "exact_query_safe": exact_query_safe,
+                "semantic_query_safe": strict_semantic_safe,
+                "strict_semantic_safe": strict_semantic_safe,
+                "recommended_query_mode": recommended_query_mode,
+                "query_mode_reason": cloud_index_status.get(
+                    "query_mode_reason"
+                ),
+                "supported_query_modes": cloud_index_status.get(
+                    "supported_query_modes",
+                    [],
+                ),
+                "semantic_index_ready": bool(
+                    cloud_index_status.get("semantic_index_ready", index_fresh)
+                ),
+                "semantic_index_coverage": cloud_index_status.get(
+                    "semantic_index_coverage",
+                    "unknown",
+                ),
+                "semantic_initial_exact_only": bool(
+                    cloud_index_status.get("semantic_initial_exact_only", False)
+                ),
+                "exact_index_ready": bool(
+                    cloud_index_status.get("exact_index_ready", exact_query_safe)
+                ),
+                "exact_index": cloud_index_status.get("exact_index", {}),
+                "index_worker_busy": bool(
+                    cloud_index_status.get("index_worker_busy", False)
+                ),
+                "search_degraded": bool(
+                    cloud_index_status.get("search_degraded", not index_fresh)
+                ),
+                "semantic_pending_revisions": int(
+                    cloud_index_status.get("semantic_pending_revisions") or 0
+                ),
                 "indexed_files": indexed_file_count,
                 "accepted_revision": accepted_revision,
                 "indexed_revision": indexed_revision,
+                "exact_pending_revisions": int(
+                    cloud_index_status.get("exact_pending_revisions") or 0
+                ),
                 "graph_index_reason": (
                     "graph bootstrap is not persisted yet; omni_impact may "
                     "run a bounded live graph scan and report caveats."
@@ -10436,6 +10879,7 @@ def register_high_level_tools(mcp, make_request):
                     "cloud_status_warning": cloud_status_warning,
                     "snapshot_store": snapshot_status,
                     "snapshot_store_source": snapshot_store_source,
+                    "cloud_index_status": cloud_index_status,
                     "index_readiness": index_readiness,
                     "routes": {
                         tool: _asdict(router.route(tool, sync_state=sync_state))

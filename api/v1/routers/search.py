@@ -24,6 +24,11 @@ from omnicode_core.workspace.request import (
     WorkspaceResolutionError,
     resolve_workspace_request,
 )
+from omnicode_core.workspace.exact_index import SnapshotExactIndex
+from omnicode_core.workspace.semantic_index_policy import (
+    semantic_index_decision,
+    semantic_index_policy_payload,
+)
 from omnicode_core.workspace.snapshot_store import CloudSnapshotStore
 from utils import (
     create_error_response,
@@ -34,6 +39,10 @@ from utils import (
 router = APIRouter(prefix="/search", tags=["search"])
 _SNAPSHOT_INDEX_JOBS_LOCK = threading.RLock()
 _SNAPSHOT_INDEX_JOBS: dict[str, dict[str, Any]] = {}
+
+
+def _exact_index() -> SnapshotExactIndex:
+    return SnapshotExactIndex(store=CloudSnapshotStore())
 
 
 def _resolve_search_workspace(workspace_id: Optional[str]) -> Optional[str]:
@@ -79,6 +88,85 @@ def _snapshot_line_match(
     return start, start + len(needle)
 
 
+def _query_identifier_terms(query: str) -> list[str]:
+    terms: list[str] = []
+    seen: set[str] = set()
+    for raw in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", query or ""):
+        if raw in {"class", "def", "async", "return", "import", "from"}:
+            continue
+        lowered = raw.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        terms.append(raw)
+    return terms[:5]
+
+
+def _grep_mirror_paths(
+    *,
+    mirror_root: Path,
+    paths: list[str],
+    query: str,
+    use_regex: bool,
+    case_sensitive: bool,
+    context_lines: int,
+    max_results: int,
+    existing_keys: set[tuple[str, int]],
+    hashes: dict[str, str],
+    revisions: dict[str, int],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for rel in paths:
+        if len(rows) >= max_results:
+            break
+        try:
+            path = mirror_root / rel
+            if not path.is_file():
+                continue
+            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            continue
+        for idx, line in enumerate(lines):
+            if len(rows) >= max_results:
+                break
+            span = _snapshot_line_match(
+                line,
+                query,
+                use_regex=use_regex,
+                case_sensitive=case_sensitive,
+            )
+            if span is None:
+                continue
+            line_no = idx + 1
+            key = (rel, line_no)
+            if key in existing_keys:
+                continue
+            existing_keys.add(key)
+            start = max(0, idx - context_lines)
+            end = idx + 1 + context_lines
+            rows.append(
+                {
+                    "file_path": rel,
+                    "line_number": line_no,
+                    "line_content": line,
+                    "context_before": lines[start:idx],
+                    "context_after": lines[idx + 1:end],
+                    "match_span": list(span),
+                    "match_type": "text",
+                    "relevance_score": 1.0,
+                    "why_matched": [
+                        "text:line_match",
+                        "snapshot_mirror",
+                        "symbol_prioritized",
+                    ],
+                    "source": "snapshot_mirror",
+                    "hash": hashes.get(rel),
+                    "revision": revisions.get(rel),
+                }
+            )
+    return rows
+
+
 def _grep_snapshot_store(
     *,
     workspace_id: Optional[str],
@@ -93,6 +181,82 @@ def _grep_snapshot_store(
     if not workspace_id or max_results <= 0:
         return []
     store = CloudSnapshotStore()
+    mirror_root = store.workspaces_root / workspace_id / "mirror"
+    if mirror_root.is_dir():
+        try:
+            from omnicode_core.search.text_grep import grep_workspace
+
+            hashes = store.file_hashes(workspace_id)
+            revisions = {
+                record.path: record.revision
+                for record in store.list_records(workspace_id=workspace_id)
+            }
+            prioritized_paths: list[str] = []
+            prioritized_seen: set[str] = set()
+            if not use_regex:
+                for term in _query_identifier_terms(query):
+                    for row in _exact_index().search_symbols(
+                        workspace_id=workspace_id,
+                        query=term,
+                        fuzzy=False,
+                        max_results=20,
+                    ):
+                        if not _snapshot_patterns_match(row.path, patterns):
+                            continue
+                        if row.path in prioritized_seen:
+                            continue
+                        prioritized_seen.add(row.path)
+                        prioritized_paths.append(row.path)
+            rows_from_mirror = _grep_mirror_paths(
+                mirror_root=mirror_root,
+                paths=prioritized_paths,
+                query=query,
+                use_regex=use_regex,
+                case_sensitive=case_sensitive,
+                context_lines=context_lines,
+                max_results=max_results,
+                existing_keys=existing_keys,
+                hashes=hashes,
+                revisions=revisions,
+            )
+            if rows_from_mirror:
+                return rows_from_mirror
+
+            hits = grep_workspace(
+                workspace_root=mirror_root,
+                query=query,
+                file_patterns=patterns,
+                max_results=max_results - len(rows_from_mirror),
+                context_lines=context_lines,
+                use_regex=use_regex,
+                case_sensitive=case_sensitive,
+                merge_adjacent=False,
+            )
+            for hit in hits:
+                key = (hit.file_path, hit.line_number)
+                if key in existing_keys:
+                    continue
+                existing_keys.add(key)
+                rows_from_mirror.append(
+                    {
+                        "file_path": hit.file_path,
+                        "line_number": hit.line_number,
+                        "line_content": hit.line_content,
+                        "context_before": hit.context_before,
+                        "context_after": hit.context_after,
+                        "match_span": list(hit.match_span),
+                        "match_type": "text",
+                        "relevance_score": 1.0,
+                        "why_matched": ["text:line_match", "snapshot_mirror"],
+                        "source": "snapshot_mirror",
+                        "hash": hashes.get(hit.file_path),
+                        "revision": revisions.get(hit.file_path),
+                    }
+                )
+            return rows_from_mirror
+        except Exception:
+            pass
+
     rows: list[dict[str, Any]] = []
     for record in store.list_records(workspace_id=workspace_id):
         if not _snapshot_patterns_match(record.path, patterns):
@@ -311,6 +475,47 @@ def _snapshot_semantic_exact_boost(
     seen: set[tuple[str, int, str]] = set()
 
     if _IDENTIFIER_QUERY_RE.fullmatch(query.strip()):
+        try:
+            exact_rows = _exact_index().search_symbols(
+                workspace_id=workspace_id,
+                query=query,
+                symbol_type=None,
+                file_pattern=file_pattern,
+                fuzzy=False,
+                min_score=1.0,
+                max_results=max_results,
+            )
+        except Exception:
+            exact_rows = []
+        for row in exact_rows:
+            line_no = int(row.line_start or 0)
+            key = (row.path, line_no, row.name)
+            if key in seen:
+                continue
+            seen.add(key)
+            boosted.append(
+                {
+                    "file_path": row.path,
+                    "symbol_name": row.name,
+                    "chunk_type": row.kind,
+                    "symbol_type": row.kind,
+                    "line_start": row.line_start,
+                    "line_end": row.line_end,
+                    "signature": row.signature,
+                    "docstring": "",
+                    "relevance_score": row.score,
+                    "why_matched": [row.why, "exact_index", "semantic:exact_boost"],
+                    "source": "exact_index",
+                    "rank_reason": "exact_symbol_before_semantic",
+                    "hash": row.hash,
+                    "revision": row.revision,
+                }
+            )
+            if len(boosted) >= max_results:
+                return boosted
+        if boosted:
+            return boosted
+
         symbol_rows = _snapshot_symbol_search(
             workspace_id=workspace_id,
             query=query,
@@ -336,6 +541,7 @@ def _snapshot_semantic_exact_boost(
                     "chunk_type": item.get("symbol_type") or "symbol",
                     "docstring": item.get("docstring") or "",
                     "why_matched": why,
+                    "rank_reason": "exact_symbol_before_semantic",
                 }
             )
             boosted.append(item)
@@ -529,6 +735,7 @@ def _snapshot_semantic_lexical_boost(
                         "semantic:lexical_boost",
                     ],
                     "source": "snapshot_store",
+                    "rank_reason": "lexical_overlap_before_semantic",
                     "matched_tokens": sorted(matched_tokens),
                     "hash": record.hash,
                     "revision": record.revision,
@@ -544,6 +751,7 @@ def _run_snapshot_index_blocking(
     workspace_id: str,
     *,
     force: bool = False,
+    scope: str = "semantic",
     progress: Optional[Callable[[dict[str, Any]], None]] = None,
 ) -> dict[str, Any]:
     """Index snapshot-store content in a worker thread."""
@@ -588,6 +796,8 @@ def _run_snapshot_index_blocking(
         indexed_chunks = 0
         skipped_unchanged = 0
         skipped_by_indexed_revision = 0
+        skipped_by_policy = 0
+        skip_policy_reasons: dict[str, int] = {}
         deleted_index_entries = 0
         batch_size = 50
         batch: list[tuple[str, str, dict[str, Any]]] = []
@@ -602,6 +812,8 @@ def _run_snapshot_index_blocking(
                 "indexed_chunks": indexed_chunks,
                 "skipped_unchanged": skipped_unchanged,
                 "skipped_by_indexed_revision": skipped_by_indexed_revision,
+                "skipped_by_policy": skipped_by_policy,
+                "skip_policy_reasons": dict(skip_policy_reasons),
                 "deleted_index_entries": deleted_index_entries,
                 "indexed_revision_watermark": indexed_revision_watermark,
                 "current_path": current_path,
@@ -665,6 +877,23 @@ def _run_snapshot_index_blocking(
                 if records_processed % 25 == 0 or records_processed == len(records):
                     emit_progress(**progress_snapshot(record.path))
                 continue
+            if scope != "semantic":
+                include_semantic, reason = semantic_index_decision(
+                    record.path,
+                    content,
+                    {
+                        "phase": "snapshot_bootstrap",
+                        "files_seen": len(records),
+                    },
+                )
+                if not include_semantic:
+                    skipped_by_policy += 1
+                    skip_policy_reasons[reason] = (
+                        skip_policy_reasons.get(reason, 0) + 1
+                    )
+                    if records_processed % 25 == 0 or records_processed == len(records):
+                        emit_progress(**progress_snapshot(record.path))
+                    continue
             batch.append(
                 (
                     record.path,
@@ -711,6 +940,13 @@ def _run_snapshot_index_blocking(
         indexed_revision = store.mark_indexed(
             workspace_id=workspace_id,
             revision=accepted_revision,
+            semantic_coverage=(
+                "semantic_full"
+                if scope == "semantic"
+                else "filtered"
+                if skipped_by_policy
+                else "selected_files"
+            ),
         )
         try:
             from api.v1.routers.sync import record_external_indexed_revision
@@ -725,12 +961,16 @@ def _run_snapshot_index_blocking(
             "workspace_id": workspace_id,
             "snapshot_store_used": True,
             "force": force,
+            "scope": scope,
+            "semantic_index_policy": semantic_index_policy_payload(),
             "records_seen": len(records),
             "records_total": len(records),
             "indexed_files": indexed_files,
             "indexed_chunks": indexed_chunks,
             "skipped_unchanged": skipped_unchanged,
             "skipped_by_indexed_revision": skipped_by_indexed_revision,
+            "skipped_by_policy": skipped_by_policy,
+            "skip_policy_reasons": dict(skip_policy_reasons),
             "deleted_index_entries": deleted_index_entries,
             "accepted_revision": accepted_revision,
             "indexed_revision": indexed_revision,
@@ -754,7 +994,12 @@ def _snapshot_index_job_key(workspace_id: str) -> str:
     return workspace_id
 
 
-def _start_snapshot_index_job(workspace_id: str, *, force: bool = False) -> dict[str, Any]:
+def _start_snapshot_index_job(
+    workspace_id: str,
+    *,
+    force: bool = False,
+    scope: str = "semantic",
+) -> dict[str, Any]:
     key = _snapshot_index_job_key(workspace_id)
     with _SNAPSHOT_INDEX_JOBS_LOCK:
         existing = _SNAPSHOT_INDEX_JOBS.get(key)
@@ -765,6 +1010,7 @@ def _start_snapshot_index_job(workspace_id: str, *, force: bool = False) -> dict
             "workspace_id": workspace_id,
             "state": "running",
             "force": force,
+            "scope": scope,
             "started_at": time.time(),
             "completed_at": None,
             "elapsed_ms": None,
@@ -774,6 +1020,8 @@ def _start_snapshot_index_job(workspace_id: str, *, force: bool = False) -> dict
             "indexed_chunks": 0,
             "skipped_unchanged": 0,
             "skipped_by_indexed_revision": 0,
+            "skipped_by_policy": 0,
+            "skip_policy_reasons": {},
             "deleted_index_entries": 0,
             "indexed_revision_watermark": None,
             "current_path": None,
@@ -796,6 +1044,7 @@ def _start_snapshot_index_job(workspace_id: str, *, force: bool = False) -> dict
             result = _run_snapshot_index_blocking(
                 workspace_id,
                 force=force,
+                scope=scope,
                 progress=_progress,
             )
             with _SNAPSHOT_INDEX_JOBS_LOCK:
@@ -812,6 +1061,8 @@ def _start_snapshot_index_job(workspace_id: str, *, force: bool = False) -> dict
                         "skipped_by_indexed_revision": result.get(
                             "skipped_by_indexed_revision"
                         ),
+                        "skipped_by_policy": result.get("skipped_by_policy"),
+                        "skip_policy_reasons": result.get("skip_policy_reasons"),
                         "deleted_index_entries": result.get("deleted_index_entries"),
                         "indexed_revision_watermark": result.get(
                             "indexed_revision_watermark"
@@ -961,6 +1212,14 @@ async def index_codebase(
         False,
         description="For snapshot workspaces, start indexing in the background.",
     ),
+    scope: str = Query(
+        "semantic",
+        description=(
+            "Snapshot workspace semantic bootstrap scope: 'semantic' indexes all "
+            "snapshot text into the semantic store; 'exact_policy' applies the "
+            "configured semantic extension/size policy."
+        ),
+    ),
     workspace_id: Optional[str] = Query(
         None,
         description="Hybrid sync workspace id; when present, index snapshot-store content.",
@@ -976,6 +1235,12 @@ async def index_codebase(
     Pass ?force=true to clear the file tracker and rebuild everything.
     """
     try:
+        scope_value = (scope or "semantic").strip().lower()
+        if scope_value not in {"semantic", "exact_policy"}:
+            return create_error_response(
+                "scope must be one of: semantic, exact_policy",
+                400,
+            )
         effective_workspace_id = _resolve_search_workspace(
             x_omnicode_workspace or workspace_id
         )
@@ -994,6 +1259,7 @@ async def index_codebase(
                         "job": _start_snapshot_index_job(
                             effective_workspace_id,
                             force=force,
+                            scope=scope_value,
                         ),
                     }
                 )
@@ -1001,6 +1267,7 @@ async def index_codebase(
                 _run_snapshot_index_blocking,
                 effective_workspace_id,
                 force=force,
+                scope=scope_value,
             )
             return create_success_response(payload)
 
@@ -1132,6 +1399,7 @@ async def text_search(
             workspace_id=effective_workspace_id,
             min_revision=x_omnicode_min_revision,
             allow_snapshot_fresh=True,
+            allow_exact_fresh=True,
         )
         if stale is not None:
             return stale
@@ -1149,6 +1417,82 @@ async def text_search(
             else None
         )
 
+        results = []
+        existing_keys: set[tuple[str, int]] = set()
+        exact_index_used = False
+        exact_line_fts_available = False
+        exact_index_authoritative = bool(
+            effective_workspace_id
+            and x_omnicode_min_revision
+            and freshness
+            and not freshness.get("exact_stale", True)
+        )
+        if effective_workspace_id:
+            try:
+                exact_status = await asyncio.to_thread(
+                    _exact_index().status,
+                    workspace_id=effective_workspace_id,
+                )
+                exact_line_fts_available = bool(
+                    exact_status.get("line_fts_available", False)
+                )
+            except Exception:
+                exact_line_fts_available = False
+            if exact_line_fts_available:
+                exact_rows = await asyncio.to_thread(
+                    _exact_index().search_text,
+                    workspace_id=effective_workspace_id,
+                    query=query,
+                    file_pattern=file_pattern or None,
+                    use_regex=use_regex,
+                    case_sensitive=case_sensitive,
+                    max_results=max_results,
+                    context_lines=context_lines,
+                )
+                exact_index_used = True
+                for row in exact_rows:
+                    existing_keys.add((row.path, row.line_no))
+                    results.append(
+                        {
+                            "file_path": row.path,
+                            "line_number": row.line_no,
+                            "line_content": row.line_text,
+                            "context_before": row.context_before,
+                            "context_after": row.context_after,
+                            "match_span": list(row.match_span),
+                            "match_type": "text",
+                            "relevance_score": 1.0,
+                            "why_matched": ["text:line_match", "exact_index"],
+                            "source": "exact_index",
+                            "hash": row.hash,
+                            "revision": row.revision,
+                        }
+                    )
+
+        if (exact_index_authoritative and exact_index_used) or len(results) >= max_results:
+            return create_success_response(
+                {
+                    "query": query,
+                    "search_type": "text",
+                    "file_pattern": file_pattern or "(defaults)",
+                    "use_regex": use_regex,
+                    "case_sensitive": case_sensitive,
+                    "results": results[:max_results],
+                    "total_results": min(len(results), max_results),
+                    "snapshot_store_used": bool(effective_workspace_id),
+                    "exact_index_used": exact_index_used,
+                    "exact_line_fts_available": exact_line_fts_available,
+                    "freshness": (freshness or {}).get("freshness", "unknown")
+                    if x_omnicode_min_revision
+                    else "unknown",
+                    "semantic_stale": bool((freshness or {}).get("semantic_stale", False)),
+                    "exact_stale": bool((freshness or {}).get("exact_stale", False)),
+                    "accepted_revision": (freshness or {}).get("accepted_revision"),
+                    "indexed_revision": (freshness or {}).get("indexed_revision"),
+                    "exact_indexed_revision": (freshness or {}).get("exact_indexed_revision"),
+                }
+            )
+
         hits = grep_workspace(
             workspace_root=settings.WORKING_DIR,
             query=query,
@@ -1160,10 +1504,11 @@ async def text_search(
             merge_adjacent=merge_adjacent,
         )
 
-        results = []
-        existing_keys: set[tuple[str, int]] = set()
         for h in hits:
-            existing_keys.add((h.file_path, h.line_number))
+            key = (h.file_path, h.line_number)
+            if key in existing_keys:
+                continue
+            existing_keys.add(key)
             row = {
                 "file_path": h.file_path,
                 "line_number": h.line_number,
@@ -1208,12 +1553,16 @@ async def text_search(
                 "results": results,
                 "total_results": len(results),
                 "snapshot_store_used": bool(effective_workspace_id),
+                "exact_index_used": exact_index_used,
+                "exact_line_fts_available": exact_line_fts_available,
                 "freshness": (freshness or {}).get("freshness", "unknown")
                 if x_omnicode_min_revision
                 else "unknown",
                 "semantic_stale": bool((freshness or {}).get("semantic_stale", False)),
+                "exact_stale": bool((freshness or {}).get("exact_stale", False)),
                 "accepted_revision": (freshness or {}).get("accepted_revision"),
                 "indexed_revision": (freshness or {}).get("indexed_revision"),
+                "exact_indexed_revision": (freshness or {}).get("exact_indexed_revision"),
             }
         )
 
@@ -1246,6 +1595,7 @@ async def symbol_search(
             workspace_id=workspace_id,
             min_revision=x_omnicode_min_revision,
             allow_snapshot_fresh=True,
+            allow_exact_fresh=True,
         )
         if stale is not None:
             return stale
@@ -1261,6 +1611,76 @@ async def symbol_search(
         # bootstrapped.
         formatted_results = []
         existing_keys: set[tuple[str, str, int]] = set()
+        exact_index_authoritative = bool(
+            workspace_id
+            and x_omnicode_min_revision
+            and freshness
+            and not freshness.get("exact_stale", True)
+        )
+        if workspace_id:
+            exact_rows = await asyncio.to_thread(
+                _exact_index().search_symbols,
+                workspace_id=workspace_id,
+                query=query,
+                symbol_type=symbol_type,
+                file_pattern=file_pattern,
+                fuzzy=fuzzy,
+                min_score=min_score,
+                max_results=max_results,
+            )
+            for row in exact_rows:
+                key = (row.path, row.name, row.line_start)
+                existing_keys.add(key)
+                formatted_results.append(
+                    {
+                        "file_path": row.path,
+                        "symbol_name": row.name,
+                        "symbol_type": row.kind,
+                        "line_start": row.line_start,
+                        "line_end": row.line_end,
+                        "signature": row.signature,
+                        "relevance_score": row.score,
+                        "why_matched": [row.why, "exact_index"],
+                        "source": "exact_index",
+                        "hash": row.hash,
+                        "revision": row.revision,
+                    }
+                )
+            exact_has_exact = any(
+                "symbol:exact" in (row.get("why_matched") or [])
+                for row in formatted_results
+            )
+            if (
+                exact_index_authoritative
+                or exact_has_exact
+                or len(formatted_results) >= max_results
+            ):
+                return create_success_response(
+                    {
+                        "query": query,
+                        "search_type": search_type,
+                        "symbol_type": symbol_type,
+                        "fuzzy_enabled": fuzzy,
+                        "results": formatted_results[:max_results],
+                        "total_results": min(len(formatted_results), max_results),
+                        "snapshot_store_used": bool(workspace_id),
+                        "exact_index_used": True,
+                        "snapshot_fast_path": True,
+                        "freshness": (freshness or {}).get("freshness", "unknown")
+                        if x_omnicode_min_revision
+                        else "unknown",
+                        "semantic_stale": bool(
+                            (freshness or {}).get("semantic_stale", False)
+                        ),
+                        "exact_stale": bool((freshness or {}).get("exact_stale", False)),
+                        "accepted_revision": (freshness or {}).get("accepted_revision"),
+                        "indexed_revision": (freshness or {}).get("indexed_revision"),
+                        "exact_indexed_revision": (
+                            freshness or {}
+                        ).get("exact_indexed_revision"),
+                    }
+                )
+
         snapshot_results = await asyncio.to_thread(
             _snapshot_symbol_search,
             workspace_id=workspace_id,
@@ -1279,7 +1699,7 @@ async def symbol_search(
         )
         snapshot_fast_path = bool(snapshot_results) and (
             len(formatted_results) >= max_results
-            or (not fuzzy and snapshot_has_exact)
+            or snapshot_has_exact
         )
         if snapshot_fast_path:
             return create_success_response(
@@ -1291,6 +1711,7 @@ async def symbol_search(
                     "results": formatted_results[:max_results],
                     "total_results": min(len(formatted_results), max_results),
                     "snapshot_store_used": bool(workspace_id),
+                    "exact_index_used": bool(workspace_id),
                     "snapshot_fast_path": True,
                     "freshness": (freshness or {}).get("freshness", "unknown")
                     if x_omnicode_min_revision
@@ -1298,8 +1719,12 @@ async def symbol_search(
                     "semantic_stale": bool(
                         (freshness or {}).get("semantic_stale", False)
                     ),
+                    "exact_stale": bool((freshness or {}).get("exact_stale", False)),
                     "accepted_revision": (freshness or {}).get("accepted_revision"),
                     "indexed_revision": (freshness or {}).get("indexed_revision"),
+                    "exact_indexed_revision": (
+                        freshness or {}
+                    ).get("exact_indexed_revision"),
                 }
             )
 
@@ -1315,6 +1740,7 @@ async def symbol_search(
                         "results": formatted_results[:max_results],
                         "total_results": min(len(formatted_results), max_results),
                         "snapshot_store_used": bool(workspace_id),
+                        "exact_index_used": bool(workspace_id),
                         "snapshot_fast_path": True,
                         "search_engine_unavailable": True,
                         "freshness": (freshness or {}).get("freshness", "unknown")
@@ -1323,8 +1749,12 @@ async def symbol_search(
                         "semantic_stale": bool(
                             (freshness or {}).get("semantic_stale", False)
                         ),
+                        "exact_stale": bool((freshness or {}).get("exact_stale", False)),
                         "accepted_revision": (freshness or {}).get("accepted_revision"),
                         "indexed_revision": (freshness or {}).get("indexed_revision"),
+                        "exact_indexed_revision": (
+                            freshness or {}
+                        ).get("exact_indexed_revision"),
                     }
                 )
             return create_error_response("Semantic search not initialized", 500)
@@ -1373,12 +1803,16 @@ async def symbol_search(
                 "results": formatted_results,
                 "total_results": len(formatted_results),
                 "snapshot_store_used": bool(workspace_id),
+                "exact_index_used": bool(workspace_id),
+                "snapshot_fast_path": False,
                 "freshness": (freshness or {}).get("freshness", "unknown")
                 if x_omnicode_min_revision
                 else "unknown",
                 "semantic_stale": bool((freshness or {}).get("semantic_stale", False)),
+                "exact_stale": bool((freshness or {}).get("exact_stale", False)),
                 "accepted_revision": (freshness or {}).get("accepted_revision"),
                 "indexed_revision": (freshness or {}).get("indexed_revision"),
+                "exact_indexed_revision": (freshness or {}).get("exact_indexed_revision"),
             }
         )
 

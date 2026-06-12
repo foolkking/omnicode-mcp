@@ -26,6 +26,34 @@ from typing import List, Optional, Sequence
 logger = logging.getLogger(__name__)
 
 
+def _configure_torch_threads() -> None:
+    raw = os.environ.get("OMNICODE_EMBEDDING_TORCH_THREADS", "").strip()
+    if not raw:
+        return
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Ignoring invalid OMNICODE_EMBEDDING_TORCH_THREADS=%r", raw)
+        return
+    if value <= 0:
+        return
+    try:
+        import torch  # type: ignore[import-not-found]
+
+        torch.set_num_threads(value)
+        set_interop = getattr(torch, "set_num_interop_threads", None)
+        if callable(set_interop):
+            try:
+                set_interop(value)
+            except RuntimeError:
+                # PyTorch only allows setting interop threads before parallel
+                # work starts. The main thread cap still applies.
+                pass
+        logger.info("Embedding torch thread cap set to %d", value)
+    except Exception as exc:
+        logger.warning("Failed to configure torch thread cap: %s", exc)
+
+
 class EmbeddingBackend:
     """Minimal interface every backend must satisfy."""
 
@@ -50,6 +78,7 @@ class LocalSentenceTransformerBackend(EmbeddingBackend):
     name = "local-sentence-transformers"
 
     def __init__(self, model_name: str) -> None:
+        _configure_torch_threads()
         from sentence_transformers import SentenceTransformer
 
         self._model_name = model_name

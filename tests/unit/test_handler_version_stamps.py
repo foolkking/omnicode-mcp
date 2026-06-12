@@ -143,6 +143,12 @@ def _build_full_tools_with_routes() -> Dict[str, Callable[..., Any]]:
         "/memory/store": {"memory_id": "m1"},
         "/memory/context": {},
         "/memory/advisory": {"advisory": "no advisory"},
+        "/search/index/status": {
+            "workspace_id": "repo-a",
+            "background": True,
+            "state": "idle",
+            "job": None,
+        },
     }
     return _build_tools(routes)
 
@@ -156,6 +162,7 @@ def _build_full_tools_with_routes() -> Dict[str, Callable[..., Any]]:
         ("omni_patch", lambda t: t["omni_patch"](action="sessions", format="json")),
         ("omni_memory", lambda t: t["omni_memory"](action="context", format="json")),
         ("omni_skill", lambda t: t["omni_skill"](action="list", format="json")),
+        ("omni_index", lambda t: t["omni_index"](action="status", workspace_id="repo-a", format="json")),
         ("omni_status", lambda t: t["omni_status"]()),
     ],
 )
@@ -250,7 +257,8 @@ def test_omni_status_expected_contract_versions_present():
     for tool in (
         "omni_search", "omni_read", "omni_impact",
         "omni_diagnostics", "omni_patch", "omni_memory",
-        "omni_context", "omni_skill", "omni_status", "discover_tools",
+        "omni_context", "omni_skill", "omni_index",
+        "omni_status", "discover_tools",
     ):
         assert tool in expected, tool
         assert expected[tool], f"empty contract_version for {tool}"

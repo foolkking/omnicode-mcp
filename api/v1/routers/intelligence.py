@@ -76,6 +76,33 @@ def _snapshot_exact_symbol(
     if not workspace_id or not symbol or not symbol.strip():
         return None
     try:
+        from api.v1.routers.search import _exact_index
+
+        exact_rows = _exact_index().search_symbols(
+            workspace_id=workspace_id,
+            query=symbol.strip(),
+            fuzzy=False,
+            min_score=1.0,
+            max_results=1,
+        )
+        if exact_rows:
+            row = exact_rows[0]
+            return {
+                "file_path": row.path,
+                "symbol_name": row.name,
+                "symbol_type": row.kind,
+                "line_start": row.line_start,
+                "line_end": row.line_end,
+                "signature": row.signature,
+                "relevance_score": row.score,
+                "why_matched": [row.why, "exact_index"],
+                "source": "exact_index",
+                "hash": row.hash,
+                "revision": row.revision,
+            }
+    except Exception:
+        pass
+    try:
         from api.v1.routers.search import _snapshot_symbol_search
 
         rows = _snapshot_symbol_search(
@@ -125,10 +152,22 @@ def _seed_context_from_snapshot_symbol(
             and item.get("start_line") == row.get("line_start")
         )
     ]
+    same_file = [
+        item
+        for item in deduped
+        if (item.get("file") or item.get("file_path")) == file_path
+    ]
+    other_files = [
+        item
+        for item in deduped
+        if (item.get("file") or item.get("file_path")) != file_path
+    ]
     search["query"] = search.get("query") or symbol_name
-    search["results"] = [search_row, *deduped]
+    search["results"] = [search_row, *same_file, *other_files]
     search["result_count"] = len(search["results"])
     search["snapshot_exact_priority"] = True
+    search["primary_result_source"] = "snapshot_exact_symbol"
+    search["semantic_noise_demoted"] = len(other_files)
 
     code = payload.get("code_understanding") or {}
     if int(code.get("symbol_count") or 0) == 0:
@@ -178,11 +217,103 @@ def _seed_context_from_snapshot_symbol(
 
     payload["snapshot_store_used"] = True
     payload["snapshot_exact_symbol"] = True
+    payload["context_quality"] = {
+        "primary_anchor": "snapshot_exact_symbol",
+        "primary_file": file_path,
+        "primary_symbol": symbol_name,
+        "same_file_results_promoted": len(same_file),
+        "semantic_noise_demoted": len(other_files),
+    }
     payload["freshness"] = (freshness or {}).get("freshness", "snapshot_available")
     payload["semantic_stale"] = bool((freshness or {}).get("semantic_stale", False))
     payload["accepted_revision"] = (freshness or {}).get("accepted_revision")
     payload["indexed_revision"] = (freshness or {}).get("indexed_revision")
     return payload
+
+
+def _snapshot_fast_context_allowed(
+    req: "IntelligenceRequest",
+    *,
+    row: dict[str, Any],
+) -> bool:
+    """Return true when exact snapshot data is enough for a useful context."""
+    file_path = str(row.get("file_path") or "")
+    symbol_name = str(row.get("symbol_name") or "")
+    if not file_path or not symbol_name:
+        return False
+    if req.file_path and req.file_path.replace("\\", "/") != file_path:
+        return False
+    if req.query and req.query.strip() != symbol_name:
+        return False
+    if req.include_memory or req.include_git_history:
+        return False
+    return True
+
+
+def _build_snapshot_fast_context(
+    req: "IntelligenceRequest",
+    *,
+    row: dict[str, Any],
+    freshness: Optional[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build a lightweight context from exact snapshot data only."""
+    file_path = row.get("file_path")
+    symbol_name = row.get("symbol_name")
+    statuses, llm = _apply_llm_runtime_status(
+        [s.to_dict() for s in list_capabilities()]
+    )
+    payload: dict[str, Any] = {
+        "request": {
+            "task": req.task,
+            "file_path": req.file_path or file_path,
+            "symbol": req.symbol,
+            "query": req.query or symbol_name,
+            "fast_path": "snapshot_exact_symbol",
+        },
+        "capability_status": statuses,
+        "code_understanding": {
+            "file": file_path,
+            "language": "python" if str(file_path).endswith(".py") else "",
+            "symbol_count": 1,
+            "symbols": [
+                {
+                    "name": symbol_name,
+                    "kind": row.get("symbol_type"),
+                    "start_line": row.get("line_start"),
+                    "end_line": row.get("line_end"),
+                    "signature": row.get("signature"),
+                    "source": "snapshot_store",
+                    "hash": row.get("hash"),
+                    "revision": row.get("revision"),
+                }
+            ],
+            "source": "snapshot_store",
+        },
+        "search": {
+            "query": req.query or symbol_name,
+            "result_count": 0,
+            "results": [],
+        },
+        "impact": {},
+        "memory": {"skipped": True, "reason": "include_memory=false"},
+        "git_history": {"skipped": True, "reason": "include_git_history=false"},
+        "advisories": [],
+        "token_estimate": 0,
+        "token_budget": req.token_budget,
+        "elapsed_ms": 0,
+        "errors": {},
+        "llm": llm,
+        "context_fast_path": True,
+        "context_fast_path_reason": (
+            "snapshot exact symbol satisfied file/symbol context without "
+            "memory or git history"
+        ),
+    }
+    return _seed_context_from_snapshot_symbol(
+        payload,
+        row=row,
+        freshness=freshness,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +419,14 @@ async def build_context(
         workspace_id=effective_workspace_id,
         min_revision=x_omnicode_min_revision,
     )
+    if snapshot_row and _snapshot_fast_context_allowed(req, row=snapshot_row):
+        return _ok(
+            _build_snapshot_fast_context(
+                req,
+                row=snapshot_row,
+                freshness=freshness,
+            )
+        )
 
     composer = IntelligenceComposer(working_dir=get_settings().WORKING_DIR)
     ctx = await composer.build(

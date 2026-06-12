@@ -7,8 +7,16 @@ an already-started benchmark backend, for example:
 
 Environment overrides:
     OMNICODE_BENCH_BACKEND_URL=http://127.0.0.1:6819
-    OMNICODE_BENCH_WORKSPACE_ID=django-r31-live-20260604-1655
+    OMNICODE_BENCH_WORKSPACE_ID=django-cleanroom-bench
     OMNICODE_BENCH_REPO=C:/omnicode-sim/benchmark-repos/django
+
+For a fully self-contained clean-room run, prefer:
+
+    python scripts/benchmark_large_repo_hybrid.py \
+        --repo C:/omnicode-sim/benchmark-repos/django \
+        --state-dir C:/omnicode-sim/state-bench-django \
+        --workspace-id django-cleanroom-bench \
+        --reset-state
 """
 
 from __future__ import annotations
@@ -42,7 +50,7 @@ def _config() -> BenchConfig:
         ).rstrip("/"),
         workspace_id=os.environ.get(
             "OMNICODE_BENCH_WORKSPACE_ID",
-            "django-r31-live-20260604-1655",
+            "django-cleanroom-bench",
         ),
         repo=Path(
             os.environ.get(
@@ -127,6 +135,19 @@ def test_django_snapshot_status_is_observable(bench: BenchConfig) -> None:
     assert status["ok"] is True
     assert status["accepted_revision"] >= status["indexed_revision"]
     assert status["snapshot_store"]["files"] >= 6000
+    assert status["snapshot_ready"] is True
+    assert status["exact_index_ready"] is True
+    assert status["exact_index"]["files"] >= 6000
+    assert status["exact_index"]["symbols"] > 0
+    assert "line_fts_available" in status["exact_index"]
+    assert status["recommended_query_mode"] in {"exact_first", "semantic_first"}
+    assert status["query_mode_reason"] in {
+        "exact_only_initial_sync",
+        "semantic_full",
+    }
+    assert status["exact_query_safe"] is True
+    assert status["strict_semantic_safe"] is bool(status["semantic_index_ready"])
+    assert status["index_readiness_contract"]["schema_version"] == "index_readiness.v1"
     assert file_count >= 6000
     assert status.get("last_index_error") in (None, "")
 
@@ -188,7 +209,7 @@ def test_django_text_search_bootstraps_from_snapshot(bench: BenchConfig) -> None
     assert body["success"] is True
     assert first["file_path"] == "django/core/handlers/base.py"
     assert first["line_content"] == "class BaseHandler:"
-    assert first["source"] == "snapshot_store"
+    assert first["source"] in {"snapshot_mirror", "snapshot_store"}
     _assert_workspace_relative(first["file_path"])
 
 
@@ -291,6 +312,33 @@ def test_django_strict_freshness_blocks_stale_analysis(bench: BenchConfig) -> No
         assert payload["success"] is False
         assert payload["stale"] is True
         assert payload["error"] == "Cloud index is stale"
+
+
+def test_django_exact_only_status_blocks_strict_semantic(
+    bench: BenchConfig,
+) -> None:
+    status, _elapsed = _sync_status(bench)
+    if status.get("semantic_initial_exact_only") is not True:
+        pytest.skip("workspace is not in exact-only initial-sync mode")
+
+    required = int(status["accepted_revision"])
+    payload, elapsed_ms = _request_json(
+        "POST",
+        f"{bench.backend_url}/search",
+        headers=_workspace_headers(bench, min_revision=required),
+        json={"query": "BaseHandler", "search_type": "semantic", "max_results": 5},
+        timeout=10,
+    )
+
+    assert elapsed_ms < 1000
+    assert payload["ok"] is False
+    assert payload["success"] is False
+    assert payload["stale"] is True
+    assert payload["freshness"] == "exact_fresh"
+    assert payload["recommended_query_mode"] == "exact_first"
+    assert payload["query_mode_reason"] == "exact_only_initial_sync"
+    assert payload["exact_query_safe"] is True
+    assert payload["strict_semantic_safe"] is False
 
 
 def test_django_status_stays_responsive_during_snapshot_text_search(

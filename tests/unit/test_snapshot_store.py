@@ -46,6 +46,8 @@ def test_upsert_persists_content_and_index(tmp_path: Path) -> None:
         "latest_revision": 7,
         "accepted_revision": 7,
         "indexed_revision": 0,
+        "semantic_index_coverage": "unknown",
+        "semantic_initial_exact_only": False,
         "file_count": 1,
         "delete_count": 0,
     }
@@ -112,6 +114,58 @@ def test_mark_indexed_revision_is_persisted(tmp_path: Path) -> None:
 
     with pytest.raises(SnapshotStoreError, match="exceeds accepted"):
         store.mark_indexed(workspace_id="repo-a", revision=5)
+
+
+def test_mark_indexed_persists_semantic_coverage(tmp_path: Path) -> None:
+    store = CloudSnapshotStore(root=tmp_path)
+    content = "x = 1\n"
+    store.upsert(
+        workspace_id="repo-a",
+        path="src/app.py",
+        content=content,
+        hash_value=_sha(content),
+        size=len(content),
+        mtime_ms=123,
+        encoding="utf-8",
+        revision=4,
+    )
+
+    assert (
+        store.mark_indexed(
+            workspace_id="repo-a",
+            revision=4,
+            semantic_coverage="exact_only_initial_sync",
+        )
+        == 4
+    )
+    status = CloudSnapshotStore(root=tmp_path).status("repo-a")
+    assert status["indexed_revision"] == 4
+    assert status["semantic_index_coverage"] == "exact_only_initial_sync"
+    assert status["semantic_initial_exact_only"] is True
+
+    assert (
+        store.mark_indexed(
+            workspace_id="repo-a",
+            revision=4,
+            semantic_coverage="selected_files",
+        )
+        == 4
+    )
+    status = CloudSnapshotStore(root=tmp_path).status("repo-a")
+    assert status["semantic_index_coverage"] == "partial_after_exact_only"
+    assert status["semantic_initial_exact_only"] is True
+
+    assert (
+        store.mark_indexed(
+            workspace_id="repo-a",
+            revision=4,
+            semantic_coverage="semantic_full",
+        )
+        == 4
+    )
+    status = CloudSnapshotStore(root=tmp_path).status("repo-a")
+    assert status["semantic_index_coverage"] == "semantic_full"
+    assert status["semantic_initial_exact_only"] is False
 
 
 def test_apply_batch_serializes_concurrent_workspace_writes(tmp_path: Path) -> None:

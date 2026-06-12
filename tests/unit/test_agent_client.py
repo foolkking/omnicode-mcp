@@ -68,6 +68,17 @@ def _sync_status_response(revision: int = 0) -> httpx.Response:
     )
 
 
+def test_agent_client_defaults_use_large_repo_batching(tmp_path: Path) -> None:
+    client = _client_with_handler(
+        lambda _request: _sync_status_response(0),
+        workspace=tmp_path,
+        workspace_id="repo-a",
+    )
+
+    assert client._batch_max_files == 100
+    assert client._batch_max_bytes == 1_000_000
+
+
 def _sync_batch_response(revision: int = 1, files: int = 1, deletes: int = 0) -> httpx.Response:
     return httpx.Response(
         200,
@@ -346,6 +357,109 @@ def test_post_retries_exhausted_records_error(tmp_path: Path) -> None:
     result = client.push_file("x.py")
     assert result.pushed == 0
     assert result.errors and "nope" in result.errors[0]
+
+
+def test_failed_push_records_pending_and_next_push_flushes(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.py").write_text("VALUE = 'v1'\n", encoding="utf-8")
+    manifest_path = tmp_path / "manifest.json"
+    posts: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/sync/status":
+            return _sync_status_response(10 + len(posts))
+        body = json.loads(request.content.decode("utf-8"))
+        posts.append(body)
+        if len(posts) == 1:
+            return httpx.Response(503, text="cloud down")
+        return _sync_batch_response(
+            revision=10 + len(posts),
+            files=len(body["files"]),
+            deletes=len(body["deletes"]),
+        )
+
+    client = _client_with_handler(
+        handler,
+        workspace=tmp_path,
+        workspace_id="repo-a",
+        manifest_path=manifest_path,
+    )
+
+    first = client.push_file("a.py")
+    assert first.pushed == 0
+    assert first.errors and "HTTP 503" in first.errors[0]
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert data["pending"] == [
+        {"hash": data["files"]["a.py"]["hash"], "op": "upsert", "path": "a.py"}
+    ]
+
+    second = client.push_file("a.py")
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert second.errors == []
+    assert data["pending"] == []
+    assert any(
+        body.get("metadata", {}).get("phase") == "pending_flush"
+        and body["files"][0]["path"] == "a.py"
+        for body in posts[1:]
+    )
+
+
+def test_failed_delete_records_pending_and_next_push_flushes_delete(
+    tmp_path: Path,
+) -> None:
+    old_file = tmp_path / "old.py"
+    old_file.write_text("OLD = True\n", encoding="utf-8")
+    manifest_path = tmp_path / "manifest.json"
+    posts: list[dict] = []
+    delete_failed = {"value": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/sync/status":
+            return _sync_status_response(20 + len(posts))
+        body = json.loads(request.content.decode("utf-8"))
+        posts.append(body)
+        if (
+            body["deletes"] == [{"path": "old.py"}]
+            and body.get("metadata", {}).get("phase") != "pending_flush"
+            and not delete_failed["value"]
+        ):
+            delete_failed["value"] = True
+            return httpx.Response(503, text="cloud down")
+        return _sync_batch_response(
+            revision=20 + len(posts),
+            files=len(body["files"]),
+            deletes=len(body["deletes"]),
+        )
+
+    client = _client_with_handler(
+        handler,
+        workspace=tmp_path,
+        workspace_id="repo-a",
+        manifest_path=manifest_path,
+    )
+
+    assert client.push_file("old.py").errors == []
+    old_file.unlink()
+    failed_delete = client.delete_file("old.py")
+    assert failed_delete.errors and "HTTP 503" in failed_delete.errors[0]
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert data["pending"] == [{"op": "delete", "path": "old.py"}]
+
+    (tmp_path / "new.py").write_text("NEW = True\n", encoding="utf-8")
+    recovered = client.push_file("new.py")
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert recovered.errors == []
+    assert data["pending"] == []
+    assert "old.py" not in data["files"]
+    assert "new.py" in data["files"]
+    assert any(
+        body.get("metadata", {}).get("phase") == "pending_flush"
+        and body["deletes"] == [{"path": "old.py"}]
+        for body in posts
+    )
 
 
 def test_health_returns_true_when_200() -> None:

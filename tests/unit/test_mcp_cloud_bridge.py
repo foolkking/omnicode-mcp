@@ -91,7 +91,7 @@ def test_configure_workspace_adds_backend_workspace_headers(monkeypatch, tmp_pat
         mcp_server.http_client = old_client
 
 
-def test_mcp_cmd_forwards_transport_and_backend_args(monkeypatch):
+def test_mcp_cmd_forwards_transport_and_backend_args(monkeypatch, tmp_path):
     from omnicode_adapters.cli.commands import mcp_cmd
 
     captured = []
@@ -106,8 +106,10 @@ def test_mcp_cmd_forwards_transport_and_backend_args(monkeypatch):
         auth="required",
         backend_url="https://omnicode.example.com",
         backend_token="tok_remote",
+        workspace=str(tmp_path),
         workspace_id="repo-a",
         executor="hybrid",
+        agent="off",
     )
 
     assert captured == [
@@ -126,6 +128,8 @@ def test_mcp_cmd_forwards_transport_and_backend_args(monkeypatch):
             "https://omnicode.example.com",
             "--backend-token",
             "tok_remote",
+            "--workspace",
+            str(tmp_path.resolve()),
             "--workspace-id",
             "repo-a",
             "--executor",
@@ -181,4 +185,8 @@ def test_cli_mcp_parser_dispatches_cloud_bridge_args(monkeypatch):
         "workspace": None,
         "workspace_id": "repo-a",
         "executor": "hybrid",
+        "sync_mode": None,
+        "agent": None,
+        "llm_mode": None,
+        "embedding_mode": None,
     }
