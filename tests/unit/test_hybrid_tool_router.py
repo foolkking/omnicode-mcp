@@ -49,6 +49,40 @@ def test_cloud_tools_route_to_cloud_when_index_is_current() -> None:
     assert route.indexed_revision == 5
 
 
+def test_cloud_tools_use_cloud_revision_when_no_pending_changes() -> None:
+    router = HybridToolRouter(executor="hybrid")
+    state = SyncRevisionState(
+        local_revision=2905,
+        accepted_revision=157,
+        indexed_revision=157,
+        pending_count=0,
+    )
+
+    route = router.route("omni_search", sync_state=state)
+
+    assert route.target == "cloud"
+    assert route.requires_barrier is True
+    assert route.barrier_min_revision == 157
+    assert route.stale is False
+    assert route.local_revision == 2905
+
+
+def test_cloud_tools_block_when_pending_changes_remain() -> None:
+    router = HybridToolRouter(executor="hybrid")
+    state = SyncRevisionState(
+        local_revision=2905,
+        accepted_revision=157,
+        indexed_revision=157,
+        pending_count=1,
+    )
+
+    route = router.route("omni_search", sync_state=state)
+
+    assert route.target == "blocked"
+    assert route.reason == "local changes are pending sync"
+    assert route.stale is True
+
+
 def test_cloud_tools_block_when_index_is_stale_with_barrier_revision() -> None:
     router = HybridToolRouter(executor="hybrid")
     state = SyncRevisionState(local_revision=5, accepted_revision=5, indexed_revision=4)

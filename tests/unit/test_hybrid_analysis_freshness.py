@@ -137,6 +137,51 @@ def test_hybrid_search_allows_fresh_cloud_index(
     assert "/search" in captured
 
 
+def test_hybrid_search_uses_cloud_revision_when_pending_is_empty(
+    hybrid_env: Path,
+) -> None:
+    _write_manifest(
+        hybrid_env,
+        local_revision=2905,
+        accepted_revision=157,
+        indexed_revision=157,
+    )
+    tools = build_tools({
+        "/sync/status": {
+            "ok": True,
+            "workspace_id": "repo-a",
+            "accepted_revision": 157,
+            "indexed_revision": 157,
+        },
+        "/search": {
+            "results": [
+                {
+                    "file_path": "src/fresh.py",
+                    "symbol_name": "fresh_marker",
+                    "line_number": 1,
+                    "relevance_score": 0.99,
+                    "snippet": "fresh_marker",
+                }
+            ],
+            "total_results": 1,
+        },
+    })
+
+    payload = _payload(run(tools["omni_search"](
+        query="fresh_marker",
+        mode="semantic",
+        format="json",
+    )))
+
+    assert payload["ok"] is True
+    assert payload["freshness"] == "fresh"
+    assert payload["required_revision"] == 157
+    assert payload["local_revision"] == 2905
+    captured: Dict[str, List[Dict[str, Any]]] = tools["__captured__"]
+    search_call = captured["/search"][0]
+    assert search_call["headers"]["X-Omnicode-Min-Revision"] == "157"
+
+
 def test_hybrid_symbol_search_allows_exact_fresh_when_semantic_lags(
     hybrid_env: Path,
 ) -> None:

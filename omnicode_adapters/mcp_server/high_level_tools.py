@@ -44,8 +44,10 @@ logger = logging.getLogger(__name__)
 # but omni_read didn't); the omni_status tool reads this constant so the
 # next round can verify which build is actually serving traffic.
 # ---------------------------------------------------------------------------
-_HANDLER_VERSION = "2026.06.13.capability-policy.r60"
+_HANDLER_VERSION = "2026.06.15.sync-revision-r61"
 _HANDLER_FEATURES: Tuple[str, ...] = (
+    "sync.missing_upsert_delete",
+    "freshness.pending_aware_cloud_revision",
     "exact_index.fts_auto_status",
     "search.text_provider_chain",
     "search.exact_text_fast_path",
@@ -5827,6 +5829,7 @@ def register_high_level_tools(mcp, make_request):
         accepted_revision = 0
         indexed_revision = 0
         exact_indexed_revision = 0
+        pending_count = 0
         manifest_present = False
         manifest_warning: Optional[str] = None
 
@@ -5846,6 +5849,12 @@ def register_high_level_tools(mcp, make_request):
             if manifest_present:
                 manifest = LocalManifest.load(workspace=local_ws)
                 local_revision = int(manifest.local_revision)
+                pending_entries = manifest.data.get("pending") or []
+                pending_count = (
+                    len(pending_entries)
+                    if isinstance(pending_entries, list)
+                    else 0
+                )
                 accepted_revision = max(
                     accepted_revision,
                     int(manifest.data.get("last_accepted_revision", 0)),
@@ -5935,8 +5944,13 @@ def register_high_level_tools(mcp, make_request):
                 "error": "local revision is unknown",
             }
 
-        required_revision = max(local_revision, accepted_revision)
-        semantic_stale = indexed_revision < required_revision
+        required_revision = (
+            accepted_revision
+            if pending_count <= 0 and accepted_revision > 0
+            else max(local_revision, accepted_revision)
+        )
+        pending_stale = pending_count > 0
+        semantic_stale = pending_stale or indexed_revision < required_revision
         exact_fresh = exact_indexed_revision >= required_revision
         freshness = (
             "stale"
@@ -5961,6 +5975,7 @@ def register_high_level_tools(mcp, make_request):
             "indexed_revision": indexed_revision,
             "exact_indexed_revision": exact_indexed_revision,
             "required_revision": required_revision,
+            "pending_count": pending_count,
             "manifest_present": manifest_present,
             "manifest_warning": manifest_warning,
             "status_warning": status_warning,
@@ -12209,6 +12224,7 @@ def register_high_level_tools(mcp, make_request):
             local_revision = 0
             accepted_revision = 0
             indexed_revision = 0
+            pending_count = 0
             snapshot_status: Optional[Dict[str, Any]] = None
             snapshot_store_source: Optional[str] = None
             cloud_available = bool(backend_url)
@@ -12238,7 +12254,8 @@ def register_high_level_tools(mcp, make_request):
                         )
                         pending_entries = manifest.data.get("pending") or []
                         if isinstance(pending_entries, list):
-                            sync_payload["pending_count"] = len(pending_entries)
+                            pending_count = len(pending_entries)
+                            sync_payload["pending_count"] = pending_count
                             sync_payload["pending_paths"] = [
                                 str(row.get("path"))
                                 for row in pending_entries
@@ -12393,6 +12410,12 @@ def register_high_level_tools(mcp, make_request):
                 accepted_revision=accepted_revision,
                 indexed_revision=indexed_revision,
                 cloud_available=cloud_available,
+                pending_count=pending_count,
+                required_revision=(
+                    accepted_revision
+                    if pending_count <= 0 and accepted_revision > 0
+                    else max(local_revision, accepted_revision)
+                ),
             )
             indexed_file_count = 0
             if isinstance(snapshot_status, dict):

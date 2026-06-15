@@ -325,6 +325,7 @@ def test_omni_context_hybrid_diagnostics_uses_local_workspace(
     manifest.mark_changed(target)
     manifest.data["last_accepted_revision"] = manifest.local_revision
     manifest.data["last_indexed_revision"] = manifest.local_revision
+    manifest.data["pending"] = []
     manifest.save()
 
     tools = _build_tools({
