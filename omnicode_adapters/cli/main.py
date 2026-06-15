@@ -39,11 +39,12 @@ def main():
     )
     idx_parser.add_argument(
         "--scope",
-        choices=("semantic", "exact_policy"),
+        choices=("semantic", "exact_policy", "workspace"),
         default="semantic",
         help=(
             "Snapshot indexing scope. 'semantic' forces full semantic bootstrap; "
-            "'exact_policy' indexes only files allowed by the semantic policy."
+            "'exact_policy' indexes only files allowed by the semantic policy; "
+            "'workspace' builds the deterministic local exact index."
         ),
     )
     idx_parser.add_argument(
@@ -258,6 +259,38 @@ def main():
     # --- doctor ---
     subparsers.add_parser("doctor", help="Check environment health")
 
+    # --- models ---
+    models_parser = subparsers.add_parser(
+        "models",
+        help="Manage embedding model cache",
+    )
+    models_parser.add_argument(
+        "models_action",
+        choices=("list", "pull", "status"),
+        help="Model operation to run.",
+    )
+    models_parser.add_argument("--model", default=None, help="Embedding model id")
+    models_parser.add_argument(
+        "--cache-dir",
+        default=None,
+        help="Embedding cache directory to inspect or populate.",
+    )
+    models_parser.add_argument(
+        "--revision",
+        default=None,
+        help="Optional Hugging Face model revision.",
+    )
+    models_parser.add_argument(
+        "--device",
+        default=None,
+        help="Optional sentence-transformers device, e.g. cpu/cuda.",
+    )
+    models_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON.",
+    )
+
     # --- rotate-master-key (Wave 2 W2-4) ---
     rotate_parser = subparsers.add_parser(
         "rotate-master-key",
@@ -354,6 +387,16 @@ def main():
     elif args.command == "doctor":
         from omnicode_adapters.cli.commands.doctor_cmd import run
         run()
+    elif args.command == "models":
+        from omnicode_adapters.cli.commands.models_cmd import run
+        run(
+            args.models_action,
+            model=args.model,
+            cache_dir=args.cache_dir,
+            revision=args.revision,
+            device=args.device,
+            json_output=args.json,
+        )
     elif args.command == "rotate-master-key":
         from omnicode_adapters.cli.commands.rotate_cmd import run as run_rotate
         run_rotate(db_path=args.db, key_path=args.key, new_key=args.new_key)

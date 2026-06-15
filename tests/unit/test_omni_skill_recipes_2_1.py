@@ -33,7 +33,6 @@ from omnicode_adapters.mcp_server.high_level_tools import (
     _HANDLER_VERSION,
     register_high_level_tools,
 )
-from omnicode_core.skills import get_skill_loader
 
 
 # ---------------------------------------------------------------------------
@@ -222,7 +221,6 @@ def test_skill_test_coverage_has_no_test_fallback(test_coverage) -> None:
 
 def test_skill_test_coverage_does_not_default_to_full_pytest(test_coverage) -> None:
     """Full pytest sweep should NOT be the only / first recommendation."""
-    blob = json.dumps(test_coverage, ensure_ascii=False).lower()
     # success_criteria / safety_notes must explicitly de-prioritise the
     # full sweep.
     sc = " ".join(test_coverage.get("success_criteria") or []).lower()

@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
@@ -36,8 +35,6 @@ import pytest
 
 from omnicode_adapters.mcp_server import high_level_tools as hlt
 from omnicode_adapters.mcp_server.high_level_tools import (
-    _CONTRACT_VERSIONS,
-    _HANDLER_VERSION,
     register_high_level_tools,
 )
 

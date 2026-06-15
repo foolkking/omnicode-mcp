@@ -170,8 +170,18 @@ async def initialize_services() -> None:
                 "Use /patch/preview + /patch/apply for safe core edits."
             )
 
-        # Initialize memory manager
-        memory_manager = MemoryManager(working_dir + "/.data")
+        # Initialize memory manager.  Deployment state belongs under
+        # OMNICODE_STATE_DIR when configured; avoid writing service metadata
+        # into a clean repository checkout.
+        from pathlib import Path as _StatePath
+
+        state_dir = os.environ.get("OMNICODE_STATE_DIR", "").strip()
+        memory_dir = (
+            _StatePath(state_dir).expanduser() / "memory"
+            if state_dir
+            else _StatePath(working_dir) / ".data"
+        )
+        memory_manager = MemoryManager(str(memory_dir))
         await memory_manager.initialize()
         set_memory_manager(memory_manager)
         logger.info("✅ Memory manager initialized")

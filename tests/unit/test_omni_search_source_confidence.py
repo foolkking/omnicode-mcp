@@ -24,6 +24,8 @@ from omnicode_adapters.mcp_server.high_level_tools import (
     _infer_source_confidence,
     register_high_level_tools,
 )
+from omnicode_adapters.mcp_server import high_level_tools as hlt
+from omnicode_core.capabilities.registry import build_runtime_capabilities
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +79,17 @@ def _build_omni_search(
 
 def _run(coro: Any) -> Any:
     return asyncio.get_event_loop().run_until_complete(coro)
+
+
+def _semantic_ready_caps() -> Dict[str, Any]:
+    return build_runtime_capabilities(
+        cloud_available=False,
+        local_index_ready=True,
+        line_fts_available=True,
+        embedding_available=True,
+        semantic_index_ready=True,
+        graph_index_ready=False,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -142,12 +155,66 @@ def test_symbol_mode_stamps_source_and_confidence() -> None:
     assert rows[2]["confidence"] == "low"
 
 
+def test_search_json_blocks_unavailable_local_semantic_provider() -> None:
+    omni_search = _build_omni_search({
+        "/search": {"results": [], "total_results": 0},
+    })
+
+    raw = _run(omni_search(
+        query="how middleware request handling works",
+        mode="semantic",
+        format="json",
+    ))
+    payload = json.loads(raw)
+
+    preflight = payload["capability_preflight"]
+    assert payload["ok"] is False
+    assert payload["error_code"] == "SEMANTIC_INDEX_NOT_READY"
+    assert payload["empty_reason"] == "provider_unavailable"
+    assert preflight["required"] == ["search.semantic"]
+    assert preflight["ready"] is False
+    assert "search.semantic" in preflight["states"]
+    assert preflight["states"]["search.semantic"]["state"] == "unavailable"
+    assert preflight["execution_policy"]["mode"] == "block"
+    assert preflight["execution_policy"]["can_execute"] is False
+
+
+def test_search_json_backend_failure_is_structured_envelope() -> None:
+    async def make_request(
+        method: str, endpoint: str, **kwargs: Any
+    ) -> Dict[str, Any]:
+        raise TimeoutError("urlopen error timed out")
+
+    mcp = _MCPStub()
+    register_high_level_tools(mcp, make_request)
+
+    raw = _run(mcp.tools["omni_search"](
+        query='VALUE = "after"',
+        mode="auto",
+        format="json",
+    ))
+    payload = json.loads(raw)
+
+    assert payload["ok"] is False
+    assert payload["error_code"] == "CLOUD_UNAVAILABLE"
+    assert payload["freshness"] == "unavailable"
+    assert payload["empty_reason"] == "provider_unavailable"
+    assert payload["provider_unavailable"] is True
+    assert payload["query_plan"]["intent"] == "exact_text"
+    assert "traceback" not in json.dumps(payload).lower()
+
+
 # ---------------------------------------------------------------------------
 # 2. Semantic mode — source reflects rerank toggle, confidence tracks score.
 # ---------------------------------------------------------------------------
 
 
-def test_semantic_mode_stamps_source_and_confidence_with_rerank() -> None:
+def test_semantic_mode_stamps_source_and_confidence_with_rerank(monkeypatch) -> None:
+    monkeypatch.setattr(
+        hlt,
+        "_runtime_capability_registry_snapshot",
+        lambda **_kwargs: _semantic_ready_caps(),
+    )
     sem_payload = {
         "results": [
             {
@@ -209,7 +276,12 @@ def test_semantic_mode_stamps_source_and_confidence_with_rerank() -> None:
     assert rows[2]["confidence"] == "low"
 
 
-def test_semantic_mode_without_rerank_uses_plain_source() -> None:
+def test_semantic_mode_without_rerank_uses_plain_source(monkeypatch) -> None:
+    monkeypatch.setattr(
+        hlt,
+        "_runtime_capability_registry_snapshot",
+        lambda **_kwargs: _semantic_ready_caps(),
+    )
     sem_payload = {
         "results": [
             {
@@ -378,7 +450,17 @@ def test_references_mode_falls_back_without_claiming_lsp() -> None:
         ("text", "/search/text"),
     ],
 )
-def test_empty_results_return_structured_envelope(mode: str, endpoint: str) -> None:
+def test_empty_results_return_structured_envelope(
+    mode: str,
+    endpoint: str,
+    monkeypatch,
+) -> None:
+    if mode == "semantic":
+        monkeypatch.setattr(
+            hlt,
+            "_runtime_capability_registry_snapshot",
+            lambda **_kwargs: _semantic_ready_caps(),
+        )
     omni_search = _build_omni_search(
         {endpoint: {"results": [], "total_results": 0}}
     )

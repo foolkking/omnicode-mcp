@@ -34,8 +34,11 @@ Design notes:
 from __future__ import annotations
 
 import fnmatch
+import json
 import os
 import re
+import shutil
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple
@@ -83,6 +86,7 @@ _SKIP_FILE_SUFFIXES = frozenset(
 # files are skipped to keep latency bounded — if you need to search a
 # 50 MB log you should be using `rg` directly anyway.
 _MAX_FILE_BYTES = 2 * 1024 * 1024  # 2 MB
+_DEFAULT_TIMEOUT_SECONDS = 5.0
 
 _DEFAULT_PATTERNS: Tuple[str, ...] = (
     "*.py",
@@ -101,6 +105,8 @@ _DEFAULT_PATTERNS: Tuple[str, ...] = (
     "*.rb",
     "*.php",
     "*.kt",
+    "*.kts",
+    "*.scala",
     "*.cs",
     "*.md",
     "*.toml",
@@ -135,6 +141,22 @@ class GrepHit:
             "match_span": list(self.match_span),
             "merged_lines": list(getattr(self, "_merged_lines", []) or []),
         }
+
+
+@dataclass
+class GrepWorkspaceResult:
+    """Text-search result plus the provider chain used to produce it."""
+
+    hits: List[GrepHit] = field(default_factory=list)
+    provider: str = "python_grep_fallback"
+    provider_chain: List[str] = field(default_factory=list)
+    fallback_used: bool = False
+    fallback_reason: Optional[str] = None
+    warnings: List[str] = field(default_factory=list)
+    rg_available: bool = False
+    timed_out: bool = False
+    max_file_bytes: int = _MAX_FILE_BYTES
+    timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS
 
 
 def _compile_query(query: str, use_regex: bool, case_sensitive: bool) -> re.Pattern[str]:
@@ -172,7 +194,10 @@ def _matches_any(name: str, patterns: Sequence[str]) -> bool:
 
 
 def _iter_candidate_files(
-    workspace_root: Path, patterns: Sequence[str]
+    workspace_root: Path,
+    patterns: Sequence[str],
+    *,
+    max_file_bytes: int = _MAX_FILE_BYTES,
 ) -> Iterable[Path]:
     """Walk ``workspace_root`` and yield every file matching ``patterns``.
 
@@ -202,7 +227,7 @@ def _iter_candidate_files(
 
             full = Path(dirpath) / fname
             try:
-                if full.stat().st_size > _MAX_FILE_BYTES:
+                if full.stat().st_size > max(0, int(max_file_bytes)):
                     continue
             except OSError:
                 continue
@@ -254,6 +279,282 @@ def _scan_file(
     return hits
 
 
+def _context_for_match(
+    *,
+    workspace_root: Path,
+    rel_path: str,
+    line_number: int,
+    context_lines: int,
+) -> tuple[List[str], List[str]]:
+    try:
+        lines = (workspace_root / rel_path).read_text(
+            encoding="utf-8",
+            errors="ignore",
+        ).splitlines()
+    except (OSError, UnicodeDecodeError):
+        return [], []
+    idx = max(0, int(line_number) - 1)
+    before = lines[max(0, idx - context_lines): idx]
+    after = lines[idx + 1: idx + 1 + context_lines]
+    return before, after
+
+
+def _rg_globs(patterns: Sequence[str]) -> List[str]:
+    globs: List[str] = []
+    for pat in patterns:
+        if pat in {"*", "**"}:
+            continue
+        globs.extend(["--glob", pat])
+    for dirname in sorted(_PRUNE_DIRNAMES):
+        globs.extend(["--glob", f"!{dirname}/**"])
+    for suffix in sorted(_SKIP_FILE_SUFFIXES):
+        globs.extend(["--glob", f"!*{suffix}"])
+    return globs
+
+
+def _grep_workspace_ripgrep(
+    *,
+    workspace_root: Path,
+    query: str,
+    patterns: Sequence[str],
+    max_results: int,
+    context_lines: int,
+    use_regex: bool,
+    case_sensitive: bool,
+    timeout_seconds: float,
+    max_file_bytes: int,
+) -> GrepWorkspaceResult:
+    rg = shutil.which("rg")
+    if not rg:
+        return GrepWorkspaceResult(
+            provider="python_grep_fallback",
+            provider_chain=["ripgrep_fallback"],
+            fallback_used=True,
+            fallback_reason="ripgrep_not_found",
+            warnings=["ripgrep executable not found; used Python grep fallback"],
+            rg_available=False,
+            timeout_seconds=timeout_seconds,
+            max_file_bytes=max_file_bytes,
+        )
+
+    cmd = [
+        rg,
+        "--json",
+        "--line-number",
+        "--column",
+        "--color=never",
+        "--max-count",
+        "1",
+        "--max-filesize",
+        str(max_file_bytes),
+    ]
+    if not use_regex:
+        cmd.append("--fixed-strings")
+    if not case_sensitive:
+        cmd.append("--ignore-case")
+    cmd.extend(_rg_globs(patterns))
+    cmd.extend(["--regexp", query, "."])
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=workspace_root,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            capture_output=True,
+            timeout=max(0.1, float(timeout_seconds)),
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return GrepWorkspaceResult(
+            provider="python_grep_fallback",
+            provider_chain=["ripgrep_fallback"],
+            fallback_used=True,
+            fallback_reason="ripgrep_timeout",
+            warnings=["ripgrep timed out; used Python grep fallback"],
+            rg_available=True,
+            timed_out=True,
+            timeout_seconds=timeout_seconds,
+            max_file_bytes=max_file_bytes,
+        )
+    except OSError as exc:
+        return GrepWorkspaceResult(
+            provider="python_grep_fallback",
+            provider_chain=["ripgrep_fallback"],
+            fallback_used=True,
+            fallback_reason="ripgrep_failed",
+            warnings=[f"ripgrep failed to start: {exc}; used Python grep fallback"],
+            rg_available=True,
+            timeout_seconds=timeout_seconds,
+            max_file_bytes=max_file_bytes,
+        )
+
+    if proc.returncode not in {0, 1}:
+        return GrepWorkspaceResult(
+            provider="python_grep_fallback",
+            provider_chain=["ripgrep_fallback"],
+            fallback_used=True,
+            fallback_reason="ripgrep_error",
+            warnings=[
+                "ripgrep returned an error; used Python grep fallback"
+                + (f" ({proc.stderr.strip()[:160]})" if proc.stderr else "")
+            ],
+            rg_available=True,
+            timeout_seconds=timeout_seconds,
+            max_file_bytes=max_file_bytes,
+        )
+
+    hits: List[GrepHit] = []
+    for line in proc.stdout.splitlines():
+        if len(hits) >= max_results:
+            break
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") != "match":
+            continue
+        data = event.get("data") or {}
+        path_info = data.get("path") or {}
+        lines_info = data.get("lines") or {}
+        rel = str(path_info.get("text") or "").replace("\\", "/")
+        if not rel:
+            continue
+        line_number = int(data.get("line_number") or 0)
+        line_text = str(lines_info.get("text") or "").rstrip("\r\n")
+        submatches = data.get("submatches") or []
+        if submatches:
+            span = (
+                int(submatches[0].get("start") or 0),
+                int(submatches[0].get("end") or 0),
+            )
+        else:
+            span = (0, 0)
+        before, after = _context_for_match(
+            workspace_root=workspace_root,
+            rel_path=rel,
+            line_number=line_number,
+            context_lines=max(0, int(context_lines)),
+        )
+        hits.append(
+            GrepHit(
+                file_path=rel,
+                line_number=line_number,
+                line_content=line_text,
+                context_before=before,
+                context_after=after,
+                match_span=span,
+            )
+        )
+
+    return GrepWorkspaceResult(
+        hits=hits,
+        provider="ripgrep_fallback",
+        provider_chain=["ripgrep_fallback"],
+        rg_available=True,
+        timeout_seconds=timeout_seconds,
+        max_file_bytes=max_file_bytes,
+    )
+
+
+def grep_workspace_with_provider(
+    workspace_root: str | os.PathLike,
+    query: str,
+    file_patterns: Optional[Sequence[str]] = None,
+    max_results: int = 50,
+    context_lines: int = 2,
+    use_regex: bool = False,
+    case_sensitive: bool = False,
+    merge_adjacent: bool = True,
+    timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+    max_file_bytes: int = _MAX_FILE_BYTES,
+    prefer_ripgrep: bool = True,
+) -> GrepWorkspaceResult:
+    """Run workspace grep and report whether rg or Python handled it."""
+    if not query.strip():
+        return GrepWorkspaceResult(
+            hits=[],
+            provider="none",
+            provider_chain=[],
+            fallback_reason="empty_query",
+            max_file_bytes=max_file_bytes,
+            timeout_seconds=timeout_seconds,
+        )
+
+    root = Path(workspace_root).resolve()
+    if not root.exists() or not root.is_dir():
+        return GrepWorkspaceResult(
+            hits=[],
+            provider="provider_unavailable",
+            provider_chain=[],
+            fallback_reason="workspace_root_not_found",
+            warnings=["workspace root not found"],
+            max_file_bytes=max_file_bytes,
+            timeout_seconds=timeout_seconds,
+        )
+
+    patterns = _normalise_patterns(file_patterns)
+    if prefer_ripgrep:
+        rg_result = _grep_workspace_ripgrep(
+            workspace_root=root,
+            query=query,
+            patterns=patterns,
+            max_results=max(1, int(max_results)),
+            context_lines=max(0, int(context_lines)),
+            use_regex=use_regex,
+            case_sensitive=case_sensitive,
+            timeout_seconds=timeout_seconds,
+            max_file_bytes=max_file_bytes,
+        )
+        if (
+            rg_result.provider == "ripgrep_fallback"
+            or rg_result.fallback_reason not in {
+                "ripgrep_not_found",
+                "ripgrep_timeout",
+                "ripgrep_error",
+                "ripgrep_failed",
+            }
+        ):
+            return rg_result
+        python_warnings = list(rg_result.warnings)
+        provider_chain = list(rg_result.provider_chain)
+        fallback_reason = rg_result.fallback_reason
+        timed_out = rg_result.timed_out
+        rg_available = rg_result.rg_available
+    else:
+        python_warnings = []
+        provider_chain = []
+        fallback_reason = "ripgrep_disabled"
+        timed_out = False
+        rg_available = bool(shutil.which("rg"))
+
+    provider_chain.append("python_grep_fallback")
+    hits = grep_workspace(
+        workspace_root=root,
+        query=query,
+        file_patterns=patterns,
+        max_results=max_results,
+        context_lines=context_lines,
+        use_regex=use_regex,
+        case_sensitive=case_sensitive,
+        merge_adjacent=merge_adjacent,
+        max_file_bytes=max_file_bytes,
+    )
+    return GrepWorkspaceResult(
+        hits=hits,
+        provider="python_grep_fallback",
+        provider_chain=provider_chain,
+        fallback_used=True,
+        fallback_reason=fallback_reason,
+        warnings=python_warnings,
+        rg_available=rg_available,
+        timed_out=timed_out,
+        timeout_seconds=timeout_seconds,
+        max_file_bytes=max_file_bytes,
+    )
+
+
 def grep_workspace(
     workspace_root: str | os.PathLike,
     query: str,
@@ -263,6 +564,7 @@ def grep_workspace(
     use_regex: bool = False,
     case_sensitive: bool = False,
     merge_adjacent: bool = True,
+    max_file_bytes: int = _MAX_FILE_BYTES,
 ) -> List[GrepHit]:
     """Run a line-level text search over the workspace.
 
@@ -305,7 +607,11 @@ def grep_workspace(
 
     out: List[GrepHit] = []
     remaining = max(1, int(max_results))
-    for path in _iter_candidate_files(root, patterns):
+    for path in _iter_candidate_files(
+        root,
+        patterns,
+        max_file_bytes=max_file_bytes,
+    ):
         if remaining <= 0:
             break
         hits = _scan_file(
@@ -393,4 +699,4 @@ def _merge_adjacent_hits(hits: List[GrepHit], context_lines: int) -> List[GrepHi
     return merged
 
 
-__all__ = ["GrepHit", "grep_workspace"]
+__all__ = ["GrepHit", "GrepWorkspaceResult", "grep_workspace", "grep_workspace_with_provider"]

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import re
 import threading
 import time
@@ -147,6 +148,9 @@ _LOCK = threading.RLock()
 _SYNC_STATES: Dict[str, _SyncWorkspaceState] = {}
 _SNAPSHOT_STORE = CloudSnapshotStore()
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_AUTO_FTS_LINE_LIMIT = int(
+    os.environ.get("OMNICODE_EXACT_LINE_FTS_MAX_LINES", "50000") or "50000"
+)
 _INDEX_QUEUE: Optional[asyncio.Queue[_IndexJob]] = None
 _INDEX_WORKER_TASK: Optional[asyncio.Task[None]] = None
 _INDEX_LOOP: Optional[asyncio.AbstractEventLoop] = None
@@ -154,6 +158,52 @@ _INDEX_LOOP: Optional[asyncio.AbstractEventLoop] = None
 
 def _exact_index() -> SnapshotExactIndex:
     return SnapshotExactIndex(store=_SNAPSHOT_STORE)
+
+
+def _line_fts_mode() -> str:
+    raw = os.environ.get("OMNICODE_EXACT_LINE_FTS", "").strip().lower()
+    if raw in {"0", "false", "no", "off", "disabled"}:
+        return "off"
+    if raw in {"1", "true", "yes", "on", "force", "forced"}:
+        return "on"
+    return "auto"
+
+
+def _content_line_count(content: str) -> int:
+    if not content:
+        return 0
+    return content.count("\n") + 1
+
+
+def _sync_exact_fts_decision(
+    *,
+    workspace_id: str,
+    files: list[dict[str, Any]],
+) -> tuple[Optional[bool], Optional[str]]:
+    """Decide whether this sync batch should populate SQLite FTS rows.
+
+    Symbol and plain line indexes remain authoritative for large repositories.
+    FTS5 is useful for small/medium workspaces, but keeping it enabled during
+    a large initial sync can dominate /sync/batch latency and bloat the DB.
+    """
+    mode = _line_fts_mode()
+    if mode == "off":
+        return False, "disabled_by_env"
+    if mode == "on":
+        return None, None
+
+    batch_lines = sum(_content_line_count(str(item.get("content") or "")) for item in files)
+    try:
+        exact_status = _exact_index().status(workspace_id=workspace_id)
+    except Exception:
+        exact_status = {}
+    existing_reason = str(exact_status.get("line_fts_reason") or "")
+    existing_lines = int(exact_status.get("lines") or 0)
+    if existing_reason == "disabled_for_large_workspace":
+        return False, "disabled_for_large_workspace"
+    if _AUTO_FTS_LINE_LIMIT > 0 and existing_lines + batch_lines > _AUTO_FTS_LINE_LIMIT:
+        return False, "disabled_for_large_workspace"
+    return None, None
 
 
 def _error(message: str, **extra):
@@ -295,6 +345,146 @@ def record_external_indexed_revision(workspace_id: str, revision: int) -> None:
         state.last_index_error = None
 
 
+async def _recover_stalled_index_update(state: _SyncWorkspaceState) -> None:
+    """Best-effort recovery when the async index worker stopped with work queued.
+
+    Uvicorn keeps one event loop alive, so the normal worker path should handle
+    indexing. Some embedded/test clients recreate request loops, which can leave
+    queued jobs without a running worker. Status is the right repair point: it is
+    already the freshness authority, and a one-shot recovery is better than
+    reporting stale forever.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:  # pragma: no cover - status is async in production
+        loop = None
+    worker_task_active = bool(
+        _INDEX_WORKER_TASK is not None
+        and not _INDEX_WORKER_TASK.done()
+        and _INDEX_LOOP is loop
+    )
+    if worker_task_active:
+        for _ in range(10):
+            with _LOCK:
+                current = _state_for(state.workspace_id)
+                if current.indexed_revision >= current.accepted_revision:
+                    return
+                still_busy = current.index_worker_running or current.index_queue_depth > 0
+            if not still_busy:
+                break
+            await asyncio.sleep(0.01)
+        worker_task_active = bool(
+            _INDEX_WORKER_TASK is not None
+            and not _INDEX_WORKER_TASK.done()
+            and _INDEX_LOOP is loop
+        )
+
+    with _LOCK:
+        current = _state_for(state.workspace_id)
+        if current.indexed_revision >= current.accepted_revision:
+            return
+        if current.index_worker_running and worker_task_active:
+            return
+        if current.index_queue_depth > 0 and worker_task_active:
+            return
+        target_revision = current.accepted_revision
+        pending_rows = [
+            row
+            for row in current.files.values()
+            if row.accepted_revision > current.indexed_revision
+        ]
+        deleted_paths = sorted(current.deleted_paths)
+        metadata = dict(current.last_sync_metadata)
+        pending_jobs = max(current.index_queue_depth, 1)
+        current.index_worker_running = True
+        current.indexing = True
+        current.current_index_revision = target_revision
+        current.current_index_files = len(pending_rows)
+        current.current_index_bytes = sum(
+            _index_content_bytes(row.content) for row in pending_rows
+        )
+        current.current_index_deletes = len(deleted_paths)
+        current.current_index_job_count = pending_jobs
+        current.current_index_started_at = time.monotonic()
+
+    index_files: list[tuple[str, str, dict[str, Any]]] = []
+    semantic_files_skipped = 0
+    semantic_skip_reasons: dict[str, int] = {}
+    for row in pending_rows:
+        include_semantic, reason = semantic_index_decision(
+            row.path,
+            row.content,
+            metadata,
+        )
+        if not include_semantic:
+            semantic_files_skipped += 1
+            semantic_skip_reasons[reason] = semantic_skip_reasons.get(reason, 0) + 1
+            continue
+        index_files.append(
+            (
+                row.path,
+                row.content,
+                {
+                    "content_hash": row.hash,
+                    "snapshot_hash": row.hash,
+                    "snapshot_revision": target_revision,
+                    "workspace_id": state.workspace_id,
+                },
+            )
+        )
+    semantic_coverage = semantic_coverage_for_batch(
+        files_enqueued=len(index_files),
+        files_skipped=semantic_files_skipped,
+        skip_reasons=semantic_skip_reasons,
+        deletes=len(deleted_paths),
+    )
+
+    started = time.monotonic()
+    try:
+        indexed_revision = await asyncio.to_thread(
+            _run_index_update_blocking,
+            state.workspace_id,
+            target_revision,
+            index_files,
+            deleted_paths,
+            semantic_coverage,
+        )
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        with _LOCK:
+            current = _state_for(state.workspace_id)
+            current.indexed_revision = max(
+                current.indexed_revision,
+                indexed_revision,
+            )
+            current.index_queue_depth = 0
+            current.index_worker_running = False
+            current.indexing = current.indexed_revision < current.accepted_revision
+            current.last_index_error = None
+            current.last_index_elapsed_ms = elapsed_ms
+            current.last_index_revision = current.indexed_revision
+            current.index_jobs_completed += pending_jobs
+            current.current_index_revision = 0
+            current.current_index_files = 0
+            current.current_index_bytes = 0
+            current.current_index_deletes = 0
+            current.current_index_job_count = 0
+            current.current_index_started_at = None
+    except Exception as exc:
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        with _LOCK:
+            current = _state_for(state.workspace_id)
+            current.index_worker_running = False
+            current.indexing = current.index_queue_depth > 0
+            current.last_index_error = str(exc)
+            current.last_index_elapsed_ms = elapsed_ms
+            current.current_index_revision = 0
+            current.current_index_files = 0
+            current.current_index_bytes = 0
+            current.current_index_deletes = 0
+            current.current_index_job_count = 0
+            current.current_index_started_at = None
+
+
 def _status_payload(
     state: _SyncWorkspaceState,
     snapshot_status: dict,
@@ -362,6 +552,9 @@ def _status_payload(
             "symbols": int(exact_status.get("symbols") or 0),
             "lines": int(exact_status.get("lines") or 0),
             "line_fts_available": bool(exact_status.get("line_fts_available", False)),
+            "line_fts_reason": exact_status.get("line_fts_reason"),
+            "schema_version": exact_status.get("schema_version"),
+            "index_kind": exact_status.get("index_kind"),
         },
         "semantic_index_ready": semantic_index_ready,
         "semantic_index_coverage": semantic_index_coverage,
@@ -636,9 +829,19 @@ def _run_index_update_blocking(
     semantic_coverage: str = "unknown",
 ) -> int:
     async def _update_index() -> None:
+        nonlocal semantic_coverage
         if changed_files or deleted_paths:
             engine = get_search_engine()
             if engine is None:
+                return
+            semantic_available = getattr(engine, "semantic_available", None)
+            if callable(semantic_available) and not bool(semantic_available()):
+                semantic_coverage = "exact_only_initial_sync"
+                refresh_stats = getattr(engine, "refresh_stats", None)
+                if callable(refresh_stats):
+                    maybe_awaitable = refresh_stats()
+                    if asyncio.iscoroutine(maybe_awaitable):
+                        await maybe_awaitable
                 return
             if changed_files:
                 upsert_many = getattr(engine, "upsert_contents", None)
@@ -782,12 +985,18 @@ async def push_sync_batch(
                 accepted_revision=_state_for(workspace.workspace_id).accepted_revision,
             )
         try:
+            populate_fts, fts_disabled_reason = _sync_exact_fts_decision(
+                workspace_id=workspace.workspace_id,
+                files=store_files,
+            )
             exact_indexed_revision = await asyncio.to_thread(
                 _exact_index().update_batch,
                 workspace_id=workspace.workspace_id,
                 changed_files=store_files,
                 deleted_paths=normalized_deletes,
                 revision=accepted,
+                populate_fts=populate_fts,
+                fts_disabled_reason=fts_disabled_reason,
             )
         except Exception as exc:
             return _error(
@@ -925,6 +1134,7 @@ async def sync_status(
     workspace = _resolve_workspace(x_omnicode_workspace or workspace_id)
     state = _state_for(workspace.workspace_id)
     await _ensure_state_loaded(state)
+    await _recover_stalled_index_update(state)
     with _LOCK:
         state = _state_for(workspace.workspace_id)
     try:
@@ -944,6 +1154,7 @@ async def sync_status(
             snapshot_status = _snapshot_status_from_state(_state_for(workspace.workspace_id))
     with _LOCK:
         state = _state_for(workspace.workspace_id)
+        _apply_snapshot_status(state, snapshot_status)
         return _status_payload(state, snapshot_status, exact_status)
 
 

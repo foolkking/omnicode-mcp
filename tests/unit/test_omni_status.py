@@ -302,6 +302,76 @@ def test_omni_status_prefers_cloud_snapshot_for_index_readiness(
     assert readiness["graph_index_ready"] is False
 
 
+def test_omni_status_surfaces_backend_semantic_metadata_status(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ID", "repo-a")
+    monkeypatch.setenv("OMNICODE_EXECUTOR_MODE", "hybrid")
+    monkeypatch.delenv("OMNICODE_REMOTE", raising=False)
+    monkeypatch.setenv("OMNICODE_FASTAPI_BASE_URL", "http://cloud")
+
+    async def cloud_request(
+        _method: str,
+        endpoint: str,
+        **_kwargs: Any,
+    ) -> Dict[str, Any]:
+        if endpoint == "/sync/status":
+            return {
+                "ok": True,
+                "accepted_revision": 7,
+                "indexed_revision": 7,
+                "exact_index_ready": True,
+                "semantic_index_ready": True,
+                "exact_query_safe": True,
+                "strict_semantic_safe": True,
+                "snapshot_store": {
+                    "latest_revision": 7,
+                    "accepted_revision": 7,
+                    "indexed_revision": 7,
+                    "files": 2,
+                    "deletes": 0,
+                },
+            }
+        if endpoint == "/search/stats":
+            return {
+                "index_stats": {},
+                "semantic_index": {
+                    "semantic_index_ready": False,
+                    "semantic_index_model": "sentence-transformers/all-MiniLM-L6-v2",
+                    "semantic_index_dimension": 384,
+                    "faiss_dimension": 384,
+                    "semantic_index_stale_reason": "embedding_dimension_mismatch",
+                    "semantic_index_invalid": True,
+                    "semantic_index_stale": False,
+                    "chunker_version": "ast-chunker.v1",
+                    "vector_count": 12,
+                },
+            }
+        return {}
+
+    raw = _run(_build_status_tool_with_request(cloud_request)())
+    payload = json.loads(raw)
+
+    semantic = payload["sync"]["semantic_index"]
+    readiness = payload["sync"]["index_readiness"]
+    assert semantic["semantic_index_invalid"] is True
+    assert readiness["semantic_index_ready"] is False
+    assert readiness["semantic_index_model"] == "sentence-transformers/all-MiniLM-L6-v2"
+    assert readiness["semantic_index_dimension"] == 384
+    assert readiness["semantic_index_invalid"] is True
+    assert readiness["semantic_index_stale_reason"] == "embedding_dimension_mismatch"
+    assert readiness["semantic_index_chunker_version"] == "ast-chunker.v1"
+    assert readiness["semantic_vector_count"] == 12
+
+
 def test_omni_status_reports_cloud_unavailable(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

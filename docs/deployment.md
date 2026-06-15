@@ -18,6 +18,7 @@ unit are configured to actually invoke it.
 - [Deployment patterns](#deployment-patterns)
   - [Pattern A — systemd + nginx](#pattern-a--systemd--nginx-on-a-single-vm)
   - [Pattern B — Docker Compose + Caddy](#pattern-b--docker-compose-with-caddy)
+- [Embedding models in deployment](#embedding-models-in-deployment)
 - [Security layers (defence in depth)](#security-layers-defence-in-depth)
   - [1 · Path sandbox](#layer-1--path-sandbox)
   - [2 · Read-only mode](#layer-2--read-only-mode)
@@ -159,6 +160,25 @@ curl -H "X-API-Key: REPLACE_ME" \
 Both should return 200. The first `curl` works without the header
 because `/health` is on the public allow-list.
 
+For hybrid deployments, run the durability soak before treating a build as
+production-ready:
+
+```bash
+python scripts/soak_hybrid_durability.py \
+  --duration-s 1800 \
+  --max-iterations 0 \
+  --sleep-s 1 \
+  --rollback-every 5 \
+  --cloud-down-at 3 \
+  --reset-state \
+  --json
+```
+
+The soak creates a throwaway workspace, starts a temporary cloud-index backend,
+applies safe local edits, validates exact search freshness, rolls edits back,
+simulates a cloud outage, and verifies the pending sync queue drains after the
+backend restarts.
+
 ---
 
 ### Hybrid MCP + cloud sync
@@ -256,8 +276,22 @@ Then call MCP `omni_status()`. A healthy hybrid setup reports:
   configured
 
 Cloud storage for accepted sync snapshots lives under
-`~/.omnicode/cloud-sync/workspaces/<workspace_id>/`. It is
-content-addressed and stores only workspace-relative paths in the index.
+`<OMNICODE_STATE_DIR>/cloud-sync/workspaces/<workspace_id>/` when
+`OMNICODE_STATE_DIR` is configured, otherwise under the default user state
+directory. It is content-addressed and stores only workspace-relative paths
+in the index. The readonly mirror is for cloud analysis only; the user's
+local checkout remains the file authority.
+
+Do not point the cloud backend at the user's real local project directory
+when simulating hybrid on one machine. Use a separate cloud mirror root:
+
+```text
+local project:        <PROJECT_ROOT>
+cloud mirror root:    <CLOUD_WORKSPACE_ROOT>/<workspace_id>
+local state:          <STATE_DIR>/local
+cloud state:          <STATE_DIR>/cloud
+embedding cache:      <MODEL_CACHE>
+```
 
 ---
 
@@ -298,6 +332,60 @@ curl https://your-host/health
 curl -H "X-API-Key: $(grep OMNICODE_API_KEY .env | cut -d= -f2)" \
      https://your-host/capabilities
 ```
+
+---
+
+## Embedding models in deployment
+
+Semantic search is optional and should be treated as an enhancement over the
+deterministic exact index. For predictable startup, pre-download embedding
+models during deployment rather than allowing the service to download at
+runtime.
+
+Supported models:
+
+| Model | Suggested use |
+|---|---|
+| `sentence-transformers/all-MiniLM-L6-v2` | Local default; small and fast |
+| `BAAI/bge-small-en-v1.5` | Cloud/hybrid default candidate |
+| `intfloat/e5-small-v2` | Small E5 alternative |
+| `sentence-transformers/all-mpnet-base-v2` | Larger local option |
+
+Deployment steps:
+
+```bash
+omnicode models pull \
+  --model sentence-transformers/all-MiniLM-L6-v2 \
+  --cache-dir <MODEL_CACHE>
+
+export OMNICODE_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+export OMNICODE_EMBEDDING_CACHE_DIR=<MODEL_CACHE>
+export OMNICODE_EMBEDDING_LOCAL_FILES_ONLY=true
+export OMNICODE_EMBEDDING_DEVICE=cpu
+```
+
+For cloud/hybrid, set the model to `BAAI/bge-small-en-v1.5` if you have
+pre-downloaded it and sized memory accordingly.
+
+`omni_status()` and `omnicode models status` must show the selected model,
+dimension, cache directory, local-files-only state, and whether a download is
+required. If the model is absent with local-files-only enabled, the service
+continues to run and reports `EMBEDDING_MODEL_NOT_FOUND`; exact
+symbol/text/read/patch workflows remain available.
+
+FAISS semantic indexes are tied to embedding metadata:
+
+- embedding model id
+- embedding revision
+- embedding dimension
+- embedding backend
+- chunker version
+- normalization
+- workspace id
+
+Changing model or dimension marks the semantic index stale/invalid. Rebuild
+only the semantic index; do not rebuild deterministic exact search unless
+files changed.
 
 ---
 

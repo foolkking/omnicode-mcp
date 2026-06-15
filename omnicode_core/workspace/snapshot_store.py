@@ -8,6 +8,7 @@ import os
 import re
 import stat
 import threading
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Optional
@@ -428,6 +429,9 @@ class CloudSnapshotStore:
 
     def status(self, workspace_id: str) -> dict[str, Any]:
         workspace = _validate_workspace_id(workspace_id)
+        fast = self._load_status_summary(workspace)
+        if fast is not None:
+            return fast
         with self._workspace_lock(workspace):
             return self._status_unlocked(workspace)
 
@@ -580,6 +584,9 @@ class CloudSnapshotStore:
     def _index_path(self, workspace_id: str) -> Path:
         return self._workspace_dir(workspace_id) / "index.json"
 
+    def _status_path(self, workspace_id: str) -> Path:
+        return self._workspace_dir(workspace_id) / "status.json"
+
     def _ensure_under(self, root: Path, path: Path) -> None:
         root_resolved = root.resolve()
         parent_resolved = path.parent.resolve()
@@ -593,14 +600,47 @@ class CloudSnapshotStore:
         self._ensure_under(mirror_root, target)
         if target.is_symlink():
             raise SnapshotStoreError(f"mirror path is a symlink: {path}")
-        if target.exists():
-            target.chmod(stat.S_IREAD | stat.S_IWRITE)
         tmp = target.with_name(target.name + ".tmp")
         tmp.write_bytes(encoded)
-        os.replace(tmp, target)
+        self._replace_mirror_file(tmp=tmp, target=target)
         if self.mirror_readonly:
             target.chmod(stat.S_IREAD)
         return "mirror/" + path
+
+    def _replace_mirror_file(self, *, tmp: Path, target: Path) -> None:
+        """Replace a mirror file, including Windows readonly targets.
+
+        The mirror is intentionally read-only for consumers, but the backend
+        must still be able to materialize a newer snapshot over the same path.
+        On Windows, replacing a readonly destination may fail even after a
+        previous chmod attempt, so the fallback clears the bit, unlinks the
+        old file, then moves the temp file into place.
+        """
+        attempts = 3
+        last_error: PermissionError | None = None
+        for attempt in range(attempts):
+            try:
+                if target.exists():
+                    target.chmod(stat.S_IREAD | stat.S_IWRITE)
+                os.replace(tmp, target)
+                return
+            except PermissionError as exc:
+                last_error = exc
+                try:
+                    if target.exists():
+                        target.chmod(stat.S_IREAD | stat.S_IWRITE)
+                        target.unlink()
+                    os.replace(tmp, target)
+                    return
+                except PermissionError as retry_exc:
+                    last_error = retry_exc
+                    if attempt < attempts - 1:
+                        time.sleep(0.05 * (attempt + 1))
+                        continue
+                    break
+        if last_error is not None:
+            raise last_error
+        os.replace(tmp, target)
 
     def _delete_mirror(self, *, workspace_id: str, path: str) -> None:
         mirror_root = self._mirror_root(workspace_id)
@@ -652,6 +692,69 @@ class CloudSnapshotStore:
             newline="\n",
         )
         os.replace(tmp, path)
+        self._save_status_summary(workspace_id, index)
+
+    def _status_from_index(self, workspace_id: str, index: dict[str, Any]) -> dict[str, Any]:
+        files = index.get("files", {})
+        deletes = index.get("deletes", {})
+        accepted = int(index.get("accepted_revision", index.get("latest_revision", 0)))
+        indexed = int(index.get("indexed_revision", 0))
+        return {
+            "schema_version": 1,
+            "workspace_id": workspace_id,
+            "latest_revision": accepted,
+            "accepted_revision": accepted,
+            "indexed_revision": indexed,
+            "semantic_index_coverage": str(
+                index.get("semantic_index_coverage") or "unknown"
+            ),
+            "semantic_initial_exact_only": bool(
+                index.get("semantic_initial_exact_only", False)
+            ),
+            "file_count": len(files) if isinstance(files, dict) else 0,
+            "delete_count": len(deletes) if isinstance(deletes, dict) else 0,
+        }
+
+    def _save_status_summary(self, workspace_id: str, index: dict[str, Any]) -> None:
+        path = self._status_path(workspace_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(
+            json.dumps(
+                self._status_from_index(workspace_id, index),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+            newline="\n",
+        )
+        os.replace(tmp, path)
+
+    def _load_status_summary(self, workspace_id: str) -> Optional[dict[str, Any]]:
+        path = self._status_path(workspace_id)
+        if not path.exists():
+            return None
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(raw, dict):
+            return None
+        return {
+            "workspace_id": str(raw.get("workspace_id") or workspace_id),
+            "latest_revision": int(raw.get("latest_revision", 0) or 0),
+            "accepted_revision": int(raw.get("accepted_revision", 0) or 0),
+            "indexed_revision": int(raw.get("indexed_revision", 0) or 0),
+            "semantic_index_coverage": str(
+                raw.get("semantic_index_coverage") or "unknown"
+            ),
+            "semantic_initial_exact_only": bool(
+                raw.get("semantic_initial_exact_only", False)
+            ),
+            "file_count": int(raw.get("file_count", 0) or 0),
+            "delete_count": int(raw.get("delete_count", 0) or 0),
+        }
 
     def _set_accepted_revision(self, index: dict[str, Any], revision: int) -> None:
         accepted = max(

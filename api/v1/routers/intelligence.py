@@ -63,6 +63,8 @@ def _apply_llm_runtime_status(statuses: list[dict]) -> tuple[list[dict], dict]:
         if item.get("capability") == "llm_enhancement":
             item["available"] = bool(llm["available"])
             item["detail"] = llm["reason"]
+            item["state"] = "ready" if llm["available"] else "unavailable"
+            item["reason"] = llm["reason"]
             if not llm["available"]:
                 item["backend"] = ""
     return statuses, llm

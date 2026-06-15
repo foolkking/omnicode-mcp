@@ -144,6 +144,9 @@ def _user_data_dir() -> Path:
     explicit = os.environ.get("CODEBASE_MCP_USER_DIR")
     if explicit:
         return Path(explicit).expanduser()
+    state_dir = os.environ.get("OMNICODE_STATE_DIR", "").strip()
+    if state_dir:
+        return Path(state_dir).expanduser() / "user"
     return Path.home() / ".kiro" / "codebase-mcp"
 
 
@@ -171,6 +174,12 @@ def resolve_provider_db_path(working_dir: Optional[str] = None) -> str:
             p = Path(wd) / p
         p.parent.mkdir(parents=True, exist_ok=True)
         return str(p)
+
+    state_dir = os.environ.get("OMNICODE_STATE_DIR", "").strip()
+    if state_dir:
+        state_db = Path(state_dir).expanduser() / "providers.db"
+        state_db.parent.mkdir(parents=True, exist_ok=True)
+        return str(state_db)
 
     if working_dir:
         project_db = Path(working_dir) / ".data" / "providers.db"

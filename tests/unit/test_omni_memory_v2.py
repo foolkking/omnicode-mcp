@@ -172,6 +172,62 @@ def test_memory_store_warns_when_backend_returns_no_id() -> None:
     assert any("backend_missing_id" in w for w in payload["warnings"])
 
 
+def test_memory_store_backend_validation_error_is_not_success() -> None:
+    routes = {
+        "/memory/store": {
+            "status_code": 422,
+            "detail": [
+                {
+                    "loc": ["body", "category"],
+                    "msg": "Input should be a supported category",
+                }
+            ],
+        }
+    }
+    tools = _build_tools(routes)
+
+    raw = _run(tools["omni_memory"](
+        action="store",
+        content="x",
+        category="note",
+        format="json",
+    ))
+    payload = json.loads(raw)
+
+    assert payload["ok"] is False
+    assert "Memory store error" in payload["error"]
+    assert "body.category" in payload["error"]
+    assert "memory_id" not in payload
+
+
+def test_memory_search_backend_validation_error_is_not_success() -> None:
+    routes = {
+        "/memory/search": {
+            "success": False,
+            "status_code": 422,
+            "detail": [
+                {
+                    "loc": ["body", "query"],
+                    "msg": "query is invalid",
+                }
+            ],
+        }
+    }
+    tools = _build_tools(routes)
+
+    raw = _run(tools["omni_memory"](
+        action="search",
+        query="x",
+        format="json",
+    ))
+    payload = json.loads(raw)
+
+    assert payload["ok"] is False
+    assert "Memory search error" in payload["error"]
+    assert "body.query" in payload["error"]
+    assert "results" not in payload
+
+
 # ---------------------------------------------------------------------------
 # 2. store echoes file / symbol / task
 # ---------------------------------------------------------------------------
@@ -198,6 +254,18 @@ def test_memory_store_echoes_file_symbol_task() -> None:
     assert "search" in payload["tags"] and "test" in payload["tags"]
     # The content itself is echoed for callers that want a quick confirm.
     assert "_detect_mode" in payload["content"]
+
+    raw_list_tags = _run(tools["omni_memory"](
+        action="store",
+        content="List tags should be accepted too.",
+        category="lesson",
+        importance=3,
+        tags=["search", "mode-routing"],
+        format="json",
+    ))
+    payload_list_tags = json.loads(raw_list_tags)
+    assert payload_list_tags["ok"] is True
+    assert payload_list_tags["tags"] == ["search", "mode-routing"]
 
 
 def test_memory_store_forwards_context_to_backend() -> None:

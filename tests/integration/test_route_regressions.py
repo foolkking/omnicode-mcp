@@ -207,7 +207,7 @@ def test_edit_pipeline_failure_returns_200_with_failure_analysis(client, tmp_pat
 #    because the chunker stored empty symbol_name and the engine's search()
 #    fell through to semantic search).
 # ---------------------------------------------------------------------------
-def test_symbol_search_finds_chunker_metadata_match(client):
+def test_symbol_search_finds_chunker_metadata_match(client, tmp_path, monkeypatch):
     """After indexing the working directory the chunker MUST populate
     ``metadata.symbol_name`` and the /search/symbols endpoint MUST be able
     to find that name via SQL LIKE.
@@ -218,6 +218,8 @@ def test_symbol_search_finds_chunker_metadata_match(client):
       search for ``search_type='fuzzy_symbol'`` instead of doing the
       metadata lookup
     """
+    monkeypatch.setenv("OMNICODE_STATE_DIR", str(tmp_path / "state"))
+
     # Make sure the index has at least one file's worth of symbols.
     index_resp = client.post("/search/index")
     assert index_resp.status_code == 200, index_resp.text

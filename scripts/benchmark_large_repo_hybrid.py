@@ -351,17 +351,44 @@ def _assert_semantic_exact_rank(
     symbol: str,
     expected_file: str,
 ) -> dict[str, Any]:
-    result = _json_request(
-        client,
-        "POST",
+    response = client.post(
         "/search",
         headers={"X-Omnicode-Workspace": workspace_id},
         json={"query": symbol, "search_type": "semantic", "max_results": 5},
         timeout=30.0,
     )
+    payload = response.json()
+    result = payload.get("result") if isinstance(payload, dict) else {}
+    if not isinstance(result, dict):
+        result = {}
     rows = result.get("results") or []
     first = rows[0] if rows else {}
     why = first.get("why_matched") or []
+
+    if response.status_code == 409:
+        ok = (
+            result.get("ok") is False
+            and result.get("error_code") == "SEMANTIC_INDEX_NOT_READY"
+            and result.get("fallback_used") is True
+            and bool(rows)
+            and first.get("file_path") == expected_file
+            and first.get("symbol_name") == symbol
+        )
+        return {
+            "ok": ok,
+            "policy": "semantic_not_ready_exact_fallback",
+            "status_code": response.status_code,
+            "error_code": result.get("error_code"),
+            "first": first,
+            "count": len(rows),
+            "fallback_used": result.get("fallback_used"),
+            "fallback_reason": result.get("fallback_reason"),
+            "capabilities_missing": result.get("capabilities_missing"),
+            "snapshot_exact_boost": result.get("snapshot_exact_boost"),
+            "snapshot_lexical_boost": result.get("snapshot_lexical_boost"),
+        }
+
+    response.raise_for_status()
     ok = (
         bool(rows)
         and first.get("file_path") == expected_file
@@ -372,6 +399,8 @@ def _assert_semantic_exact_rank(
     )
     return {
         "ok": ok,
+        "policy": "semantic_ready_exact_rank",
+        "status_code": response.status_code,
         "first": first,
         "count": len(rows),
         "snapshot_exact_boost": result.get("snapshot_exact_boost"),

@@ -8,6 +8,7 @@ served while the slower embedding index catches up.
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import os
 import re
 import sqlite3
@@ -26,7 +27,30 @@ _PY_SYMBOL_RE = re.compile(
     r"^(?P<indent>\s*)(?P<kind>class|def|async\s+def)\s+"
     r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\b"
 )
+_SYMBOL_RE = re.compile(
+    r"^(?P<indent>\s*)"
+    r"(?:(?:public|private|protected|static|final|abstract|sealed|case|open|"
+    r"override|implicit|lazy)\s+)*"
+    r"(?P<kind>class|trait|object|interface|enum|def|async\s+def|function|func)\s+"
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\b"
+)
 _WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_SCHEMA_VERSION = 2
+_INDEX_KIND = "workspace_exact"
+_DEFAULT_SOURCE_SUFFIXES = {
+    ".py", ".pyi", ".java", ".scala", ".sc", ".kt", ".kts", ".js", ".jsx",
+    ".ts", ".tsx", ".go", ".rs", ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp",
+    ".cs", ".rb", ".php", ".swift", ".m", ".mm", ".md", ".toml", ".yaml",
+    ".yml", ".json", ".sql", ".sh", ".bash", ".zsh", ".html", ".css", ".scss",
+}
+_DEFAULT_SKIP_DIRS = {
+    ".git", ".hg", ".svn", ".data", ".venv", "venv", "__pycache__",
+    "node_modules", "dist", "build", "target", ".gradle", ".mypy_cache",
+    ".pytest_cache", ".ruff_cache", ".idea", ".vscode",
+}
+_AUTO_FTS_LINE_LIMIT = int(
+    os.environ.get("OMNICODE_EXACT_LINE_FTS_MAX_LINES", "50000") or "50000"
+)
 
 
 @dataclass(frozen=True)
@@ -71,9 +95,17 @@ def _guess_language(path: str) -> str:
     return suffix or "text"
 
 
-def _line_fts_enabled() -> bool:
+def _line_fts_mode() -> str:
     raw = os.environ.get("OMNICODE_EXACT_LINE_FTS", "").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+    if raw in {"0", "false", "no", "off", "disabled"}:
+        return "off"
+    if raw in {"1", "true", "yes", "on", "force", "forced"}:
+        return "on"
+    return "auto"
+
+
+def _line_fts_should_try() -> bool:
+    return _line_fts_mode() != "off"
 
 
 def _line_match(
@@ -93,6 +125,19 @@ def _line_match(
     if start < 0:
         return None
     return start, start + len(needle)
+
+
+def _text_row_rank(row: ExactTextRow) -> tuple[int, int, str, int]:
+    start, end = row.match_span
+    line = row.line_text
+    before_ok = start <= 0 or not (
+        line[start - 1].isalnum() or line[start - 1] == "_"
+    )
+    after_ok = end >= len(line) or not (
+        line[end].isalnum() or line[end] == "_"
+    )
+    boundary_penalty = 0 if before_ok and after_ok else 1
+    return boundary_penalty, len(line), row.path, row.line_no
 
 
 class SnapshotExactIndex:
@@ -122,14 +167,32 @@ class SnapshotExactIndex:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA temp_store=MEMORY")
+        conn.execute("PRAGMA cache_size=-200000")
+        conn.execute("PRAGMA wal_autocheckpoint=1000")
         self._ensure_schema(conn)
         return conn
+
+    def clear_workspace(self, *, workspace_id: str) -> None:
+        with self._workspace_lock(workspace_id):
+            conn = self._connect(workspace_id)
+            try:
+                conn.execute("DELETE FROM files")
+                conn.execute("DELETE FROM symbols")
+                conn.execute("DELETE FROM lines")
+                self._drop_fts_rows(conn)
+                self._set_meta_int(conn, "exact_indexed_revision", 0)
+                conn.commit()
+            finally:
+                conn.close()
 
     def _ensure_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS meta ("
             "key TEXT PRIMARY KEY, value TEXT NOT NULL)"
         )
+        self._set_meta_text(conn, "schema_version", str(_SCHEMA_VERSION))
+        self._set_meta_text(conn, "index_kind", _INDEX_KIND)
         conn.execute(
             "CREATE TABLE IF NOT EXISTS files ("
             "path TEXT PRIMARY KEY, hash TEXT NOT NULL, revision INTEGER NOT NULL, "
@@ -157,11 +220,16 @@ class SnapshotExactIndex:
             "PRIMARY KEY(path, line_no))"
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_lines_path ON lines(path)")
-        if not _line_fts_enabled():
-            conn.execute(
-                "INSERT OR REPLACE INTO meta(key, value) VALUES"
-                "('line_fts_available', '0')"
-            )
+        existing_fts_reason = self._meta_text(conn, "line_fts_reason", "")
+        if not _line_fts_should_try():
+            self._set_meta_int(conn, "line_fts_available", 0)
+            self._set_meta_text(conn, "line_fts_reason", "disabled_by_env")
+        elif (
+            _line_fts_mode() == "auto"
+            and existing_fts_reason == "disabled_for_large_workspace"
+        ):
+            self._set_meta_int(conn, "line_fts_available", 0)
+            self._set_meta_text(conn, "line_fts_reason", existing_fts_reason)
         else:
             try:
                 conn.execute(
@@ -169,25 +237,45 @@ class SnapshotExactIndex:
                     "path UNINDEXED, line_no UNINDEXED, line_text, "
                     "hash UNINDEXED, revision UNINDEXED, tokenize='trigram')"
                 )
-                conn.execute(
-                    "INSERT OR REPLACE INTO meta(key, value) VALUES"
-                    "('line_fts_available', '1')"
-                )
-            except sqlite3.Error:
-                conn.execute(
-                    "INSERT OR REPLACE INTO meta(key, value) VALUES"
-                    "('line_fts_available', '0')"
-                )
+                self._set_meta_int(conn, "line_fts_available", 1)
+                self._set_meta_text(conn, "line_fts_reason", "ready")
+            except sqlite3.Error as exc:
+                self._set_meta_int(conn, "line_fts_available", 0)
+                self._set_meta_text(conn, "line_fts_reason", f"create_failed: {exc}")
         conn.commit()
 
     def _fts_available(self, conn: sqlite3.Connection) -> bool:
-        if not _line_fts_enabled():
-            conn.execute(
-                "INSERT OR REPLACE INTO meta(key, value) VALUES"
-                "('line_fts_available', '0')"
-            )
+        if not _line_fts_should_try():
+            self._set_meta_int(conn, "line_fts_available", 0)
+            self._set_meta_text(conn, "line_fts_reason", "disabled_by_env")
+            return False
+        if (
+            _line_fts_mode() == "auto"
+            and self._meta_text(conn, "line_fts_reason") == "disabled_for_large_workspace"
+        ):
+            self._set_meta_int(conn, "line_fts_available", 0)
             return False
         return self._meta_int(conn, "line_fts_available") == 1
+
+    def _set_fts_unavailable(
+        self,
+        conn: sqlite3.Connection,
+        reason: str,
+    ) -> None:
+        self._set_meta_int(conn, "line_fts_available", 0)
+        self._set_meta_text(conn, "line_fts_reason", reason)
+
+    def _drop_fts_rows(self, conn: sqlite3.Connection) -> None:
+        try:
+            conn.execute("DELETE FROM line_fts")
+        except sqlite3.Error:
+            pass
+
+    def _meta_text(self, conn: sqlite3.Connection, key: str, default: str = "") -> str:
+        row = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        if not row:
+            return default
+        return str(row["value"])
 
     def _meta_int(self, conn: sqlite3.Connection, key: str) -> int:
         row = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
@@ -204,6 +292,12 @@ class SnapshotExactIndex:
             (key, str(int(value))),
         )
 
+    def _set_meta_text(self, conn: sqlite3.Connection, key: str, value: str) -> None:
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+            (key, str(value)),
+        )
+
     def update_batch(
         self,
         *,
@@ -211,11 +305,20 @@ class SnapshotExactIndex:
         changed_files: list[dict[str, Any]],
         deleted_paths: list[str],
         revision: int,
+        populate_fts: Optional[bool] = None,
+        fts_disabled_reason: Optional[str] = None,
     ) -> int:
         """Update exact index rows for a sync batch and return indexed revision."""
         with self._workspace_lock(workspace_id):
-            with self._connect(workspace_id) as conn:
+            conn = self._connect(workspace_id)
+            try:
                 fts_available = self._fts_available(conn)
+                if populate_fts is False:
+                    fts_available = False
+                    self._set_fts_unavailable(
+                        conn,
+                        fts_disabled_reason or "disabled_for_this_batch",
+                    )
                 for raw_path in deleted_paths:
                     path = normalize_snapshot_path(raw_path)
                     self._delete_path(conn, path, fts_available=fts_available)
@@ -246,6 +349,127 @@ class SnapshotExactIndex:
                 )
                 conn.commit()
                 return self._meta_int(conn, "exact_indexed_revision")
+            finally:
+                conn.close()
+
+    def index_workspace_root(
+        self,
+        *,
+        workspace_id: str,
+        root: str | os.PathLike[str],
+        revision: int = 1,
+        force: bool = False,
+        max_file_bytes: int = 2_000_000,
+        batch_size: int = 1000,
+    ) -> dict[str, Any]:
+        """Build L0/L1/L2 exact index from a local workspace root.
+
+        This is deterministic bootstrap only: semantic/vector indexing remains
+        optional.  State is stored in the configured snapshot/exact-index root,
+        never in the source checkout itself.
+        """
+        root_path = Path(root).expanduser().resolve()
+        if not root_path.is_dir():
+            raise ValueError(f"workspace root not found: {root_path}")
+        if force:
+            self.clear_workspace(workspace_id=workspace_id)
+
+        scanned = 0
+        indexed = 0
+        skipped = 0
+        lines_seen = 0
+        fts_auto_disabled = False
+        errors: list[dict[str, str]] = []
+        batch: list[dict[str, Any]] = []
+
+        def flush() -> None:
+            nonlocal batch
+            if not batch:
+                return
+            self.update_batch(
+                workspace_id=workspace_id,
+                changed_files=batch,
+                deleted_paths=[],
+                revision=revision,
+                populate_fts=False if fts_auto_disabled else None,
+                fts_disabled_reason=(
+                    "disabled_for_large_workspace"
+                    if fts_auto_disabled
+                    else None
+                ),
+            )
+            batch = []
+
+        for current_root, dir_names, file_names in os.walk(root_path):
+            dir_names[:] = [
+                name for name in dir_names
+                if name not in _DEFAULT_SKIP_DIRS
+            ]
+            current = Path(current_root)
+            for file_name in file_names:
+                path = current / file_name
+                try:
+                    rel_parts = path.relative_to(root_path).parts
+                except ValueError:
+                    continue
+                if any(part in _DEFAULT_SKIP_DIRS for part in rel_parts[:-1]):
+                    skipped += 1
+                    continue
+                if path.suffix.lower() not in _DEFAULT_SOURCE_SUFFIXES:
+                    skipped += 1
+                    continue
+                try:
+                    size = path.stat().st_size
+                except OSError as exc:
+                    errors.append({"path": str(path), "error": str(exc)})
+                    continue
+                if size > max_file_bytes:
+                    skipped += 1
+                    continue
+                scanned += 1
+                try:
+                    content = path.read_text(encoding="utf-8", errors="replace")
+                except OSError as exc:
+                    errors.append({"path": str(path), "error": str(exc)})
+                    continue
+                lines_seen += content.count("\n") + 1
+                if (
+                    not fts_auto_disabled
+                    and _line_fts_mode() == "auto"
+                    and lines_seen > _AUTO_FTS_LINE_LIMIT
+                ):
+                    fts_auto_disabled = True
+                rel = path.relative_to(root_path).as_posix()
+                hash_value = (
+                    "sha256:"
+                    + hashlib.sha256(
+                        content.encode("utf-8", errors="replace")
+                    ).hexdigest()
+                )
+                batch.append({
+                    "path": rel,
+                    "hash": hash_value,
+                    "size": size,
+                    "content": content,
+                })
+                indexed += 1
+                if len(batch) >= batch_size:
+                    flush()
+        flush()
+        status = self.status(workspace_id=workspace_id)
+        return {
+            "workspace_id": workspace_id,
+            "root": str(root_path),
+            "revision": revision,
+            "files_scanned": scanned,
+            "files_indexed": indexed,
+            "files_skipped": skipped,
+            "lines_seen": lines_seen,
+            "fts_auto_disabled": fts_auto_disabled,
+            "errors": errors[:20],
+            "error_count": len(errors),
+            "status": status,
+        }
 
     def _delete_path(
         self,
@@ -259,6 +483,11 @@ class SnapshotExactIndex:
         conn.execute("DELETE FROM lines WHERE path=?", (path,))
         if fts_available:
             conn.execute("DELETE FROM line_fts WHERE path=?", (path,))
+        else:
+            try:
+                conn.execute("DELETE FROM line_fts WHERE path=?", (path,))
+            except sqlite3.Error:
+                pass
 
     def _upsert_file(
         self,
@@ -298,11 +527,15 @@ class SnapshotExactIndex:
 
         symbol_rows = []
         for idx, line in enumerate(lines):
-            match = _PY_SYMBOL_RE.match(line)
+            match = _SYMBOL_RE.match(line)
             if not match:
                 continue
             raw_kind = match.group("kind")
-            kind = "class" if raw_kind == "class" else "function"
+            kind = (
+                "function"
+                if raw_kind in {"def", "async def", "function", "func"}
+                else raw_kind
+            )
             name = match.group("name")
             symbol_rows.append(
                 (
@@ -326,12 +559,15 @@ class SnapshotExactIndex:
 
     def status(self, *, workspace_id: str) -> dict[str, Any]:
         with self._workspace_lock(workspace_id):
-            with self._connect(workspace_id) as conn:
+            conn = self._connect(workspace_id)
+            try:
                 files = conn.execute("SELECT COUNT(*) AS n FROM files").fetchone()["n"]
                 symbols = conn.execute("SELECT COUNT(*) AS n FROM symbols").fetchone()["n"]
                 lines = conn.execute("SELECT COUNT(*) AS n FROM lines").fetchone()["n"]
                 return {
                     "workspace_id": workspace_id,
+                    "schema_version": self._meta_int(conn, "schema_version"),
+                    "index_kind": self._meta_text(conn, "index_kind", _INDEX_KIND),
                     "exact_indexed_revision": self._meta_int(
                         conn,
                         "exact_indexed_revision",
@@ -340,7 +576,14 @@ class SnapshotExactIndex:
                     "symbols": int(symbols or 0),
                     "lines": int(lines or 0),
                     "line_fts_available": self._fts_available(conn),
+                    "line_fts_reason": self._meta_text(
+                        conn,
+                        "line_fts_reason",
+                        "unknown",
+                    ),
                 }
+            finally:
+                conn.close()
 
     def search_symbols(
         self,
@@ -364,7 +607,8 @@ class SnapshotExactIndex:
             else None
         )
         with self._workspace_lock(workspace_id):
-            with self._connect(workspace_id) as conn:
+            conn = self._connect(workspace_id)
+            try:
                 rows: list[ExactSymbolRow] = []
                 seen: set[tuple[str, str, int]] = set()
 
@@ -427,6 +671,8 @@ class SnapshotExactIndex:
                             return rows[:max_results]
 
                 return rows[:max_results]
+            finally:
+                conn.close()
 
     def search_text(
         self,
@@ -447,7 +693,8 @@ class SnapshotExactIndex:
             else None
         )
         with self._workspace_lock(workspace_id):
-            with self._connect(workspace_id) as conn:
+            conn = self._connect(workspace_id)
+            try:
                 table = "line_fts" if self._fts_available(conn) and not use_regex else "lines"
                 sql = (
                     f"SELECT path, line_no, line_text, hash, revision FROM {table} "
@@ -493,9 +740,10 @@ class SnapshotExactIndex:
                             context_after=after,
                         )
                     )
-                    if len(out) >= max_results:
-                        break
-                return out
+                out.sort(key=_text_row_rank)
+                return out[:max_results]
+            finally:
+                conn.close()
 
     def _line_context(
         self,

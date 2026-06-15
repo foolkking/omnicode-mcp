@@ -203,12 +203,17 @@ def test_text_search_includes_cloud_snapshot(
     assert response.status_code == 200
     assert body["success"] is True
     assert body["result"]["total_results"] == 1
+    assert "provider" in body["result"]
+    assert "provider_chain" in body["result"]
+    assert body["result"]["empty_reason"] is None
     row = body["result"]["results"][0]
     assert row["file_path"] == "tests/tmp_cloudsim_incremental.py"
     assert row["line_content"] == 'VALUE = "v2"'
     assert row["hash"] == _sha(content)
     assert row["revision"] == 8
-    assert stale.json()["result"]["total_results"] == 0
+    stale_result = stale.json()["result"]
+    assert stale_result["total_results"] == 0
+    assert stale_result["empty_reason"] == "true_empty"
 
 
 def test_text_search_reads_snapshot_records_without_index_reload(
@@ -262,6 +267,46 @@ def test_text_search_reads_snapshot_records_without_index_reload(
     assert response.status_code == 200
     assert body["success"] is True
     assert body["result"]["results"][0]["file_path"] == "django/core/handlers/base.py"
+    assert "cloud_snapshot_grep" in body["result"]["provider_chain"]
+    assert body["result"]["fallback_used"] is True
+
+
+def test_workspace_exact_index_scope_does_not_require_semantic_engine(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    target = workspace / "django" / "core" / "handlers"
+    target.mkdir(parents=True)
+    (target / "base.py").write_text("class BaseHandler:\n    pass\n", encoding="utf-8")
+    store = CloudSnapshotStore(root=tmp_path / "state" / "cloud-sync")
+
+    monkeypatch.setattr(
+        search_router,
+        "get_settings",
+        lambda: SimpleNamespace(WORKING_DIR=str(workspace)),
+    )
+    monkeypatch.setattr(search_router, "CloudSnapshotStore", lambda: store)
+    monkeypatch.setattr(search_router, "get_search_engine", lambda: None)
+
+    app = FastAPI()
+    app.include_router(search_router.router)
+    client = TestClient(app)
+
+    response = client.post(
+        "/search/index",
+        params={"scope": "workspace", "workspace_id": "repo-a", "force": True},
+    )
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["success"] is True
+    result = body["result"]
+    assert result["scope"] == "workspace"
+    assert result["exact_index_used"] is True
+    assert result["status"]["files"] == 1
+    exact = SnapshotExactIndex(store=store)
+    assert exact.search_symbols(workspace_id="repo-a", query="BaseHandler")
 
 
 def test_symbol_search_bootstraps_from_cloud_snapshot(
@@ -1505,6 +1550,108 @@ def test_symbol_search_uses_exact_index_before_semantic_engine(
     assert first["symbol_name"] == "BaseHandler"
 
 
+def test_symbol_search_uses_local_exact_index_without_workspace_header(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = CloudSnapshotStore(root=tmp_path / "state" / "cloud-sync")
+    exact = SnapshotExactIndex(store=store)
+    content = "def _detect_mode(query: str) -> str:\n    return 'symbol'\n"
+    exact.update_batch(
+        workspace_id="local",
+        changed_files=[
+            {
+                "path": "omnicode_adapters/mcp_server/high_level_tools.py",
+                "hash": _sha(content),
+                "size": len(content),
+                "content": content,
+            }
+        ],
+        deleted_paths=[],
+        revision=5,
+    )
+
+    class _Engine:
+        async def search(self, _request):  # pragma: no cover - should not run
+            raise AssertionError("semantic engine should not be called")
+
+    monkeypatch.delenv("OMNICODE_WORKSPACE_ID", raising=False)
+    monkeypatch.setattr(
+        search_router,
+        "get_settings",
+        lambda: SimpleNamespace(WORKING_DIR=str(workspace)),
+    )
+    monkeypatch.setattr(search_router, "CloudSnapshotStore", lambda: store)
+    monkeypatch.setattr(search_router, "_exact_index", lambda: exact)
+    monkeypatch.setattr(search_router, "get_search_engine", lambda: _Engine())
+
+    app = FastAPI()
+    app.include_router(search_router.router)
+    client = TestClient(app)
+
+    response = client.post(
+        "/search/symbols",
+        params={"query": "_detect_mode", "fuzzy": False, "max_results": 5},
+    )
+
+    result = response.json()["result"]
+    first = result["results"][0]
+    assert response.status_code == 200
+    assert result["exact_index_used"] is True
+    assert result["local_exact_index_used"] is True
+    assert result["freshness"] == "local_exact"
+    assert result["provider"] == "local_exact_index"
+    assert result["query_plan"]["resolved_mode"] == "symbol_exact"
+    assert first["file_path"] == "omnicode_adapters/mcp_server/high_level_tools.py"
+    assert first["source"] == "local_exact_index"
+    assert first["symbol_name"] == "_detect_mode"
+
+
+def test_symbol_search_reports_index_not_ready_without_local_exact_index(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = CloudSnapshotStore(root=tmp_path / "state" / "cloud-sync")
+    exact = SnapshotExactIndex(store=store)
+
+    class _Engine:
+        async def search(self, _request):
+            return []
+
+    monkeypatch.delenv("OMNICODE_WORKSPACE_ID", raising=False)
+    monkeypatch.setattr(
+        search_router,
+        "get_settings",
+        lambda: SimpleNamespace(WORKING_DIR=str(workspace)),
+    )
+    monkeypatch.setattr(search_router, "CloudSnapshotStore", lambda: store)
+    monkeypatch.setattr(search_router, "_exact_index", lambda: exact)
+    monkeypatch.setattr(search_router, "get_search_engine", lambda: _Engine())
+
+    app = FastAPI()
+    app.include_router(search_router.router)
+    client = TestClient(app)
+
+    response = client.post(
+        "/search/symbols",
+        params={"query": "MissingSymbol", "fuzzy": False, "max_results": 5},
+    )
+
+    body = response.json()
+    payload = body["result"]
+    assert response.status_code == 409
+    assert body["success"] is False
+    assert payload["ok"] is False
+    assert payload["error_code"] == "INDEX_NOT_READY"
+    assert payload["empty_reason"] == "index_not_ready"
+    assert payload["local_index"]["ready"] is False
+    assert "omni_index" in " ".join(payload["next_actions"])
+
+
 def test_text_search_uses_exact_index_rows(
     tmp_path: Path,
     monkeypatch,
@@ -1568,7 +1715,7 @@ def test_text_search_uses_exact_index_rows(
 
     response = client.post(
         "/search/text",
-        params={"query": "middleware-chain", "max_results": 1},
+        params={"query": "middleware-chain", "max_results": 5},
         headers={
             "X-Omnicode-Workspace": "repo-a",
             "X-Omnicode-Min-Revision": "11",
@@ -1580,6 +1727,10 @@ def test_text_search_uses_exact_index_rows(
     assert response.status_code == 200
     assert result["exact_index_used"] is True
     assert result["exact_line_fts_available"] is True
+    assert result["exact_fast_path"] is True
+    assert result["provider_chain"] == ["exact_line_fts"]
+    assert result["fallback_used"] is False
+    assert result["total_results"] == 1
     assert result["freshness"] == "exact_fresh"
     assert first["file_path"] == "django/core/handlers/base.py"
     assert first["source"] == "exact_index"
@@ -1589,7 +1740,7 @@ def test_text_search_skips_exact_line_scan_without_fts(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    monkeypatch.delenv("OMNICODE_EXACT_LINE_FTS", raising=False)
+    monkeypatch.setenv("OMNICODE_EXACT_LINE_FTS", "off")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     store = CloudSnapshotStore(root=tmp_path / "state" / "cloud-sync")
@@ -1664,9 +1815,259 @@ def test_text_search_skips_exact_line_scan_without_fts(
     assert response.status_code == 200
     assert result["exact_index_used"] is False
     assert result["exact_line_fts_available"] is False
+    assert result["line_fts_reason"] == "disabled_by_env"
+    assert result["fallback_used"] is True
+    assert "cloud_snapshot_grep" in result["provider_chain"]
     assert first["file_path"] == "django/core/handlers/base.py"
     assert first["source"] in {"snapshot_mirror", "snapshot_store"}
     assert "symbol_prioritized" in first["why_matched"]
+
+
+def test_semantic_search_response_includes_query_plan(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    class _Engine:
+        async def search(self, _request):
+            return []
+
+    monkeypatch.setattr(
+        search_router,
+        "get_settings",
+        lambda: SimpleNamespace(WORKING_DIR=str(workspace)),
+    )
+    monkeypatch.setattr(search_router, "get_search_engine", lambda: _Engine())
+
+    app = FastAPI()
+    app.include_router(search_router.router)
+    client = TestClient(app)
+
+    response = client.post(
+        "/search",
+        json={
+            "query": "request middleware handling",
+            "search_type": "semantic",
+            "max_results": 5,
+        },
+    )
+
+    result = response.json()["result"]
+    assert response.status_code == 200
+    assert result["query_plan"]["intent"] == "semantic"
+    assert result["query_plan"]["resolved_mode"] == "semantic"
+    assert result["provider_chain"] == ["semantic_vector"]
+    assert result["capabilities_used"] == ["search.semantic"]
+    assert result["empty_reason"] == "true_empty"
+
+
+def test_semantic_search_not_ready_returns_structured_error(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    class _Engine:
+        async def search(self, _request):
+            raise RuntimeError(
+                "SEMANTIC_INDEX_NOT_READY: embedding_dimension_mismatch"
+            )
+
+    monkeypatch.setattr(
+        search_router,
+        "get_settings",
+        lambda: SimpleNamespace(WORKING_DIR=str(workspace)),
+    )
+    monkeypatch.setattr(search_router, "get_search_engine", lambda: _Engine())
+
+    app = FastAPI()
+    app.include_router(search_router.router)
+    client = TestClient(app)
+
+    response = client.post(
+        "/search",
+        json={
+            "query": "request middleware handling",
+            "search_type": "semantic",
+            "max_results": 5,
+        },
+    )
+
+    body = response.json()
+    result = body["result"]
+    assert response.status_code == 409
+    assert body["success"] is False
+    assert result["ok"] is False
+    assert result["error_code"] == "SEMANTIC_INDEX_NOT_READY"
+    assert result["empty_reason"] == "provider_unavailable"
+    assert result["query_plan"]["intent"] == "semantic"
+    assert result["capabilities_missing"] == ["search.semantic"]
+
+
+def test_search_stats_reports_semantic_metadata_mismatch_from_engine(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import asyncio
+    import numpy as np
+
+    from omnicode.search.engine import SemanticSearchEngine
+
+    class _FakeEmbeddingBackend:
+        name = "fake_embedding"
+
+        def __init__(self, dimension: int) -> None:
+            self.dimension = dimension
+
+        def encode(self, text):
+            if isinstance(text, list):
+                return np.ones((len(text), self.dimension), dtype=np.float32)
+            return np.ones((self.dimension,), dtype=np.float32)
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv(
+        "OMNICODE_EMBEDDING_MODEL",
+        "sentence-transformers/all-MiniLM-L6-v2",
+    )
+    engine = SemanticSearchEngine(str(workspace))
+    engine.embedding_model = _FakeEmbeddingBackend(384)
+    asyncio.get_event_loop().run_until_complete(
+        engine.upsert_content(
+            "django/core/handlers/base.py",
+            "class BaseHandler:\n    pass\n",
+            workspace_id="repo-a",
+        )
+    )
+
+    monkeypatch.setenv(
+        "OMNICODE_EMBEDDING_MODEL",
+        "sentence-transformers/all-mpnet-base-v2",
+    )
+    engine.embedding_model = _FakeEmbeddingBackend(768)
+    monkeypatch.setattr(search_router, "get_search_engine", lambda: engine)
+
+    app = FastAPI()
+    app.include_router(search_router.router)
+    client = TestClient(app)
+
+    response = client.get("/search/stats")
+
+    result = response.json()["result"]
+    semantic = result["semantic_index"]
+    assert response.status_code == 200
+    assert semantic["semantic_index_ready"] is False
+    assert semantic["semantic_index_invalid"] is True
+    assert "embedding_dimension_mismatch" in semantic["semantic_index_stale_reason"]
+    assert semantic["semantic_index_model"] == "sentence-transformers/all-MiniLM-L6-v2"
+    assert semantic["semantic_index_dimension"] == 384
+    assert semantic["vector_count"] > 0
+
+
+def test_exact_symbol_search_still_works_when_semantic_metadata_is_invalid(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import asyncio
+    import numpy as np
+
+    from omnicode.search.engine import SemanticSearchEngine
+
+    class _FakeEmbeddingBackend:
+        name = "fake_embedding"
+
+        def __init__(self, dimension: int) -> None:
+            self.dimension = dimension
+
+        def encode(self, text):
+            if isinstance(text, list):
+                return np.ones((len(text), self.dimension), dtype=np.float32)
+            return np.ones((self.dimension,), dtype=np.float32)
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = CloudSnapshotStore(root=tmp_path / "state" / "cloud-sync")
+    content = "class BaseHandler:\n    pass\n"
+    store.upsert(
+        workspace_id="repo-a",
+        path="django/core/handlers/base.py",
+        content=content,
+        hash_value=_sha(content),
+        size=len(content),
+        mtime_ms=123,
+        encoding="utf-8",
+        revision=11,
+    )
+    monkeypatch.setenv("OMNICODE_STATE_DIR", str(tmp_path / "state"))
+    exact = SnapshotExactIndex(store=store)
+    exact.update_batch(
+        workspace_id="repo-a",
+        changed_files=[
+            {
+                "path": "django/core/handlers/base.py",
+                "content": content,
+                "hash": _sha(content),
+                "size": len(content),
+            }
+        ],
+        deleted_paths=[],
+        revision=11,
+    )
+
+    monkeypatch.setenv(
+        "OMNICODE_EMBEDDING_MODEL",
+        "sentence-transformers/all-MiniLM-L6-v2",
+    )
+    engine = SemanticSearchEngine(str(workspace))
+    engine.embedding_model = _FakeEmbeddingBackend(384)
+    asyncio.get_event_loop().run_until_complete(
+        engine.upsert_content(
+            "django/core/handlers/base.py",
+            content,
+            workspace_id="repo-a",
+        )
+    )
+    monkeypatch.setenv(
+        "OMNICODE_EMBEDDING_MODEL",
+        "sentence-transformers/all-mpnet-base-v2",
+    )
+    engine.embedding_model = _FakeEmbeddingBackend(768)
+
+    monkeypatch.setattr(
+        search_router,
+        "get_settings",
+        lambda: SimpleNamespace(WORKING_DIR=str(workspace)),
+    )
+    registry = WorkspaceRegistry(store_path=tmp_path / "workspaces.json")
+    registry.add(
+        name="repo",
+        path=str(workspace),
+        set_active=True,
+        workspace_id="repo-a",
+    )
+    monkeypatch.setattr(search_router, "get_workspace_registry", lambda: registry)
+    monkeypatch.setattr(search_router, "get_search_engine", lambda: engine)
+    monkeypatch.setattr(search_router, "CloudSnapshotStore", lambda: store)
+    monkeypatch.setattr(search_router, "SnapshotExactIndex", lambda *_, **__: exact)
+
+    app = FastAPI()
+    app.include_router(search_router.router)
+    client = TestClient(app)
+
+    response = client.post(
+        "/search/symbols",
+        params={"query": "BaseHandler", "fuzzy": "false", "max_results": 3},
+        headers={"X-Omnicode-Workspace": "repo-a"},
+    )
+
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    first = result["results"][0]
+    assert result["snapshot_fast_path"] is True
+    assert first["file_path"] == "django/core/handlers/base.py"
+    assert first["symbol_name"] == "BaseHandler"
+    assert first["source"] in {"exact_index", "snapshot_store", "snapshot_exact_index"}
 
 
 def test_intelligence_context_promotes_same_file_after_snapshot_anchor(

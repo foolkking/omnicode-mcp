@@ -200,6 +200,94 @@ def test_omni_read_symbol_hybrid_uses_local_ast(
     assert "class Other" not in payload["content"]
 
 
+@pytest.mark.parametrize(
+    "mode,kwargs",
+    [
+        ("full", {}),
+        ("range", {"start_line": 1, "end_line": 2}),
+        ("outline", {}),
+    ],
+)
+def test_omni_read_hybrid_cloud_down_stays_local(
+    tmp_path,
+    monkeypatch,
+    mode: str,
+    kwargs: Dict[str, Any],
+) -> None:
+    workspace = tmp_path / "repo"
+    target = workspace / "tests" / "tmp_cloudsim_cloud_down.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "def local_only():\n"
+        "    return 'cloud-down-read'\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("OMNICODE_EXECUTOR_MODE", "hybrid")
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ID", "repo-a")
+    monkeypatch.setenv("OMNICODE_REMOTE", "http://127.0.0.1:6799")
+
+    tools = _build_tools({
+        "/sync/status": {
+            "error": "Cannot connect to FastAPI server - server may be down",
+            "error_type": "ConnectionError",
+        },
+        "/read": {
+            "success": False,
+            "error": "cloud read should not be called",
+        },
+    })
+    raw = _run(tools["omni_read"](
+        file="tests/tmp_cloudsim_cloud_down.py",
+        mode=mode,
+        format="json",
+        **kwargs,
+    ))
+    payload = json.loads(raw)
+
+    assert payload["ok"] is True
+    assert payload["source"] in {"local_file", "local_ast"}
+    assert payload["local_first"] is True
+    assert payload["local_authority"] is True
+    assert "local_only" in json.dumps(payload, ensure_ascii=False)
+    assert "/read" not in tools["__captured__"]
+
+
+def test_omni_read_hybrid_missing_local_file_does_not_fallback_to_cloud(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "repo"
+    (workspace / "tests").mkdir(parents=True)
+
+    monkeypatch.setenv("OMNICODE_EXECUTOR_MODE", "hybrid")
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ID", "repo-a")
+    monkeypatch.setenv("OMNICODE_REMOTE", "http://127.0.0.1:6799")
+
+    tools = _build_tools({
+        "/sync/status": {
+            "error": "Cannot connect to FastAPI server - server may be down",
+            "error_type": "ConnectionError",
+        },
+        "/read": {
+            "success": False,
+            "error": "cloud read should not be called",
+        },
+    })
+    raw = _run(tools["omni_read"](
+        file="tests/tmp_cloudsim_missing_after_rollback.py",
+        mode="full",
+        format="json",
+    ))
+    payload = json.loads(raw)
+
+    assert payload["ok"] is False
+    assert "File not found" in payload["error"]
+    assert "/read" not in tools["__captured__"]
+
+
 def test_omni_context_hybrid_diagnostics_uses_local_workspace(
     tmp_path, monkeypatch,
 ) -> None:

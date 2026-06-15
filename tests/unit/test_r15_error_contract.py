@@ -195,11 +195,14 @@ def test_omni_context_missing_file_drops_phantom_memories() -> None:
     assert "skipped" in payload["memory_status"].get("reason", "").lower()
 
 
-def test_omni_context_with_real_file_still_returns_ok_true(tmp_path) -> None:
+def test_omni_context_with_real_file_still_returns_ok_true(
+    tmp_path, monkeypatch
+) -> None:
     """A real file must still produce ok=true with a populated
     response. Regression guard for the new file-existence check."""
     real_file = tmp_path / "real.py"
     real_file.write_text("def f():\n    return 1\n")
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(tmp_path))
 
     routes = {
         "/read": {
@@ -219,7 +222,7 @@ def test_omni_context_with_real_file_still_returns_ok_true(tmp_path) -> None:
     }
     tools = _build_tools(routes)
     raw = _run(tools["omni_context"](
-        file=str(real_file),
+        file="real.py",
         format="json",
     ))
     payload = json.loads(raw)

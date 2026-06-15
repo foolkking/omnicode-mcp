@@ -313,7 +313,23 @@ def test_upsert_materializes_readonly_mirror_and_delete_removes_it(
     assert mirror.read_text(encoding="utf-8") == content
     assert mirror.stat().st_mode & stat.S_IWRITE == 0
 
-    store.delete(workspace_id="repo-a", path="src/app.py", revision=3)
+    updated = "x = 2\n"
+    updated_record = store.upsert(
+        workspace_id="repo-a",
+        path="src/app.py",
+        content=updated,
+        hash_value=_sha(updated),
+        size=len(updated),
+        mtime_ms=124,
+        encoding="utf-8",
+        revision=3,
+    )
+
+    assert updated_record.mirror_path == "mirror/src/app.py"
+    assert mirror.read_text(encoding="utf-8") == updated
+    assert mirror.stat().st_mode & stat.S_IWRITE == 0
+
+    store.delete(workspace_id="repo-a", path="src/app.py", revision=4)
 
     assert not mirror.exists()
     assert store.status("repo-a")["file_count"] == 0

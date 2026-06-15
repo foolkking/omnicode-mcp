@@ -5,13 +5,16 @@ Provides semantic search, text search, symbol search, and index management
 
 import asyncio
 import fnmatch
+import os
 import re
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from api.v1.routers.freshness import cloud_freshness_error, cloud_freshness_state
@@ -19,6 +22,7 @@ from core import get_ast_parser, get_search_engine
 from core.config import get_settings
 from omnicode.ast_engine.graph import CallGraphBuilder
 from omnicode.search.models import SearchRequest
+from omnicode_core.search.planner import build_search_plan
 from omnicode_core.workspace.registry import get_workspace_registry
 from omnicode_core.workspace.request import (
     WorkspaceResolutionError,
@@ -43,6 +47,34 @@ _SNAPSHOT_INDEX_JOBS: dict[str, dict[str, Any]] = {}
 
 def _exact_index() -> SnapshotExactIndex:
     return SnapshotExactIndex(store=CloudSnapshotStore())
+
+
+def _local_exact_workspace_id() -> str:
+    return os.environ.get("OMNICODE_WORKSPACE_ID", "local")
+
+
+def _structured_search_error(
+    *,
+    message: str,
+    status_code: int,
+    error_code: str,
+    **payload: Any,
+) -> JSONResponse:
+    result = {
+        "ok": False,
+        "error": message,
+        "error_code": error_code,
+        **payload,
+    }
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "success": False,
+            "result": result,
+            "error": message,
+            "timestamp": datetime.now().isoformat(),
+        },
+    )
 
 
 def _resolve_search_workspace(workspace_id: Optional[str]) -> Optional[str]:
@@ -100,6 +132,22 @@ def _query_identifier_terms(query: str) -> list[str]:
         seen.add(lowered)
         terms.append(raw)
     return terms[:5]
+
+
+def _format_exact_symbol_row(row: Any, *, source: str = "exact_index") -> dict[str, Any]:
+    return {
+        "file_path": row.path,
+        "symbol_name": row.name,
+        "symbol_type": row.kind,
+        "line_start": row.line_start,
+        "line_end": row.line_end,
+        "signature": row.signature,
+        "relevance_score": row.score,
+        "why_matched": [row.why, source],
+        "source": source,
+        "hash": row.hash,
+        "revision": row.revision,
+    }
 
 
 def _grep_mirror_paths(
@@ -760,6 +808,16 @@ def _run_snapshot_index_blocking(
         search_engine = get_search_engine()
         if not search_engine:
             raise RuntimeError("Semantic search not initialized")
+        prepare_semantic_index = getattr(
+            search_engine,
+            "prepare_semantic_index",
+            None,
+        )
+        if callable(prepare_semantic_index):
+            prepare_semantic_index(
+                force=bool(force),
+                workspace_id=workspace_id,
+            )
 
         def emit_progress(**fields: Any) -> None:
             if progress is not None:
@@ -1114,6 +1172,13 @@ async def search_codebase(
         if stale is not None:
             return stale
 
+        search_plan = build_search_plan(
+            query=request.query,
+            requested_mode=request.search_type,
+            resolved_mode=request.search_type,
+            use_regex=bool(getattr(request, "use_regex", False)),
+            freshness_required=bool(x_omnicode_min_revision),
+        )
         search_engine = get_search_engine()
         if not search_engine:
             return create_error_response("Semantic search not initialized", 500)
@@ -1144,7 +1209,46 @@ async def search_codebase(
                     existing_keys=boost_keys,
                 )
             )
-        indexed_results = await search_engine.search(request)
+        provider_chain: list[str] = []
+        if snapshot_boost:
+            provider_chain.append("cloud_snapshot_grep")
+        provider_chain.append("semantic_vector")
+        try:
+            indexed_results = await search_engine.search(request)
+        except RuntimeError as exc:
+            message = str(exc)
+            if "SEMANTIC_INDEX_NOT_READY" in message:
+                return _structured_search_error(
+                    message=message,
+                    status_code=409,
+                    error_code="SEMANTIC_INDEX_NOT_READY",
+                    query=request.query,
+                    search_type=request.search_type,
+                    results=snapshot_boost[: request.max_results],
+                    total_results=len(snapshot_boost[: request.max_results]),
+                    snapshot_store_used=bool(workspace_id),
+                    provider="cloud_snapshot_grep" if snapshot_boost else "semantic_vector",
+                    provider_chain=provider_chain,
+                    query_plan=search_plan.to_dict(providers=provider_chain),
+                    capabilities_used=(
+                        ["search.text_exact"] if snapshot_boost else []
+                    ),
+                    capabilities_missing=["search.semantic"],
+                    fallback_used=bool(snapshot_boost),
+                    fallback_reason=(
+                        "semantic_index_not_ready_exact_boost_available"
+                        if snapshot_boost
+                        else "semantic_index_not_ready"
+                    ),
+                    empty_reason=(
+                        None if snapshot_boost else "provider_unavailable"
+                    ),
+                    next_actions=[
+                        "omni_index(action='bootstrap', scope='semantic', background=True, format='json') to rebuild semantic vectors.",
+                        "Retry with mode='symbol' or mode='text' for deterministic exact search.",
+                    ],
+                )
+            raise
 
         # Format results for API response.
         formatted_results = list(snapshot_boost)
@@ -1188,6 +1292,17 @@ async def search_codebase(
                 "results": formatted_results[: request.max_results],
                 "total_results": len(formatted_results),
                 "snapshot_store_used": bool(workspace_id),
+                "provider": "semantic_vector",
+                "provider_chain": provider_chain,
+                "query_plan": search_plan.to_dict(providers=provider_chain),
+                "capabilities_used": ["search.semantic"],
+                "capabilities_missing": [],
+                "fallback_used": bool(snapshot_boost),
+                "fallback_reason": (
+                    "snapshot_exact_or_lexical_boost" if snapshot_boost else None
+                ),
+                "warnings": [],
+                "empty_reason": "true_empty" if not formatted_results else None,
                 "snapshot_exact_boost": any(
                     "semantic:exact_boost" in (row.get("why_matched") or [])
                     for row in snapshot_boost
@@ -1213,11 +1328,13 @@ async def index_codebase(
         description="For snapshot workspaces, start indexing in the background.",
     ),
     scope: str = Query(
-        "semantic",
+        "auto",
         description=(
-            "Snapshot workspace semantic bootstrap scope: 'semantic' indexes all "
-            "snapshot text into the semantic store; 'exact_policy' applies the "
-            "configured semantic extension/size policy."
+            "Index scope: 'auto' builds deterministic local files/lines/symbols "
+            "for local requests and preserves snapshot semantic bootstrap for "
+            "workspace requests; 'workspace' forces local deterministic index, "
+            "'semantic' indexes snapshot text into the semantic store, and "
+            "'exact_policy' applies the configured semantic extension/size policy."
         ),
     ),
     workspace_id: Optional[str] = Query(
@@ -1235,15 +1352,41 @@ async def index_codebase(
     Pass ?force=true to clear the file tracker and rebuild everything.
     """
     try:
-        scope_value = (scope or "semantic").strip().lower()
-        if scope_value not in {"semantic", "exact_policy"}:
+        scope_value = (scope or "auto").strip().lower()
+        if scope_value not in {"auto", "semantic", "exact_policy", "workspace"}:
             return create_error_response(
-                "scope must be one of: semantic, exact_policy",
+                "scope must be one of: auto, semantic, exact_policy, workspace",
                 400,
             )
-        effective_workspace_id = _resolve_search_workspace(
-            x_omnicode_workspace or workspace_id
+        requested_workspace_id = x_omnicode_workspace or workspace_id
+        if scope_value == "auto":
+            scope_value = "semantic" if requested_workspace_id else "workspace"
+        effective_workspace_id = (
+            None
+            if scope_value == "workspace"
+            else _resolve_search_workspace(requested_workspace_id)
         )
+        if scope_value == "workspace":
+            settings = get_settings()
+            workspace_key = (
+                requested_workspace_id
+                or _local_exact_workspace_id()
+            )
+            payload = await asyncio.to_thread(
+                _exact_index().index_workspace_root,
+                workspace_id=workspace_key,
+                root=settings.WORKING_DIR,
+                revision=int(time.time()),
+                force=force,
+            )
+            return create_success_response({
+                "message": "Workspace exact index completed",
+                "scope": "workspace",
+                "snapshot_store_used": False,
+                "exact_index_used": True,
+                **payload,
+            })
+
         search_engine = get_search_engine()
         if not search_engine:
             return create_error_response("Semantic search not initialized", 500)
@@ -1278,6 +1421,13 @@ async def index_codebase(
             from omnicode_core.index.file_tracker import FileTracker
             tracker_db = os.path.join(search_engine.db_dir, "file_tracker.db")
             FileTracker(tracker_db).clear()
+        prepare_semantic_index = getattr(
+            search_engine,
+            "prepare_semantic_index",
+            None,
+        )
+        if callable(prepare_semantic_index):
+            prepare_semantic_index(force=bool(force))
 
         await search_engine.index_codebase()
         stats = search_engine.get_stats()
@@ -1408,7 +1558,7 @@ async def text_search(
             min_revision=x_omnicode_min_revision,
         )
 
-        from omnicode_core.search.text_grep import grep_workspace
+        from omnicode_core.search.text_grep import grep_workspace_with_provider
 
         settings = get_settings()
         patterns = (
@@ -1416,11 +1566,24 @@ async def text_search(
             if file_pattern
             else None
         )
+        search_plan = build_search_plan(
+            query=query,
+            requested_mode="text",
+            resolved_mode="text",
+            use_regex=use_regex,
+            freshness_required=bool(x_omnicode_min_revision),
+        )
 
         results = []
         existing_keys: set[tuple[str, int]] = set()
         exact_index_used = False
         exact_line_fts_available = False
+        exact_line_fts_reason: Optional[str] = None
+        provider_chain: list[str] = []
+        warnings: list[str] = []
+        provider: Optional[str] = None
+        fallback_used = False
+        fallback_reason: Optional[str] = None
         exact_index_authoritative = bool(
             effective_workspace_id
             and x_omnicode_min_revision
@@ -1436,9 +1599,12 @@ async def text_search(
                 exact_line_fts_available = bool(
                     exact_status.get("line_fts_available", False)
                 )
-            except Exception:
+                exact_line_fts_reason = exact_status.get("line_fts_reason")
+            except Exception as exc:
                 exact_line_fts_available = False
+                exact_line_fts_reason = f"status_failed: {exc}"
             if exact_line_fts_available:
+                provider_chain.append("exact_line_fts")
                 exact_rows = await asyncio.to_thread(
                     _exact_index().search_text,
                     workspace_id=effective_workspace_id,
@@ -1450,6 +1616,7 @@ async def text_search(
                     context_lines=context_lines,
                 )
                 exact_index_used = True
+                provider = "exact_line_fts" if exact_rows else provider
                 for row in exact_rows:
                     existing_keys.add((row.path, row.line_no))
                     results.append(
@@ -1468,8 +1635,14 @@ async def text_search(
                             "revision": row.revision,
                         }
                     )
+            else:
+                provider_chain.append("exact_line_fts")
+                warnings.append(
+                    "line_fts unavailable; using grep/snapshot fallback"
+                    + (f" ({exact_line_fts_reason})" if exact_line_fts_reason else "")
+                )
 
-        if (exact_index_authoritative and exact_index_used) or len(results) >= max_results:
+        if results and exact_index_used:
             return create_success_response(
                 {
                     "query": query,
@@ -1482,6 +1655,22 @@ async def text_search(
                     "snapshot_store_used": bool(effective_workspace_id),
                     "exact_index_used": exact_index_used,
                     "exact_line_fts_available": exact_line_fts_available,
+                    "line_fts_available": exact_line_fts_available,
+                    "line_fts_reason": exact_line_fts_reason,
+                    "provider": provider or "exact_line_fts",
+                    "provider_chain": provider_chain,
+                    "query_plan": search_plan.to_dict(providers=provider_chain),
+                    "capabilities_used": list(provider_chain),
+                    "capabilities_missing": (
+                        []
+                        if exact_line_fts_available
+                        else ["search.text_exact.line_fts"]
+                    ),
+                    "fallback_used": fallback_used,
+                    "fallback_reason": fallback_reason,
+                    "warnings": warnings,
+                    "empty_reason": None,
+                    "exact_fast_path": True,
                     "freshness": (freshness or {}).get("freshness", "unknown")
                     if x_omnicode_min_revision
                     else "unknown",
@@ -1493,7 +1682,7 @@ async def text_search(
                 }
             )
 
-        hits = grep_workspace(
+        grep_result = grep_workspace_with_provider(
             workspace_root=settings.WORKING_DIR,
             query=query,
             file_patterns=patterns,
@@ -1503,6 +1692,18 @@ async def text_search(
             case_sensitive=case_sensitive,
             merge_adjacent=merge_adjacent,
         )
+        provider_chain.extend(grep_result.provider_chain)
+        warnings.extend(grep_result.warnings)
+        hits = grep_result.hits
+        if grep_result.provider_chain and not fallback_used:
+            fallback_used = True
+            fallback_reason = (
+                grep_result.fallback_reason
+                or "exact_line_fts_unavailable_or_empty"
+            )
+        if hits:
+            if not provider:
+                provider = grep_result.provider
 
         for h in hits:
             key = (h.file_path, h.line_number)
@@ -1522,6 +1723,7 @@ async def text_search(
                 # MCP renderer doesn't display a bogus 0.00.
                 "relevance_score": 1.0,
                 "why_matched": ["text:line_match"],
+                "source": grep_result.provider,
             }
             merged_extra = list(getattr(h, "_merged_lines", []) or [])
             if merged_extra:
@@ -1530,6 +1732,7 @@ async def text_search(
             results.append(row)
 
         if len(results) < max_results:
+            provider_chain.append("cloud_snapshot_grep")
             snapshot_rows = await asyncio.to_thread(
                 _grep_snapshot_store,
                 workspace_id=effective_workspace_id,
@@ -1541,6 +1744,12 @@ async def text_search(
                 context_lines=context_lines,
                 existing_keys=existing_keys,
             )
+            if snapshot_rows:
+                if not provider:
+                    provider = "cloud_snapshot_grep"
+                if not exact_index_used or len(results) == 0:
+                    fallback_used = True
+                    fallback_reason = "exact_line_fts_unavailable_or_empty"
             results.extend(snapshot_rows)
 
         return create_success_response(
@@ -1555,6 +1764,29 @@ async def text_search(
                 "snapshot_store_used": bool(effective_workspace_id),
                 "exact_index_used": exact_index_used,
                 "exact_line_fts_available": exact_line_fts_available,
+                "line_fts_available": exact_line_fts_available,
+                "line_fts_reason": exact_line_fts_reason,
+                "provider": provider
+                or (
+                    "exact_line_fts"
+                    if exact_index_used and exact_index_authoritative
+                    else grep_result.provider
+                ),
+                "provider_chain": provider_chain,
+                "query_plan": search_plan.to_dict(providers=provider_chain),
+                "capabilities_used": list(provider_chain),
+                "capabilities_missing": (
+                    []
+                    if exact_line_fts_available
+                    else ["search.text_exact.line_fts"]
+                ),
+                "fallback_used": fallback_used,
+                "fallback_reason": fallback_reason,
+                "ripgrep_available": grep_result.rg_available,
+                "grep_timeout_seconds": grep_result.timeout_seconds,
+                "grep_max_file_bytes": grep_result.max_file_bytes,
+                "warnings": warnings,
+                "empty_reason": "true_empty" if not results else None,
                 "freshness": (freshness or {}).get("freshness", "unknown")
                 if x_omnicode_min_revision
                 else "unknown",
@@ -1605,12 +1837,81 @@ async def symbol_search(
         )
 
         search_type = "fuzzy_symbol" if fuzzy else "symbol_exact"
+        search_plan = build_search_plan(
+            query=query,
+            requested_mode="symbol",
+            resolved_mode=search_type,
+            freshness_required=bool(x_omnicode_min_revision),
+        )
 
         # Snapshot-store rows come first so a freshly-synced large repo can
         # answer exact symbol lookups before the vector/symbol DB is fully
         # bootstrapped.
         formatted_results = []
         existing_keys: set[tuple[str, str, int]] = set()
+        local_exact_status: dict[str, Any] = {}
+        local_exact_used = False
+        if not workspace_id:
+            local_workspace_id = _local_exact_workspace_id()
+            local_exact_status = await asyncio.to_thread(
+                _exact_index().status,
+                workspace_id=local_workspace_id,
+            )
+            if int(local_exact_status.get("symbols") or 0) > 0:
+                local_rows = await asyncio.to_thread(
+                    _exact_index().search_symbols,
+                    workspace_id=local_workspace_id,
+                    query=query,
+                    symbol_type=symbol_type,
+                    file_pattern=file_pattern,
+                    fuzzy=fuzzy,
+                    min_score=min_score,
+                    max_results=max_results,
+                )
+                for row in local_rows:
+                    key = (row.path, row.name, row.line_start)
+                    existing_keys.add(key)
+                    formatted_results.append(
+                        _format_exact_symbol_row(row, source="local_exact_index")
+                    )
+                local_exact_used = bool(local_rows)
+                local_has_exact = any(
+                    "symbol:exact" in (row.get("why_matched") or [])
+                    for row in formatted_results
+                )
+                if local_has_exact or len(formatted_results) >= max_results:
+                    return create_success_response(
+                        {
+                            "query": query,
+                            "search_type": search_type,
+                            "symbol_type": symbol_type,
+                            "fuzzy_enabled": fuzzy,
+                            "results": formatted_results[:max_results],
+                            "total_results": min(len(formatted_results), max_results),
+                            "snapshot_store_used": False,
+                            "exact_index_used": True,
+                            "local_exact_index_used": True,
+                            "snapshot_fast_path": False,
+                            "freshness": "local_exact",
+                            "semantic_stale": False,
+                            "exact_stale": False,
+                            "accepted_revision": None,
+                            "indexed_revision": None,
+                            "exact_indexed_revision": local_exact_status.get(
+                                "exact_indexed_revision"
+                            ),
+                            "provider": "local_exact_index",
+                            "provider_chain": ["local_exact_index"],
+                            "query_plan": search_plan.to_dict(
+                                providers=["local_exact_index"]
+                            ),
+                            "capabilities_used": ["search.symbol_exact"],
+                            "capabilities_missing": [],
+                            "fallback_used": False,
+                            "warnings": [],
+                            "empty_reason": None,
+                        }
+                    )
         exact_index_authoritative = bool(
             workspace_id
             and x_omnicode_min_revision
@@ -1631,21 +1932,7 @@ async def symbol_search(
             for row in exact_rows:
                 key = (row.path, row.name, row.line_start)
                 existing_keys.add(key)
-                formatted_results.append(
-                    {
-                        "file_path": row.path,
-                        "symbol_name": row.name,
-                        "symbol_type": row.kind,
-                        "line_start": row.line_start,
-                        "line_end": row.line_end,
-                        "signature": row.signature,
-                        "relevance_score": row.score,
-                        "why_matched": [row.why, "exact_index"],
-                        "source": "exact_index",
-                        "hash": row.hash,
-                        "revision": row.revision,
-                    }
-                )
+                formatted_results.append(_format_exact_symbol_row(row))
             exact_has_exact = any(
                 "symbol:exact" in (row.get("why_matched") or [])
                 for row in formatted_results
@@ -1678,6 +1965,16 @@ async def symbol_search(
                         "exact_indexed_revision": (
                             freshness or {}
                         ).get("exact_indexed_revision"),
+                        "provider": "exact_index",
+                        "provider_chain": ["cloud_exact_symbols"],
+                        "query_plan": search_plan.to_dict(
+                            providers=["cloud_exact_symbols"]
+                        ),
+                        "capabilities_used": ["search.symbol_exact"],
+                        "capabilities_missing": [],
+                        "fallback_used": False,
+                        "warnings": [],
+                        "empty_reason": None,
                     }
                 )
 
@@ -1725,6 +2022,17 @@ async def symbol_search(
                     "exact_indexed_revision": (
                         freshness or {}
                     ).get("exact_indexed_revision"),
+                    "provider": "snapshot_store",
+                    "provider_chain": ["cloud_snapshot_symbols"],
+                    "query_plan": search_plan.to_dict(
+                        providers=["cloud_snapshot_symbols"]
+                    ),
+                    "capabilities_used": ["search.symbol_exact"],
+                    "capabilities_missing": [],
+                    "fallback_used": True,
+                    "fallback_reason": "cloud_exact_symbols_empty",
+                    "warnings": [],
+                    "empty_reason": None,
                 }
             )
 
@@ -1740,12 +2048,13 @@ async def symbol_search(
                         "results": formatted_results[:max_results],
                         "total_results": min(len(formatted_results), max_results),
                         "snapshot_store_used": bool(workspace_id),
-                        "exact_index_used": bool(workspace_id),
+                        "exact_index_used": bool(workspace_id or local_exact_used),
+                        "local_exact_index_used": local_exact_used,
                         "snapshot_fast_path": True,
                         "search_engine_unavailable": True,
                         "freshness": (freshness or {}).get("freshness", "unknown")
                         if x_omnicode_min_revision
-                        else "unknown",
+                        else ("local_exact" if local_exact_used else "unknown"),
                         "semantic_stale": bool(
                             (freshness or {}).get("semantic_stale", False)
                         ),
@@ -1755,6 +2064,17 @@ async def symbol_search(
                         "exact_indexed_revision": (
                             freshness or {}
                         ).get("exact_indexed_revision"),
+                        "provider": "snapshot_store",
+                        "provider_chain": ["cloud_snapshot_symbols"],
+                        "query_plan": search_plan.to_dict(
+                            providers=["cloud_snapshot_symbols"]
+                        ),
+                        "capabilities_used": ["search.symbol_exact"],
+                        "capabilities_missing": ["search.semantic"],
+                        "fallback_used": True,
+                        "fallback_reason": "semantic_engine_unavailable",
+                        "warnings": ["semantic search engine unavailable; returned exact/snapshot symbol rows"],
+                        "empty_reason": None,
                     }
                 )
             return create_error_response("Semantic search not initialized", 500)
@@ -1794,25 +2114,97 @@ async def symbol_search(
             if len(formatted_results) >= max_results:
                 break
 
+        if (
+            not workspace_id
+            and not formatted_results
+            and int(local_exact_status.get("symbols") or 0) <= 0
+        ):
+            return _structured_search_error(
+                message=(
+                    "Local exact symbol index is not ready. Run workspace "
+                    "index bootstrap before relying on symbol search."
+                ),
+                status_code=409,
+                error_code="INDEX_NOT_READY",
+                query=query,
+                search_type=search_type,
+                empty_reason="index_not_ready",
+                local_index={
+                    "workspace_id": _local_exact_workspace_id(),
+                    "ready": False,
+                    "status": local_exact_status,
+                },
+                query_plan=search_plan.to_dict(
+                    providers=["local_exact_index", "semantic_symbol"]
+                ),
+                capabilities_missing=["search.symbol_exact"],
+                next_actions=[
+                    "omni_index(action='bootstrap', scope='workspace', background=False, format='json')",
+                    "Use omni_read(file='<known file>', mode='outline', format='json') if you already know the file.",
+                ],
+            )
+
         return create_success_response(
             {
                 "query": query,
                 "search_type": search_type,
                 "symbol_type": symbol_type,
-                "fuzzy_enabled": fuzzy,
-                "results": formatted_results,
-                "total_results": len(formatted_results),
-                "snapshot_store_used": bool(workspace_id),
-                "exact_index_used": bool(workspace_id),
-                "snapshot_fast_path": False,
-                "freshness": (freshness or {}).get("freshness", "unknown")
-                if x_omnicode_min_revision
-                else "unknown",
-                "semantic_stale": bool((freshness or {}).get("semantic_stale", False)),
-                "exact_stale": bool((freshness or {}).get("exact_stale", False)),
+                        "fuzzy_enabled": fuzzy,
+                        "results": formatted_results,
+                        "total_results": len(formatted_results),
+                        "snapshot_store_used": bool(workspace_id),
+                        "exact_index_used": bool(workspace_id or local_exact_used),
+                        "local_exact_index_used": local_exact_used,
+                        "snapshot_fast_path": False,
+                        "freshness": (freshness or {}).get("freshness", "unknown")
+                        if x_omnicode_min_revision
+                        else ("local_exact" if local_exact_used else "unknown"),
+                        "semantic_stale": bool((freshness or {}).get("semantic_stale", False)),
+                        "exact_stale": bool((freshness or {}).get("exact_stale", False)),
                 "accepted_revision": (freshness or {}).get("accepted_revision"),
                 "indexed_revision": (freshness or {}).get("indexed_revision"),
                 "exact_indexed_revision": (freshness or {}).get("exact_indexed_revision"),
+                "provider": "semantic_symbol" if formatted_results else "none",
+                "provider_chain": [
+                    *(
+                        ["local_exact_index"]
+                        if local_exact_used
+                        else []
+                    ),
+                    *(
+                        ["cloud_exact_symbols"]
+                        if workspace_id
+                        else []
+                    ),
+                    "semantic_symbol",
+                ],
+                "query_plan": search_plan.to_dict(
+                    providers=[
+                        *(
+                            ["local_exact_index"]
+                            if local_exact_used
+                            else []
+                        ),
+                        *(
+                            ["cloud_exact_symbols"]
+                            if workspace_id
+                            else []
+                        ),
+                        "semantic_symbol",
+                    ]
+                ),
+                "capabilities_used": [
+                    *(
+                        ["search.symbol_exact"]
+                        if local_exact_used or workspace_id
+                        else []
+                    ),
+                    "search.semantic",
+                ],
+                "capabilities_missing": [],
+                "fallback_used": bool(local_exact_used or workspace_id),
+                "fallback_reason": None,
+                "empty_reason": "true_empty" if not formatted_results else None,
             }
         )
 
@@ -1830,11 +2222,26 @@ async def get_search_statistics():
         if not search_engine:
             return create_error_response("Semantic search not initialized", 500)
 
+        refresh_stats = getattr(search_engine, "refresh_stats", None)
+        if callable(refresh_stats):
+            refresh_stats()
         stats = search_engine.get_stats()
+        semantic_status: dict[str, Any] = {}
+        semantic_index_status = getattr(search_engine, "semantic_index_status", None)
+        if callable(semantic_index_status):
+            try:
+                semantic_status = dict(semantic_index_status())
+            except Exception as exc:
+                semantic_status = {
+                    "semantic_index_ready": False,
+                    "semantic_index_stale_reason": str(exc),
+                    "semantic_index_invalid": True,
+                }
 
         return create_success_response(
             {
                 "index_stats": stats,
+                "semantic_index": semantic_status,
                 "status": "healthy" if stats.get("total_files", 0) > 0 else "empty",
                 "last_indexed": stats.get("last_indexed", "never"),
                 "index_size_mb": (

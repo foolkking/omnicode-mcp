@@ -119,6 +119,7 @@ def test_hybrid_falls_back_to_local_on_remote_failure():
 
 def test_resolve_backend_local_default(monkeypatch):
     monkeypatch.delenv("OMNICODE_EMBEDDING_BACKEND", raising=False)
+    monkeypatch.setenv("OMNICODE_EMBEDDING_LOCAL_FILES_ONLY", "false")
     # We can't actually load the model in tests offline, so just inspect the
     # returned class. resolve_backend will try to instantiate, so monkey-patch
     # the local class to a stub.
@@ -150,6 +151,7 @@ def test_resolve_backend_hybrid(monkeypatch):
 
 def test_resolve_backend_hybrid_without_url_falls_back(monkeypatch):
     monkeypatch.setenv("OMNICODE_EMBEDDING_BACKEND", "hybrid")
+    monkeypatch.setenv("OMNICODE_EMBEDDING_LOCAL_FILES_ONLY", "false")
     monkeypatch.delenv("OMNICODE_EMBEDDING_REMOTE_URL", raising=False)
     monkeypatch.delenv("OMNICODE_EMBEDDING_REMOTE_KEY", raising=False)
     import omnicode_core.embeddings.backend as mod

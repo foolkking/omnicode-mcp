@@ -55,8 +55,11 @@ def run(
     base = _backend_url(backend_url, port)
     headers = {"X-Omnicode-Workspace": workspace_id} if workspace_id else {}
     scope_value = (scope or "semantic").strip().lower()
-    if scope_value not in {"semantic", "exact_policy"}:
-        print("Indexing failed: --scope must be one of: semantic, exact_policy")
+    if scope_value not in {"semantic", "exact_policy", "workspace"}:
+        print(
+            "Indexing failed: --scope must be one of: "
+            "semantic, exact_policy, workspace"
+        )
         sys.exit(2)
     params: dict[str, Any] = {
         "force": bool(force),

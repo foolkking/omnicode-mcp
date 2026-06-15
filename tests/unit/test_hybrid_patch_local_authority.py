@@ -186,3 +186,51 @@ def test_hybrid_patch_apply_flushes_pending_sync(
     assert applied["indexed_revision"] == 41
     assert applied["sync_paths"] == [rel]
     assert any(call.get("paths") == [rel] for call in calls)
+
+
+def test_hybrid_patch_apply_succeeds_when_cloud_sync_is_down(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from omnicode_core.workspace import sync_client as sync_client_mod
+
+    class FakeSyncClient:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+        def push_batch(self, batch: Any) -> Any:
+            return SimpleNamespace(
+                ok=False,
+                accepted_revision=0,
+                indexed_revision=0,
+                error="cloud down",
+                status_code=503,
+            )
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setenv("OMNICODE_REMOTE", "http://127.0.0.1:6799")
+    monkeypatch.setattr(sync_client_mod, "SyncClient", FakeSyncClient)
+
+    rel = "tests/tmp_hybrid_patch_cloud_down.py"
+    target = tmp_path / rel
+    tools = build_tools({})
+
+    applied = _payload(run(tools["omni_patch"](
+        action="apply",
+        file=rel,
+        content='VALUE = "local-still-works"\n',
+        format="json",
+    )))
+
+    assert applied["ok"] is True
+    assert applied["source"] == "local"
+    assert applied["local_authority"] is True
+    assert applied["sync_pending"] is True
+    assert applied["sync_flushed"] is False
+    assert applied["sync_flush_error"] == "cloud down"
+    assert applied["sync_flush_status_code"] == 503
+    assert target.read_text(encoding="utf-8") == 'VALUE = "local-still-works"\n'
+    captured: Dict[str, List[Dict[str, Any]]] = tools["__captured__"]
+    assert "/patch/apply" not in captured

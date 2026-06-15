@@ -28,7 +28,12 @@ class _MCPStub:
 
 
 def run(coro: Any) -> Any:
-    return asyncio.run(coro)
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(coro)
 
 
 def build_tools_from_request(

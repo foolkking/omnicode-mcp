@@ -1081,6 +1081,51 @@ def test_index_update_preserves_hash_metadata_for_bulk_upsert(
     ]
 
 
+def test_index_update_marks_exact_only_when_semantic_embedding_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bulk_calls: list[tuple[list[tuple[str, str]], bool]] = []
+    coverages: list[str | None] = []
+    refresh_stats_calls = 0
+
+    class _Engine:
+        def semantic_available(self) -> bool:
+            return False
+
+        async def upsert_contents(
+            self,
+            files: list[tuple[str, str]],
+            *,
+            refresh: bool = True,
+        ) -> int:
+            bulk_calls.append((files, refresh))
+            return len(files)
+
+        def refresh_stats(self) -> None:
+            nonlocal refresh_stats_calls
+            refresh_stats_calls += 1
+
+    def _mark_indexed(*, workspace_id, revision, semantic_coverage=None, **_kwargs):
+        coverages.append(semantic_coverage)
+        return revision
+
+    monkeypatch.setattr(sync_router, "get_search_engine", lambda: _Engine())
+    monkeypatch.setattr(sync_router._SNAPSHOT_STORE, "mark_indexed", _mark_indexed)
+
+    indexed = sync_router._run_index_update_blocking(
+        "repo-a",
+        10,
+        [("tests/tmp_cloudsim_a.py", "A")],
+        [],
+        semantic_coverage="selected_files",
+    )
+
+    assert indexed == 10
+    assert bulk_calls == []
+    assert refresh_stats_calls == 1
+    assert coverages == ["exact_only_initial_sync"]
+
+
 def test_batch_skips_unchanged_hash_without_revision_bump(
     client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1197,6 +1242,72 @@ def test_hash_mismatch_returns_structured_error(client: TestClient) -> None:
     assert body["ok"] is False
     assert "hash mismatch" in body["error"]
     assert body["accepted_revision"] == 0
+
+
+def test_large_sync_auto_disables_line_fts_without_breaking_exact_index(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OMNICODE_EXACT_LINE_FTS", raising=False)
+    monkeypatch.setattr(sync_router, "_AUTO_FTS_LINE_LIMIT", 3)
+    content = (
+        "class BigSyncSymbol:\n"
+        "    value = 1\n"
+        "    value = 2\n"
+        "    value = 3\n"
+        "    value = 4\n"
+    )
+
+    response = client.post(
+        "/sync/batch",
+        headers={"X-Omnicode-Workspace": "repo-a"},
+        json={
+            "client_id": "local-1",
+            "base_revision": 0,
+            "client_revision": 7,
+            "files": [
+                {
+                    "path": "pkg/big.py",
+                    "hash": _sha(content),
+                    "size": len(content),
+                    "mtime_ms": 123,
+                    "encoding": "utf-8",
+                    "content": content,
+                }
+            ],
+            "deletes": [],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["exact_indexed_revision"] == 7
+
+    status = _wait_indexed(client, revision=7)
+    assert status["exact_index"]["files"] == 1
+    assert status["exact_index"]["symbols"] >= 1
+    assert status["exact_index"]["lines"] == 5
+    assert status["exact_index"]["line_fts_available"] is False
+    assert status["exact_index"]["line_fts_reason"] == "disabled_for_large_workspace"
+
+    symbols = sync_router._exact_index().search_symbols(
+        workspace_id="repo-a",
+        query="BigSyncSymbol",
+        fuzzy=False,
+        max_results=3,
+    )
+    assert symbols
+    assert symbols[0].path == "pkg/big.py"
+
+    text = sync_router._exact_index().search_text(
+        workspace_id="repo-a",
+        query="class BigSyncSymbol:",
+        case_sensitive=True,
+        max_results=3,
+    )
+    assert text
+    assert text[0].path == "pkg/big.py"
 
 
 def test_path_escape_is_rejected_without_absolute_path_leak(client: TestClient) -> None:
