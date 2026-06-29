@@ -1,23 +1,23 @@
 """
-High-level MCP tools — the eight-tool core surface.
+High-level MCP tools: the eight-tool core surface.
 
 These eight tools are designed so an external AI editor can map the
 "what do I want to do" question to a single tool with one ``mode`` /
-``action`` parameter — no need to navigate 25 fine-grained tools and
+``action`` parameter, with no need to navigate 25 fine-grained tools and
 spend 10k tokens on schema descriptions.
 
-Token savings: ~10k schema tokens → ~3.5k. Tool descriptions kept short.
+Token savings: ~10k schema tokens to ~3.5k. Tool descriptions kept short.
 
 Tool roster:
 
-  omni_search       — semantic / symbol / text / hybrid / references
-  omni_read         — outline / symbols / full / range / imports / diagnostics
-  omni_impact       — callers / callees / risk / related tests
-  omni_diagnostics  — lint / type / security checks for a file or workspace
-  omni_context      — composer: outline + impact + memory + git in one call
-  omni_memory       — store / search / advisory
-  omni_patch        — preview / validate / apply / rollback (safe edit)
-  discover_tools    — discovery + capability listing
+  omni_search       - semantic / symbol / text / hybrid / references
+  omni_read         - outline / symbols / full / range / imports / diagnostics
+  omni_impact       - callers / callees / risk / related tests
+  omni_diagnostics  - lint / type / security checks for a file or workspace
+  omni_context      - composer: outline + impact + memory + git in one call
+  omni_memory       - store / search / advisory
+  omni_patch        - preview / validate / apply / rollback (safe edit)
+  discover_tools    - discovery + capability listing
 
 Backwards compatibility: ``omni_analyze``, ``omni_edit``,
 ``omni_intelligence`` are kept as deprecated aliases that delegate to
@@ -27,6 +27,9 @@ the new tools, so older MCP configs don't break.
 import json
 import logging
 import re
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -44,8 +47,74 @@ logger = logging.getLogger(__name__)
 # but omni_read didn't); the omni_status tool reads this constant so the
 # next round can verify which build is actually serving traffic.
 # ---------------------------------------------------------------------------
-_HANDLER_VERSION = "2026.06.15.sync-revision-r61"
+_HANDLER_VERSION = "2026.06.29.declaration-text-fastpath.r86"
 _HANDLER_FEATURES: Tuple[str, ...] = (
+    "search.declaration_text_true_empty_fast_path",
+    "search.declaration_text_symbol_fast_path",
+    "alias.edit_strict_patch_delegation",
+    "patch.force_reason_required",
+    "search.local_exact_short_circuit",
+    "diagnostics.target_project_scope_partition",
+    "diagnostics.environment_incomplete_visibility",
+    "sync.status_monotonic_snapshot_revision",
+    "sync.large_batch_default",
+    "exact_index.readonly_query_path",
+    "graph.lightweight_readiness_probe",
+    "status.parallel_cached_probes",
+    "status.bounded_provider_probes",
+    "sync.worker_cross_loop_liveness",
+    "context.fast_path_token_budget",
+    "context.fast_path_graph_probe_gate",
+    "freshness.snapshot_fast_preflight",
+    "discover.lsp_bootstrap_strategy",
+    "embedding.batch_config",
+    "embedding.backend_process_cache",
+    "memory.embedding_shared_backend",
+    "lsp.explicit_disable",
+    "toolchain.scala_gradle",
+    "skill.capability_first_recipes",
+    "semantic.bounded_batches",
+    "semantic.staging_atomic_activation",
+    "semantic.retry_staging_resume",
+    "context.snapshot_graph_alignment",
+    "lsp.jvm_shadow_workspace",
+    "lsp.metals_shadow_workspace",
+    "index.lsp_bootstrap_control",
+    "lsp.jvm_runtime_capability",
+    "lsp.jdtls_state_dir",
+    "lsp.patch_overlay_diagnostics",
+    "diagnostics.jvm_workspace_lsp",
+    "graph.schema_v3_evidence_tables",
+    "graph.scala_lexical_fallback",
+    "impact.jvm_lsp_on_demand",
+    "semantic.job_pause_resume_retry",
+    "semantic.job_persistent_recovery",
+    "semantic.job_progress_eta",
+    "semantic.metadata_indexed_revision",
+    "semantic.full_source_policy",
+    "sync.status_cache_ttl",
+    "sync.status_concurrent_coalescing",
+    "graph.snapshot_fast_degraded_no_rescan",
+    "graph.unsupported_language_degraded",
+    "diagnostics.java_tree_sitter_syntax",
+    "patch.java_tree_sitter_validate",
+    "diagnostics.java_javac_single_file",
+    "patch.java_javac_single_file_validate",
+    "graph.persisted_sqlite_index",
+    "graph.revision_readiness",
+    "impact.persisted_graph_provider",
+    "sync.pending_force_after_local_patch",
+    "status.compact_skips_heavy_probes",
+    "status.compact_detail",
+    "embedding.effective_runtime_status",
+    "status.bounded_cloud_probe",
+    "search.references_definition_line_refresh",
+    "search.references_source_filter_fast_path",
+    "search.references_skip_lsp_when_degraded",
+    "read.raw_modes_token_budget",
+    "capability.live_preflight_from_freshness",
+    "search.structured_result_dedupe",
+    "impact.references_test_fallback",
     "sync.missing_upsert_delete",
     "freshness.pending_aware_cloud_revision",
     "exact_index.fts_auto_status",
@@ -992,6 +1061,628 @@ def _format_json(data: Any, max_lines: int = 80) -> str:
     return text
 
 
+def _java_tree_sitter_diagnostics(content: str) -> tuple[List[Dict[str, Any]], Optional[str]]:
+    """Return Java syntax diagnostics using tree-sitter when available.
+
+    This is intentionally syntax-only. It does not claim classpath, annotation
+    processor, Gradle/Maven, or javac semantic validation.
+    """
+    try:
+        import tree_sitter_java
+        from tree_sitter import Language, Parser
+
+        parser = Parser()
+        parser.language = Language(tree_sitter_java.language())
+        tree = parser.parse((content or "").encode("utf-8", "replace"))
+    except Exception as exc:  # noqa: BLE001 - optional parser dependency
+        return [], f"tree_sitter_java_unavailable:{exc.__class__.__name__}"
+
+    diagnostics: List[Dict[str, Any]] = []
+
+    def _walk(node: Any) -> None:
+        is_error = bool(
+            getattr(node, "is_error", False)
+            or getattr(node, "is_missing", False)
+            or getattr(node, "type", "") == "ERROR"
+        )
+        if is_error:
+            row, col = getattr(node, "start_point", (0, 0))
+            node_type = getattr(node, "type", "ERROR")
+            text = getattr(node, "text", b"") or b""
+            snippet = ""
+            if isinstance(text, bytes):
+                snippet = text.decode("utf-8", "replace").strip()
+            elif isinstance(text, str):
+                snippet = text.strip()
+            if len(snippet) > 80:
+                snippet = snippet[:77] + "..."
+            detail = f" near {snippet!r}" if snippet else ""
+            diagnostics.append({
+                "source": "tree_sitter_java",
+                "severity": "error",
+                "line": int(row) + 1,
+                "column": int(col) + 1,
+                "rule": "java-syntax",
+                "message": f"Java syntax error ({node_type}){detail}",
+            })
+            return
+        for child in getattr(node, "children", []) or []:
+            _walk(child)
+
+    root = tree.root_node
+    if getattr(root, "has_error", False):
+        _walk(root)
+    if getattr(root, "has_error", False) and not diagnostics:
+        diagnostics.append({
+            "source": "tree_sitter_java",
+            "severity": "error",
+            "line": 1,
+            "column": 1,
+            "rule": "java-syntax",
+            "message": "Java syntax error",
+        })
+    return diagnostics, None
+
+
+_JAVAC_ERROR_RE = re.compile(
+    r"^(?P<file>.*?\.java):(?P<line>\d+):\s*"
+    r"(?P<severity>error|warning|错误|警告):\s*(?P<message>.*)$",
+    re.IGNORECASE,
+)
+
+
+def _java_primary_type_name(content: str, fallback: str = "OmniCodeTemp") -> str:
+    public_match = re.search(
+        r"\bpublic\s+(?:final\s+|abstract\s+)?(?:class|interface|enum|record)\s+([A-Za-z_$][\w$]*)",
+        content or "",
+    )
+    if public_match:
+        return public_match.group(1)
+    match = re.search(
+        r"\b(?:class|interface|enum|record)\s+([A-Za-z_$][\w$]*)",
+        content or "",
+    )
+    return match.group(1) if match else fallback
+
+
+def _javac_single_file_diagnostics(
+    content: str,
+    *,
+    timeout_seconds: float = 5.0,
+) -> tuple[List[Dict[str, Any]], Optional[str], List[str]]:
+    """Run optional javac syntax/type validation for a standalone Java file.
+
+    This deliberately compiles in an isolated temp directory and never writes
+    into the workspace.  Missing project classpath/imports are reported as
+    ``environment_incomplete`` rather than target-file syntax failures.
+    """
+    javac_path = shutil.which("javac")
+    if not javac_path:
+        return [], "javac_unavailable", []
+
+    class_name = _java_primary_type_name(content)
+    try:
+        with tempfile.TemporaryDirectory(prefix="omnicode-javac-") as tmp:
+            source_path = Path(tmp) / f"{class_name}.java"
+            source_path.write_text(content or "", encoding="utf-8")
+            result = subprocess.run(
+                [
+                    javac_path,
+                    "-proc:none",
+                    "-Xlint:none",
+                    "-d",
+                    str(Path(tmp) / "classes"),
+                    str(source_path),
+                ],
+                cwd=tmp,
+                text=True,
+                capture_output=True,
+                timeout=timeout_seconds,
+            )
+    except subprocess.TimeoutExpired:
+        return [], "javac_timeout", []
+    except Exception as exc:  # noqa: BLE001 - optional external tool
+        return [], f"javac_failed:{exc.__class__.__name__}", []
+
+    stderr_lines = [
+        line.rstrip()
+        for line in (result.stderr or "").splitlines()
+        if line.strip()
+    ]
+    if result.returncode == 0:
+        return [], None, stderr_lines[-10:]
+
+    diagnostics: List[Dict[str, Any]] = []
+    environment_incomplete = False
+    for line in stderr_lines:
+        m = _JAVAC_ERROR_RE.match(line.strip())
+        if not m:
+            continue
+        message = (m.group("message") or "").strip()
+        line_no = int(m.group("line") or "1")
+        severity_raw = (m.group("severity") or "error").lower()
+        severity = "error" if severity_raw in {"error", "错误"} else "warning"
+        if any(
+            marker in message
+            for marker in (
+                "package ",
+                "cannot find symbol",
+                "does not exist",
+                "cannot access",
+                "程序包",
+                "不存在",
+                "找不到符号",
+                "无法访问",
+            )
+        ):
+            environment_incomplete = True
+        diagnostics.append({
+            "source": "javac",
+            "severity": severity,
+            "line": line_no,
+            "column": 1,
+            "rule": "java-compile",
+            "message": message,
+        })
+
+    if diagnostics and environment_incomplete:
+        return diagnostics, "java_environment_incomplete", stderr_lines[-20:]
+    if diagnostics:
+        return diagnostics, None, stderr_lines[-20:]
+    return [], "javac_unparsed_output", stderr_lines[-20:]
+
+
+def _filter_diagnostics_by_severity(
+    diagnostics: List[Dict[str, Any]],
+    severity: str,
+) -> List[Dict[str, Any]]:
+    sev = (severity or "all").lower().strip()
+    if sev in ("all", ""):
+        return diagnostics
+    if sev == "error":
+        allowed = {"error"}
+    elif sev == "warning":
+        allowed = {"warning", "warn"}
+    else:
+        allowed = {sev}
+    return [
+        d for d in diagnostics
+        if (d.get("severity") or "").lower() in allowed
+    ]
+
+
+def _counts_for_diagnostics(
+    diagnostics: List[Dict[str, Any]],
+) -> Dict[str, int]:
+    return {
+        "error": sum(
+            1 for d in diagnostics
+            if (d.get("severity") or "").lower() == "error"
+        ),
+        "warning": sum(
+            1 for d in diagnostics
+            if (d.get("severity") or "").lower() in ("warning", "warn")
+        ),
+        "info": sum(
+            1 for d in diagnostics
+            if (d.get("severity") or "").lower() in ("info", "hint")
+        ),
+        "total": len(diagnostics),
+    }
+
+
+def _normalise_diagnostic_file(value: Any) -> str:
+    """Return a workspace-relative, public-safe diagnostic path."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        path = Path(text).expanduser()
+        if path.is_absolute():
+            root, _source, _warnings = _get_workspace_root()
+            resolved = path.resolve(strict=False)
+            root_resolved = root.resolve()
+            if resolved == root_resolved or root_resolved in resolved.parents:
+                return resolved.relative_to(root_resolved).as_posix()
+    except Exception:
+        pass
+    public = _sanitize_public_path_ref(text).replace("\\", "/")
+    while public.startswith("./"):
+        public = public[2:]
+    return public
+
+
+def _diagnostic_environment_issue(row: Dict[str, Any]) -> bool:
+    """Identify findings that primarily describe an incomplete tool environment."""
+    source = str(row.get("source") or "").lower()
+    rule = str(row.get("rule") or "").lower()
+    message = str(row.get("message") or "").lower()
+    if source != "mypy":
+        return False
+    if rule in {"import-not-found", "import-untyped", "no-any-unimported"}:
+        return True
+    return any(
+        marker in message
+        for marker in (
+            "cannot find implementation or library stub",
+            "library stubs not installed",
+            "missing imports",
+            "skipping analyzing",
+            "python version",
+            "typeshed",
+        )
+    )
+
+
+def _diagnostic_scope_fields(
+    diagnostics: List[Dict[str, Any]],
+    *,
+    target_file: str,
+    limit: int = 25,
+) -> Dict[str, Any]:
+    """Partition target findings from project-wide analyzer output.
+
+    Ruff and Bandit normally report only the requested file, while mypy may
+    walk imported project modules.  Mixing those project findings into the
+    target result makes a clean file look broken.  Findings without a path
+    remain target-scoped for backward compatibility with older guards and
+    LSP payloads.
+    """
+    target = _normalise_diagnostic_file(target_file).casefold()
+    target_rows: List[Dict[str, Any]] = []
+    project_rows: List[Dict[str, Any]] = []
+
+    for original in diagnostics:
+        row = dict(original)
+        raw_file = row.pop("_file", None)
+        public_file = _normalise_diagnostic_file(raw_file)
+        if public_file:
+            row["file"] = public_file
+        row["message"] = _sanitize_error_text(str(row.get("message") or ""))
+        if not public_file or public_file.casefold() == target:
+            target_rows.append(row)
+        else:
+            project_rows.append(row)
+
+    target_counts = _counts_for_diagnostics(target_rows)
+    project_counts = _counts_for_diagnostics(project_rows)
+    environment_count = sum(
+        1 for row in project_rows if _diagnostic_environment_issue(row)
+    )
+
+    if target_counts["error"]:
+        status = "target_errors"
+    elif target_counts["total"]:
+        status = "target_warnings"
+    elif environment_count:
+        status = "environment_incomplete"
+    elif project_counts["total"]:
+        status = "project_errors"
+    else:
+        status = "clean"
+
+    warnings: List[str] = []
+    if project_counts["total"]:
+        warnings.append("project_wide_diagnostics_omitted_from_target_result")
+    if environment_count:
+        warnings.append("diagnostics_environment_incomplete")
+
+    result: Dict[str, Any] = {
+        "diagnostics": target_rows[:limit],
+        "counts": target_counts,
+        "truncated": len(target_rows) > limit,
+        "total_count": len(target_rows),
+        "diagnostics_status": status,
+        "project_diagnostics_count": len(project_rows),
+        "project_counts": project_counts,
+        "project_diagnostics_sample": project_rows[:5],
+        "warnings": warnings,
+    }
+    if environment_count:
+        result["environment"] = {
+            "status": "incomplete",
+            "reason": "mypy_environment_incomplete",
+            "diagnostics_count": environment_count,
+        }
+    return result
+
+
+def _workspace_diagnostics_capability(language: str) -> Dict[str, Any]:
+    language = (language or "unknown").lower()
+    if language not in {"java", "scala"}:
+        return {
+            "language": language,
+            "capability": f"diagnostics.{language}.workspace",
+            "state": "unsupported",
+            "reason": "workspace diagnostics capability not defined",
+        }
+    try:
+        ws_root, _source, _warnings = _get_workspace_root()
+        from omnicode_core.capabilities.toolchains import (
+            detect_workspace_toolchains,
+        )
+        from omnicode_core.lsp.bridge import lsp_runtime_status
+
+        runtime = lsp_runtime_status(
+            str(ws_root),
+            languages={"java", "scala"},
+        )
+        status = detect_workspace_toolchains(
+            ws_root,
+            lsp_runtime=runtime,
+        )
+        row = status.get(language) if isinstance(status, dict) else {}
+        if not isinstance(row, dict):
+            row = {}
+        runtime_row = (
+            runtime.get(language)
+            if isinstance(runtime.get(language), dict)
+            else {}
+        )
+        ready = bool(row.get("workspace_diagnostics_ready"))
+        return {
+            "language": language,
+            "capability": f"diagnostics.{language}.workspace",
+            "state": "ready" if ready else "unavailable",
+            "provider": row.get("lsp") or (
+                "jdtls" if language == "java" else "metals"
+            ),
+            "build_ready": bool(row.get("build_ready")),
+            "toolchain_ready": bool(row.get("toolchain_ready")),
+            "runtime_ready": bool(row.get("runtime_ready")),
+            "start_allowed": bool(runtime_row.get("start_allowed")),
+            "reason": "" if ready else str(row.get("reason") or "toolchain_unavailable"),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "language": language,
+            "capability": f"diagnostics.{language}.workspace",
+            "state": "unavailable",
+            "reason": f"{exc.__class__.__name__}: {exc}",
+        }
+
+
+def _java_diagnostics_payload(
+    *,
+    file: str,
+    content: str,
+    severity: str,
+    sources: str,
+    local_first: bool = True,
+) -> Dict[str, Any]:
+    diagnostics, parser_error = _java_tree_sitter_diagnostics(content)
+    tools_run: List[str] = []
+    tools_skipped: List[str] = []
+    warnings: List[str] = ["java_semantic_diagnostics_not_performed"]
+    diagnostics_status = "partial"
+    confidence = "medium"
+
+    if parser_error:
+        diagnostics_status = "not_performed"
+        tools_skipped.append(parser_error)
+        warnings.append(parser_error)
+        confidence = "low"
+    else:
+        tools_run.append("tree_sitter_java")
+        tools_skipped.append("java_semantic_diagnostics_not_performed")
+        if diagnostics:
+            diagnostics_status = "target_errors"
+            tools_skipped.append("javac_skipped_due_to_tree_sitter_errors")
+        else:
+            javac_diagnostics, javac_status, javac_tail = (
+                _javac_single_file_diagnostics(content)
+            )
+            if javac_status == "java_environment_incomplete":
+                diagnostics_status = "environment_incomplete"
+                diagnostics.extend(javac_diagnostics)
+                tools_run.append("javac")
+                warnings.append("java_environment_incomplete")
+                if javac_tail:
+                    warnings.append("javac_output_truncated")
+                confidence = "low"
+            elif javac_status:
+                tools_skipped.append(javac_status)
+                warnings.append(javac_status)
+                confidence = "medium"
+            else:
+                tools_run.append("javac")
+                if javac_diagnostics:
+                    diagnostics_status = "target_errors"
+                    diagnostics.extend(javac_diagnostics)
+                else:
+                    warnings.append("java_project_build_not_performed")
+
+    diagnostics = _filter_diagnostics_by_severity(diagnostics, severity)
+    sev_rank = {"error": 0, "warning": 1, "warn": 1, "info": 2, "hint": 3}
+    diagnostics.sort(key=lambda d: (
+        sev_rank.get((d.get("severity") or "").lower(), 4),
+        d.get("line") or 0,
+        d.get("column") or 0,
+    ))
+    counts = _counts_for_diagnostics(diagnostics)
+    shown = diagnostics[:25]
+
+    return {
+        "ok": True,
+        "file": file,
+        "language": "java",
+        "diagnostics_status": diagnostics_status,
+        "workspace_diagnostics": _workspace_diagnostics_capability("java"),
+        "severity_filter": severity,
+        "sources": sorted({s.strip() for s in (sources or "").split(",") if s.strip()}),
+        "tools_run": tools_run,
+        "tools_skipped": tools_skipped,
+        "diagnostics": shown,
+        "counts": counts,
+        "truncated": len(diagnostics) > 25,
+        "total_count": len(diagnostics),
+        "source": (
+            "tree_sitter_java+javac"
+            if "javac" in tools_run
+            else "tree_sitter_java"
+            if not parser_error
+            else "language_capability_matrix"
+        ),
+        "confidence": confidence,
+        "local_first": local_first,
+        "local_authority": True,
+        "warnings": warnings,
+    }
+
+
+def _java_validation_payload(
+    target_file: str,
+    target_content: str,
+) -> Optional[Dict[str, Any]]:
+    if not str(target_file or "").lower().endswith(".java"):
+        return None
+    diagnostics, parser_error = _java_tree_sitter_diagnostics(target_content)
+    if parser_error:
+        reason = parser_error
+        return {
+            "ok": True,
+            "validation_passed": None,
+            "validation": {
+                "status": "not_performed",
+                "passed": None,
+                "reason": reason,
+                "language": "java",
+            },
+            "message": f"Java syntax validation not performed: {reason}",
+            "checks": [],
+            "counts": {"error": 0, "warning": 0, "info": 0, "total": 0},
+            "tools_run": [],
+            "tools_skipped": [reason],
+            "warnings": [reason],
+            "source": "language_capability_matrix",
+        }
+
+    counts = _counts_for_diagnostics(diagnostics)
+    if counts["error"] > 0:
+        validation = {
+            "status": "failed",
+            "passed": False,
+            "reason": "java_syntax_errors",
+            "language": "java",
+        }
+        message = (
+            f"Java syntax validation failed: {counts['error']} error(s), "
+            f"{counts['warning']} warning(s)"
+        )
+        return {
+            "ok": False,
+            "validation_passed": False,
+            "validation": validation,
+            "message": message,
+            "checks": diagnostics,
+            "counts": counts,
+            "tools_run": ["tree_sitter_java"],
+            "tools_skipped": [
+                "java_semantic_validation_not_performed",
+                "javac_skipped_due_to_tree_sitter_errors",
+            ],
+            "warnings": [],
+            "source": "tree_sitter_java",
+        }
+
+    javac_diagnostics, javac_status, javac_tail = _javac_single_file_diagnostics(
+        target_content
+    )
+    javac_counts = _counts_for_diagnostics(javac_diagnostics)
+    if javac_status == "java_environment_incomplete":
+        validation = {
+            "status": "environment_incomplete",
+            "passed": None,
+            "reason": "java_environment_incomplete",
+            "language": "java",
+        }
+        return {
+            "ok": True,
+            "validation_passed": None,
+            "validation": validation,
+            "message": (
+                "Java single-file validation was inconclusive because the "
+                "project classpath/environment is incomplete."
+            ),
+            "checks": javac_diagnostics,
+            "counts": javac_counts,
+            "tools_run": ["tree_sitter_java", "javac"],
+            "tools_skipped": ["java_project_build_not_performed"],
+            "warnings": [
+                "java_environment_incomplete",
+                *(
+                    ["javac_output_truncated"]
+                    if len(javac_tail) > 0
+                    else []
+                ),
+            ],
+            "source": "tree_sitter_java+javac",
+        }
+    if javac_status:
+        validation = {
+            "status": "partial",
+            "passed": None,
+            "reason": "java_syntax_only_semantics_not_performed",
+            "language": "java",
+        }
+        message = (
+            "Java syntax validation found no parser errors, but "
+            "semantic/classpath validation was not performed."
+        )
+        warnings = ["java_semantic_validation_not_performed", javac_status]
+        tools_run = ["tree_sitter_java"]
+        tools_skipped = [
+            "java_semantic_validation_not_performed",
+            javac_status,
+        ]
+        source = "tree_sitter_java"
+    elif javac_counts["error"] > 0:
+        validation = {
+            "status": "failed",
+            "passed": False,
+            "reason": "java_compile_errors",
+            "language": "java",
+        }
+        message = (
+            f"Java single-file validation failed: "
+            f"{javac_counts['error']} error(s), "
+            f"{javac_counts['warning']} warning(s)"
+        )
+        warnings = []
+        tools_run = ["tree_sitter_java", "javac"]
+        tools_skipped = ["java_project_build_not_performed"]
+        source = "tree_sitter_java+javac"
+        diagnostics = javac_diagnostics
+        counts = javac_counts
+    else:
+        validation = {
+            "status": "partial",
+            "passed": True,
+            "reason": "java_javac_single_file_passed_project_build_not_performed",
+            "language": "java",
+        }
+        message = (
+            "Java tree-sitter and javac single-file validation passed; "
+            "project build/classpath validation was not performed."
+        )
+        warnings = ["java_project_build_not_performed"]
+        tools_run = ["tree_sitter_java", "javac"]
+        tools_skipped = ["java_project_build_not_performed"]
+        source = "tree_sitter_java+javac"
+    return {
+        "ok": validation["passed"] is not False,
+        "validation_passed": validation["passed"],
+        "validation": validation,
+        "message": message,
+        "checks": diagnostics,
+        "counts": counts,
+        "tools_run": tools_run,
+        "tools_skipped": tools_skipped,
+        "warnings": warnings,
+        "source": source,
+    }
+
+
 # ---------------------------------------------------------------------------
 # omni_search helpers
 # ---------------------------------------------------------------------------
@@ -1001,6 +1692,26 @@ def _format_json(data: Any, max_lines: int = 80) -> str:
 _DEFAULT_TEXT_GLOBS = (
     "*.py,*.js,*.jsx,*.ts,*.tsx,*.go,*.rs,*.java,*.cpp,*.c,*.h,"
     "*.rb,*.php,*.kt,*.kts,*.scala,*.cs,*.md,*.toml,*.yaml,*.yml,*.json"
+)
+_DEFAULT_REFERENCE_TEXT_GLOBS = (
+    "*.py,*.pyi,*.js,*.jsx,*.ts,*.tsx,*.go,*.rs,*.java,*.cpp,*.cc,"
+    "*.cxx,*.c,*.h,*.hpp,*.rb,*.php,*.kt,*.kts,*.scala,*.cs,*.swift"
+)
+_REFERENCE_SOURCE_EXTENSIONS = frozenset(
+    {
+        ".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs",
+        ".java", ".cpp", ".cc", ".cxx", ".c", ".h", ".hpp", ".rb",
+        ".php", ".kt", ".kts", ".scala", ".cs", ".swift",
+    }
+)
+_REFERENCE_EXCLUDED_PREFIXES = (
+    ".git/",
+    ".mypy_cache/",
+    ".pytest_cache/",
+    ".ruff_cache/",
+    ".tmp",
+    "docs/",
+    "restored_sessions/",
 )
 
 _IDENT_RE = re.compile(r"^[A-Za-z_][\w.]*$")
@@ -1130,7 +1841,12 @@ def _detect_mode(query: str) -> str:
 
 
 async def _run_semantic(
-    make_request, query: str, file_pattern: Optional[str], max_results: int, rerank: bool
+    make_request,
+    query: str,
+    file_pattern: Optional[str],
+    max_results: int,
+    rerank: bool,
+    meta_out: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[Dict[str, Any]], int]:
     """Pure semantic (FAISS) search. Optional cross-encoder rerank."""
     payload: Dict[str, Any] = {
@@ -1147,6 +1863,26 @@ async def _run_semantic(
 
     raw = await make_request("POST", "/search", json=payload)
     data = raw.get("result", raw) if isinstance(raw, dict) else {}
+    if meta_out is not None and isinstance(data, dict):
+        for key in (
+            "provider",
+            "provider_chain",
+            "capabilities_used",
+            "capabilities_missing",
+            "fallback_used",
+            "fallback_reason",
+            "warnings",
+            "empty_reason",
+            "snapshot_store_used",
+            "snapshot_exact_boost",
+            "snapshot_lexical_boost",
+            "semantic_exact_only_fast_path",
+            "debug_timing",
+            "semantic_index_ready",
+            "semantic_index_stale_reason",
+        ):
+            if key in data:
+                meta_out[key] = data[key]
     results = list(data.get("results", []))
 
     if rerank:
@@ -1315,6 +2051,59 @@ def _exact_text_row_to_mcp(row: Any) -> Dict[str, Any]:
     }
 
 
+_SYMBOL_LIKE_TEXT_RE = re.compile(
+    r"^\s*(?:public\s+|private\s+|protected\s+|abstract\s+|final\s+)*"
+    r"(?P<kind>class|trait|object|interface|enum|def|function)\s+"
+    r"(?P<name>[A-Za-z_$][\w$]*)\b"
+)
+
+
+def _symbol_candidate_from_text_query(query: str) -> Tuple[Optional[str], Optional[str]]:
+    m = _SYMBOL_LIKE_TEXT_RE.match(query or "")
+    if not m:
+        return None, None
+    kind = m.group("kind").lower()
+    if kind == "def":
+        kind = "function"
+    return m.group("name"), kind
+
+
+def _symbol_row_to_text_hit(row: Any) -> Dict[str, Any]:
+    path = str(getattr(row, "path", "") or "").replace("\\", "/")
+    line_no = int(getattr(row, "line_start", 0) or 0)
+    line_text = str(getattr(row, "signature", "") or "")
+    context_before: List[str] = []
+    context_after: List[str] = []
+    try:
+        resolved = _resolve_workspace_path(path)
+        lines = resolved.read_text(encoding="utf-8", errors="replace").splitlines()
+        if 1 <= line_no <= len(lines):
+            line_text = lines[line_no - 1]
+            context_before = lines[max(0, line_no - 3):line_no - 1]
+            context_after = lines[line_no:min(len(lines), line_no + 2)]
+    except Exception:
+        pass
+    return {
+        "file_path": path,
+        "file": path,
+        "line_number": line_no,
+        "line_start": line_no,
+        "line_end": line_no,
+        "line_content": line_text,
+        "context_before": context_before,
+        "context_after": context_after,
+        "match_type": "text",
+        "kind": "text",
+        "relevance_score": 1.0,
+        "score": 1.0,
+        "confidence": "high",
+        "source": "local_exact_index",
+        "hash": getattr(row, "hash", "") or "",
+        "revision": int(getattr(row, "revision", 0) or 0),
+        "why_matched": ["text:symbol_definition", "local_exact_index"],
+    }
+
+
 def _lookup_local_exact_text(
     *,
     query: str,
@@ -1361,6 +2150,44 @@ def _lookup_local_exact_text(
         if int(status.get("lines") or 0) <= 0:
             meta["empty_reason"] = "index_not_ready"
             return [], meta
+        symbol_name, symbol_kind = _symbol_candidate_from_text_query(query)
+        if symbol_name:
+            symbol_rows = index.search_symbols(
+                workspace_id=workspace_id,
+                query=symbol_name,
+                file_pattern=file_pattern,
+                fuzzy=False,
+                max_results=max_results,
+            )
+            if symbol_kind:
+                kind_aliases = {
+                    "function": {"function", "method", "def"},
+                    "class": {"class"},
+                    "trait": {"trait"},
+                    "object": {"object"},
+                    "interface": {"interface"},
+                    "enum": {"enum"},
+                }.get(symbol_kind, {symbol_kind})
+                symbol_rows = [
+                    row for row in symbol_rows
+                    if str(getattr(row, "kind", "") or "").lower() in kind_aliases
+                ] or symbol_rows
+            if symbol_rows:
+                meta["fallback_used"] = False
+                meta["fallback_reason"] = None
+                meta["symbol_definition_fast_path"] = True
+                meta["warnings"] = []
+                return [
+                    _symbol_row_to_text_hit(row)
+                    for row in symbol_rows[:max_results]
+                ], meta
+            if int(status.get("symbols") or 0) > 0:
+                meta["empty_reason"] = "true_empty"
+                meta["symbol_definition_fast_path"] = True
+                meta["fallback_used"] = False
+                meta["fallback_reason"] = None
+                meta["warnings"] = []
+                return [], meta
         rows = index.search_text(
             workspace_id=workspace_id,
             query=query,
@@ -1374,6 +2201,18 @@ def _lookup_local_exact_text(
     except Exception as exc:
         logger.debug("local exact text lookup failed: %s", exc)
         return [], {"provider": "local_exact_index", "error": str(exc)}
+
+
+def _is_reference_source_path(path: str) -> bool:
+    """Return true when a text hit is plausible source-code reference."""
+    norm = (path or "").replace("\\", "/").lstrip("/")
+    if not norm:
+        return False
+    lowered = norm.lower()
+    if any(lowered.startswith(prefix) for prefix in _REFERENCE_EXCLUDED_PREFIXES):
+        return False
+    suffix = PurePosixPath(norm).suffix.lower()
+    return suffix in _REFERENCE_SOURCE_EXTENSIONS
 
 
 def _local_exact_index_status_payload() -> Dict[str, Any]:
@@ -1506,6 +2345,30 @@ async def _run_text(
     When ``flat=True`` the backend disables adjacent-line merging so
     every matched line shows up as its own result row.
     """
+    local_hits, local_meta = _lookup_local_exact_text(
+        query=query,
+        file_pattern=file_pattern or _DEFAULT_TEXT_GLOBS,
+        max_results=max_results,
+    )
+    if (
+        local_meta.get("symbol_definition_fast_path")
+        and local_meta.get("empty_reason") == "true_empty"
+    ):
+        if meta_out is not None:
+            meta_out.update(local_meta)
+            meta_out["provider"] = "local_exact_index"
+            meta_out["provider_chain"] = ["local_exact_index"]
+            meta_out["exact_index_used"] = True
+        return [], 0
+    if local_hits:
+        if meta_out is not None:
+            meta_out.update(local_meta)
+            meta_out["provider"] = "local_exact_index"
+            meta_out["provider_chain"] = ["local_exact_index"]
+            meta_out["exact_index_used"] = True
+            meta_out["empty_reason"] = None
+        return local_hits, len(local_hits)
+
     params = {
         "query": query,
         "file_pattern": file_pattern or _DEFAULT_TEXT_GLOBS,
@@ -1532,49 +2395,6 @@ async def _run_text(
                 meta_out[key] = data.get(key)
     results = list(data.get("results", []))
     total = int(data.get("total_results", len(results)) or len(results))
-    local_hits, local_meta = _lookup_local_exact_text(
-        query=query,
-        file_pattern=file_pattern or _DEFAULT_TEXT_GLOBS,
-        max_results=max_results,
-    )
-    if local_hits:
-        merged: List[Dict[str, Any]] = []
-        seen: set[Tuple[str, int, str]] = set()
-        for row in [*local_hits, *results]:
-            key = (
-                str(row.get("file_path") or row.get("file") or ""),
-                int(row.get("line_number") or row.get("line_start") or 0),
-                str(row.get("line_content") or ""),
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append(row)
-            if len(merged) >= max_results:
-                break
-        results = merged
-        total = max(total, len(results))
-        if meta_out is not None:
-            chain = list(meta_out.get("provider_chain") or [])
-            if "local_exact_index" not in chain:
-                chain.insert(0, "local_exact_index")
-            meta_out["provider"] = "local_exact_index"
-            meta_out["provider_chain"] = chain
-            meta_out["exact_index_used"] = True
-            meta_out["line_fts_available"] = bool(
-                local_meta.get("line_fts_available")
-            )
-            if local_meta.get("line_fts_reason"):
-                meta_out["line_fts_reason"] = local_meta["line_fts_reason"]
-            if local_meta.get("fallback_used"):
-                meta_out["fallback_used"] = True
-                meta_out["fallback_reason"] = local_meta.get("fallback_reason")
-            warnings = list(meta_out.get("warnings") or [])
-            for warning in local_meta.get("warnings") or []:
-                if warning not in warnings:
-                    warnings.append(warning)
-            if warnings:
-                meta_out["warnings"] = warnings
     return results, total
 
 
@@ -1651,7 +2471,11 @@ def _rrf_fuse(
 
 
 async def _run_references(
-    make_request, query: str, max_results: int
+    make_request,
+    query: str,
+    max_results: int,
+    *,
+    try_lsp: bool = True,
 ) -> Tuple[List[Dict[str, Any]], int, Dict[str, Any]]:
     """Find every definition + usage of a symbol with LSP-grade semantics.
 
@@ -1702,30 +2526,44 @@ async def _run_references(
         meta["fallback_reason"] = "empty query"
         return [], 0, meta
 
+    if not try_lsp:
+        meta["lsp_attempted"] = False
+        meta["lsp_available"] = False
+        meta["fallback_reason"] = (
+            "lsp skipped because references capability is degraded; "
+            "using deterministic ast+text fallback"
+        )
+        locations: List[Dict[str, Any]] = []
+        lsp_refs: List[Dict[str, Any]] = []
+        lsp_available = False
+    else:
+        locations = []
+
     # ----- Step 1: LSP -----------------------------------------------------
-    lsp_refs: List[Dict[str, Any]] = []
-    lsp_available = True
     anchor_file = ""
     anchor_line = 0
-    meta["lsp_attempted"] = True
-    try:
-        raw = await make_request(
-            "GET", "/lsp/workspace-symbols", params={"query": query}
-        )
-        data = raw.get("result", raw) if isinstance(raw, dict) else {}
-        if isinstance(data, dict) and data.get("error"):
-            lsp_available = False
-            meta["fallback_reason"] = (
-                f"lsp/workspace-symbols error: {data.get('error')}"
+    if try_lsp:
+        lsp_refs = []
+        lsp_available = True
+        meta["lsp_attempted"] = True
+        try:
+            raw = await make_request(
+                "GET", "/lsp/workspace-symbols", params={"query": query}
             )
-            locations: List[Dict[str, Any]] = []
-        else:
-            locations = data.get("symbols", []) or data.get("locations", []) or []
-    except Exception as exc:
-        logger.debug("LSP workspace-symbols failed for %r: %s", query, exc)
-        lsp_available = False
-        meta["fallback_reason"] = f"lsp/workspace-symbols raised: {exc}"
-        locations = []
+            data = raw.get("result", raw) if isinstance(raw, dict) else {}
+            if isinstance(data, dict) and data.get("error"):
+                lsp_available = False
+                meta["fallback_reason"] = (
+                    f"lsp/workspace-symbols error: {data.get('error')}"
+                )
+                locations = []
+            else:
+                locations = data.get("symbols", []) or data.get("locations", []) or []
+        except Exception as exc:
+            logger.debug("LSP workspace-symbols failed for %r: %s", query, exc)
+            lsp_available = False
+            meta["fallback_reason"] = f"lsp/workspace-symbols raised: {exc}"
+            locations = []
     meta["lsp_available"] = lsp_available
 
     if lsp_available and locations:
@@ -1835,10 +2673,25 @@ async def _run_references(
             if meta["lsp_available"]
             else "lsp not available in this backend"
         )
-    try:
-        sym_results, _ = await _run_symbol(make_request, query, None, max_results)
-    except Exception:
-        sym_results = []
+    sym_results: List[Dict[str, Any]] = []
+    if not try_lsp:
+        sym_results = _lookup_local_exact_symbols(
+            query=query,
+            file_pattern=None,
+            max_results=max_results,
+            fuzzy=False,
+        )
+        if sym_results:
+            meta["definition_provider"] = "local_exact_index"
+    if not sym_results:
+        try:
+            sym_results, _ = await _run_symbol(make_request, query, None, max_results)
+            if sym_results and "definition_provider" not in meta:
+                meta["definition_provider"] = "symbol_search"
+        except Exception:
+            sym_results = []
+    if sym_results:
+        _refresh_symbol_rows_from_local_outline(sym_results)
 
     # Keep ONLY exact-name matches. Fuzzy / contains / prefix matches are
     # the cause of the same-name confusion bug — a reference query for
@@ -1858,20 +2711,46 @@ async def _run_references(
     # ----- Step 3: text grep for callsites ---------------------------------
     grep_results: List[Dict[str, Any]] = []
     if _IDENT_RE.fullmatch(query):
+        scan_limit = max(max_results * 3, 25)
+        local_meta: Dict[str, Any] = {}
         try:
-            text_query = rf"\b{re.escape(query)}\b"
-            grep_params = {
-                "query": text_query,
-                "use_regex": True,
-                "case_sensitive": True,
-                "max_results": max(max_results * 4, 40),
-                "context_lines": 1,
-                "merge_adjacent": False,
-                "file_pattern": _DEFAULT_TEXT_GLOBS,
-            }
-            raw = await make_request("POST", "/search/text", params=grep_params)
-            gdata = raw.get("result", raw) if isinstance(raw, dict) else {}
-            grep_results = list(gdata.get("results", []) or [])
+            raw_grep_results, local_meta = _lookup_local_exact_text(
+                query=query,
+                file_pattern=_DEFAULT_REFERENCE_TEXT_GLOBS,
+                max_results=scan_limit,
+            )
+            if raw_grep_results:
+                meta["callsite_provider"] = "local_exact_index"
+                meta["reference_file_pattern"] = _DEFAULT_REFERENCE_TEXT_GLOBS
+            else:
+                text_meta: Dict[str, Any] = {}
+                raw_grep_results, _grep_total = await _run_text(
+                    make_request,
+                    query,
+                    _DEFAULT_REFERENCE_TEXT_GLOBS,
+                    scan_limit,
+                    flat=True,
+                    meta_out=text_meta,
+                )
+                meta["callsite_provider"] = (
+                    text_meta.get("provider")
+                    or local_meta.get("provider")
+                    or "text_grep"
+                )
+                meta["reference_file_pattern"] = _DEFAULT_REFERENCE_TEXT_GLOBS
+                if text_meta.get("fallback_reason"):
+                    meta["callsite_fallback_reason"] = text_meta["fallback_reason"]
+            boundary = re.compile(rf"\b{re.escape(query)}\b")
+            grep_results = [
+                row for row in raw_grep_results
+                if _is_reference_source_path(
+                    str(row.get("file_path") or row.get("file") or "")
+                )
+                and boundary.search(str(row.get("line_content") or ""))
+            ]
+            meta["callsite_results_considered"] = len(raw_grep_results)
+            meta["callsite_results_filtered"] = len(grep_results)
+            meta["callsite_excluded_prefixes"] = list(_REFERENCE_EXCLUDED_PREFIXES)
         except Exception as exc:
             logger.debug("Text-grep callsite scan failed for %r: %s", query, exc)
             grep_results = []
@@ -2182,10 +3061,11 @@ def _to_structured(r: Dict[str, Any]) -> Dict[str, Any]:
       source:      which backend produced this row
       confidence:  high / medium / low
     """
-    file = r.get("file_path", "")
+    file = r.get("file_path") or r.get("file") or ""
     line = (
         r.get("line_number")
         or r.get("line_start")
+        or r.get("line")
         or 0
     )
     end_line = r.get("line_end") or line
@@ -2214,6 +3094,141 @@ def _to_structured(r: Dict[str, Any]) -> Dict[str, Any]:
         "source": r.get("source") or "",
         "confidence": r.get("confidence") or "",
     }
+
+
+def _dedupe_structured_search_results(
+    rows: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Merge equivalent public search rows while preserving provider evidence."""
+    merged: List[Dict[str, Any]] = []
+    by_key: Dict[Tuple[str, int, str, str], Dict[str, Any]] = {}
+    confidence_rank = {"high": 3, "medium": 2, "low": 1, "": 0}
+
+    for row in rows:
+        file = str(row.get("file") or "")
+        line = int(row.get("line") or 0)
+        symbol = str(row.get("symbol") or "")
+        snippet = row.get("snippet") if isinstance(row.get("snippet"), dict) else {}
+        line_text = str(snippet.get("line") or "")
+        discriminator = symbol or line_text or str(row.get("signature") or "")
+        key = (file, line, symbol, discriminator)
+        source = str(row.get("source") or "").strip()
+        existing = by_key.get(key)
+        if existing is None:
+            providers = list(row.get("providers") or [])
+            if source and source not in providers:
+                providers.append(source)
+            if providers:
+                row["providers"] = providers
+            by_key[key] = row
+            merged.append(row)
+            continue
+
+        providers = list(existing.get("providers") or [])
+        if existing.get("source") and existing["source"] not in providers:
+            providers.append(str(existing["source"]))
+        if source and source not in providers:
+            providers.append(source)
+        if providers:
+            existing["providers"] = providers
+            if len(providers) > 1:
+                existing["source"] = "mixed"
+
+        existing_conf = str(existing.get("confidence") or "")
+        row_conf = str(row.get("confidence") or "")
+        if confidence_rank.get(row_conf, 0) > confidence_rank.get(existing_conf, 0):
+            existing["confidence"] = row_conf
+
+        why = list(existing.get("why_matched") or [])
+        for marker in list(row.get("why_matched") or []):
+            if marker not in why:
+                why.append(marker)
+        existing["why_matched"] = why
+
+        try:
+            existing["score"] = max(
+                float(existing.get("score") or 0),
+                float(row.get("score") or 0),
+            )
+        except (TypeError, ValueError):
+            pass
+
+    return merged
+
+
+def _dedupe_symbol_definition_rows(
+    rows: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Collapse duplicate definition rows before ambiguity decisions.
+
+    Exact indexes and backend symbol APIs can both return the same definition.
+    Treating those provider duplicates as distinct definitions makes
+    ``omni_context(symbol=...)`` report false ambiguity and fall into a slow
+    analysis path. Keep rows that differ by location/signature/container.
+    """
+    deduped: List[Dict[str, Any]] = []
+    seen: set[Tuple[str, str, int, int, str, str]] = set()
+    for row in rows:
+        file_path = str(row.get("file_path") or row.get("file") or "")
+        file_path = file_path.replace("\\", "/").lstrip("/")
+        name = str(row.get("symbol_name") or row.get("name") or "")
+        start = int(
+            row.get("line_start")
+            or row.get("line_number")
+            or row.get("line")
+            or 0
+        )
+        end = int(row.get("line_end") or row.get("end_line") or start)
+        signature = str(row.get("signature") or "")[:240]
+        container = str(row.get("container") or row.get("parent") or "")
+        key = (file_path, name, start, end, signature, container)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+    return deduped
+
+
+def _impact_test_candidates_from_paths(paths: List[str]) -> List[str]:
+    """Return deterministic, low-confidence test-path candidates."""
+    candidates: List[str] = []
+
+    def _add(path: str) -> None:
+        path = path.replace("\\", "/").lstrip("/")
+        if path and path not in candidates:
+            candidates.append(path)
+
+    for raw in paths:
+        path = (raw or "").replace("\\", "/").strip("/")
+        if not path:
+            continue
+        parts = path.split("/")
+        name = parts[-1]
+        stem = name.rsplit(".", 1)[0] if "." in name else name
+        ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+        directory = "/".join(parts[:-1])
+
+        if any(part in {"test", "tests"} for part in parts) or name.startswith("test_"):
+            _add(path)
+            continue
+
+        if ext in {"py", "pyi"}:
+            _add(f"tests/{directory}/test_{stem}.py" if directory else f"tests/test_{stem}.py")
+            _add(f"{directory}/tests/test_{stem}.py" if directory else f"tests/test_{stem}.py")
+        elif ext in {"java", "scala", "kt"}:
+            test_ext = ext
+            _add(
+                path.replace("/src/main/", "/src/test/")
+                .replace(f"/{name}", f"/{stem}Test.{test_ext}")
+            )
+            _add(
+                path.replace("/main/", "/test/")
+                .replace(f"/{name}", f"/{stem}Test.{test_ext}")
+            )
+        else:
+            _add(f"tests/{stem}_test.{ext}" if ext else f"tests/{stem}_test")
+
+    return candidates[:10]
 
 
 def _render_one_result(idx: int, r: Dict[str, Any], *, with_snippet: bool) -> List[str]:
@@ -2531,16 +3546,31 @@ def _build_read_payload(
         if "symbol_name" in data:
             payload["symbol"] = data.get("symbol_name")
 
-        if mode == "full":
+        if mode in {"full", "range", "symbol"}:
             cut, was_truncated, kept = _truncate_with_lines(raw_content, max_tokens)
             content = cut
             truncated = was_truncated
             payload["lines_returned"] = kept
             if was_truncated:
+                if mode == "full":
+                    follow_up = (
+                        "Use mode=range with start_line/end_line for a slice "
+                        "or mode=outline for a structural overview."
+                    )
+                elif mode == "symbol":
+                    sym_name = symbol or payload.get("symbol") or "<symbol>"
+                    follow_up = (
+                        f"Use mode=range around symbol '{sym_name}' if you need "
+                        "the remaining body."
+                    )
+                else:
+                    follow_up = (
+                        "Narrow start_line/end_line or increase max_tokens if "
+                        "you need the full range."
+                    )
                 truncate_note = (
                     f"Output truncated to ~{max_tokens} tokens. "
-                    f"Use mode=range with start_line/end_line for a slice "
-                    f"or mode=outline for a structural overview."
+                    f"{follow_up}"
                 )
         else:
             content = raw_content
@@ -2709,12 +3739,18 @@ def _next_actions_for_mode(
             "mode=outline for signatures + first docstring line",
         ]
     if mode == "symbol":
-        return [
+        actions = [
             f"omni_search(query='{sym}', mode='references') to find every callsite",
             f"omni_impact(symbol='{sym}') to check the blast radius",
             f"omni_diagnostics(file='{file}') before editing this symbol",
             "omni_patch action=preview before writing changes",
         ]
+        if truncated:
+            actions.insert(
+                0,
+                f"mode=range around symbol '{sym}' to fetch the truncated body",
+            )
+        return actions
     if mode == "imports":
         return [
             "mode=outline to see every defined symbol",
@@ -4563,6 +5599,37 @@ def _capability_ready(capabilities: Dict[str, Any], name: str) -> bool:
     return _capability_state(capabilities, name) == "ready"
 
 
+def _references_should_try_lsp(
+    capabilities: Dict[str, Any],
+    *,
+    freshness_meta: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Decide whether references mode should spend time probing LSP.
+
+    r16 required transparent LSP probe metadata, which remains useful in
+    local/unit contexts.  In live hybrid runs, the capability registry already
+    tells us when references are degraded to deterministic text/symbol
+    fallback.  In that state, waiting for a 30s LSP timeout is worse than
+    returning an honest degraded result immediately.
+    """
+    try:
+        import os as _os
+
+        mode = (
+            _os.environ.get("OMNICODE_REFERENCES_LSP_PROBE") or "auto"
+        ).strip().lower()
+        if mode in {"0", "false", "off", "no", "skip"}:
+            return False
+        if mode in {"1", "true", "on", "yes", "force"}:
+            return True
+    except Exception:
+        pass
+
+    if freshness_meta:
+        return _capability_state(capabilities, "search.references") == "ready"
+    return True
+
+
 def _runtime_capability_registry_snapshot(
     *,
     cloud_available: Optional[bool] = None,
@@ -4594,6 +5661,24 @@ def _runtime_capability_registry_snapshot(
         local_index_ready = False
         line_fts_available = False
 
+    toolchain_status: Dict[str, Any] = {}
+    try:
+        ws_root, _source, _warnings = _get_workspace_root()
+        from omnicode_core.capabilities.toolchains import (
+            detect_workspace_toolchains,
+        )
+        from omnicode_core.lsp.bridge import lsp_runtime_status
+
+        toolchain_status = detect_workspace_toolchains(
+            ws_root,
+            lsp_runtime=lsp_runtime_status(
+                str(ws_root),
+                languages={"java", "scala"},
+            ),
+        )
+    except Exception:
+        toolchain_status = {}
+
     try:
         from omnicode_core.embeddings.models import embedding_status
 
@@ -4614,6 +5699,7 @@ def _runtime_capability_registry_snapshot(
             embedding_available=embedding_available,
             semantic_index_ready=semantic_index_ready,
             graph_index_ready=graph_index_ready,
+            toolchain_status=toolchain_status,
         )
     except Exception as exc:
         return {"warning": f"{exc.__class__.__name__}: {exc}"}
@@ -4779,7 +5865,15 @@ def _attach_capability_preflight(
     )
     if not required and not fallbacks:
         return
-    capabilities = _runtime_capability_registry_snapshot()
+    capabilities = _runtime_capability_registry_snapshot(
+        cloud_available=(
+            bool(payload.get("cloud_available"))
+            if "cloud_available" in payload
+            else None
+        ),
+        semantic_index_ready=bool(payload.get("semantic_index_ready")),
+        graph_index_ready=bool(payload.get("graph_index_ready")),
+    )
     payload["capability_preflight"] = _capability_preflight_payload(
         capabilities,
         required=required,
@@ -4801,6 +5895,8 @@ def _finalize_discover_payload(
     semantic_ready = _capability_ready(capabilities, "search.semantic")
     graph_ready = _capability_ready(capabilities, "impact.graph")
     cloud_sync_ready = _capability_ready(capabilities, "sync.cloud")
+    jdtls_state = _capability_state(capabilities, "lsp.jdtls")
+    metals_state = _capability_state(capabilities, "lsp.metals")
 
     required_bootstrap = []
     if not local_index_ready:
@@ -4814,9 +5910,31 @@ def _finalize_discover_payload(
             },
             "reason": "local exact index is not ready",
         })
+    lsp_languages = [
+        language
+        for language, state in (
+            ("java", jdtls_state),
+            ("scala", metals_state),
+        )
+        if state == "partial"
+    ]
+    if lsp_languages:
+        required_bootstrap.append({
+            "tool": "omni_index",
+            "args": {
+                "action": "bootstrap",
+                "scope": "lsp",
+                "background": False,
+                "format": "json",
+            },
+            "languages": lsp_languages,
+            "reason": (
+                "language server toolchain is installed but not initialized"
+            ),
+        })
 
     recommended_tools = ["omni_status", "omni_read", "omni_patch"]
-    if not local_index_ready:
+    if not local_index_ready or lsp_languages:
         recommended_tools.append("omni_index")
     recommended_tools.append("omni_search")
     if graph_ready:
@@ -4876,6 +5994,84 @@ def _finalize_discover_payload(
                 "Scala diagnostics unsupported",
             ),
         })
+    for tool, capability, state in (
+        ("omni_diagnostics", "diagnostics.java.workspace", jdtls_state),
+        ("omni_diagnostics", "diagnostics.scala.workspace", metals_state),
+    ):
+        if state != "partial":
+            continue
+        degraded_tools.append({
+            "tool": tool,
+            "capability": capability,
+            "reason": capabilities.get(capability, {}).get(
+                "reason",
+                "workspace language server is installed but not initialized",
+            ),
+            "next_actions": capabilities.get(capability, {}).get(
+                "next_actions",
+                [],
+            ),
+        })
+    ranked_results = payload.get("results")
+    if isinstance(ranked_results, list) and ranked_results:
+        default_safe_by_tool = {
+            "omni_impact": graph_ready,
+            "omni_context": semantic_ready,
+        }
+        capability_by_tool = {
+            "omni_impact": "impact.graph",
+            "omni_context": "search.semantic",
+        }
+        for row in ranked_results:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or "")
+            safe_default = bool(default_safe_by_tool.get(name, True))
+            row["safe_to_use_by_default"] = safe_default
+            cap_name = capability_by_tool.get(name)
+            if cap_name:
+                cap_state = _capability_state(capabilities, cap_name)
+                row["capability"] = cap_name
+                row["capability_state"] = cap_state
+                if not safe_default:
+                    row["degraded"] = True
+                    row.setdefault("why_matched", [])
+                    if isinstance(row["why_matched"], list):
+                        row["why_matched"].append(f"capability:{cap_state}")
+        ranked_results.sort(
+            key=lambda row: (
+                not bool(
+                    row.get("safe_to_use_by_default", True)
+                ) if isinstance(row, dict) else True,
+                -int(row.get("score") or 0) if isinstance(row, dict) else 0,
+            )
+        )
+        payload["results"] = ranked_results
+
+    def _filter_pipeline_steps(steps: Any) -> List[str]:
+        if not isinstance(steps, list):
+            return []
+        filtered: List[str] = []
+        for step in steps:
+            text = str(step)
+            if "omni_impact" in text and not graph_ready:
+                continue
+            if "omni_context" in text and not semantic_ready:
+                continue
+            filtered.append(text)
+        return filtered
+
+    filtered_pipeline = _filter_pipeline_steps(payload.get("pipeline"))
+    if filtered_pipeline != payload.get("pipeline"):
+        payload["pipeline"] = filtered_pipeline
+    filtered_default_pipeline = _filter_pipeline_steps(payload.get("default_pipeline"))
+    if filtered_default_pipeline != payload.get("default_pipeline"):
+        payload["default_pipeline"] = filtered_default_pipeline
+    filtered_next_actions = _filter_pipeline_steps(payload.get("next_actions"))
+    if filtered_next_actions != payload.get("next_actions"):
+        payload["next_actions"] = filtered_next_actions
+    if not semantic_ready and payload.get("pipeline_kind") == "understanding":
+        payload["pipeline_kind"] = "deterministic_understanding"
     payload["degraded_tools"] = degraded_tools
     payload["disabled_tools"] = disabled_tools
     payload["compatibility_aliases"] = [
@@ -5078,6 +6274,299 @@ def register_high_level_tools(mcp, make_request):
         make_request: async function(method, endpoint, **kwargs) -> dict
     """
 
+    async def _collect_local_lsp_diagnostics_payload(
+        *,
+        file: str,
+        language: str,
+        severity: str,
+        sources: str,
+        content: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        import asyncio
+        import os as _os
+
+        ws_root, _source, _warnings = _get_workspace_root()
+        from omnicode_core.lsp.bridge import (
+            LSPTimeout,
+            get_lsp_bridge,
+        )
+
+        bridge = get_lsp_bridge(str(ws_root))
+        try:
+            timeout = float(
+                _os.environ.get("OMNICODE_LSP_DIAGNOSTICS_TIMEOUT", "20")
+            )
+        except (TypeError, ValueError):
+            timeout = 20.0
+        try:
+            result = await asyncio.wait_for(
+                bridge.get_diagnostics(
+                    file,
+                    content=content,
+                    restore_after=content is not None,
+                ),
+                timeout=max(1.0, timeout),
+            )
+        except (asyncio.TimeoutError, LSPTimeout):
+            result = {
+                "error": "lsp_diagnostics_timeout",
+                "error_code": "lsp_diagnostics_timeout",
+            }
+        except Exception as exc:  # noqa: BLE001
+            result = {
+                "error": f"{exc.__class__.__name__}: {exc}",
+                "error_code": "lsp_diagnostics_failed",
+            }
+
+        provider = "jdtls" if language == "java" else "metals"
+        workspace_capability = _workspace_diagnostics_capability(language)
+        if not isinstance(result, dict) or result.get("error"):
+            reason = str(
+                (result or {}).get("error_code")
+                or workspace_capability.get("reason")
+                or "lsp_diagnostics_unavailable"
+            )
+            return {
+                "ok": False,
+                "file": file,
+                "language": language,
+                "diagnostics_status": (
+                    "tool_unavailable"
+                    if reason.endswith("_unavailable")
+                    else "environment_incomplete"
+                ),
+                "workspace_diagnostics": workspace_capability,
+                "severity_filter": severity,
+                "sources": sorted({
+                    s.strip()
+                    for s in (sources or "").split(",")
+                    if s.strip()
+                }),
+                "tools_run": [],
+                "tools_skipped": [reason],
+                "diagnostics": [],
+                "counts": {
+                    "error": 0,
+                    "warning": 0,
+                    "info": 0,
+                    "total": 0,
+                },
+                "truncated": False,
+                "total_count": 0,
+                "source": provider,
+                "confidence": "low",
+                "warnings": [reason],
+                "error": _sanitize_error_text(
+                    str((result or {}).get("error") or reason)
+                ),
+            }
+
+        normalized: List[Dict[str, Any]] = []
+        for row in result.get("diagnostics") or []:
+            if not isinstance(row, dict):
+                continue
+            normalized.append({
+                "source": row.get("source") or provider,
+                "severity": str(row.get("severity") or "info").lower(),
+                "line": int(row.get("line") or 0) + 1,
+                "column": int(row.get("col") or row.get("column") or 0) + 1,
+                "rule": str(row.get("code") or ""),
+                "message": str(row.get("message") or ""),
+            })
+        normalized = _filter_diagnostics_by_severity(normalized, severity)
+        counts = _counts_for_diagnostics(normalized)
+        return {
+            "ok": True,
+            "file": file,
+            "language": language,
+            "diagnostics_status": (
+                "target_errors" if counts["error"] else "clean"
+            ),
+            "workspace_diagnostics": _workspace_diagnostics_capability(
+                language
+            ),
+            "severity_filter": severity,
+            "sources": sorted({
+                s.strip()
+                for s in (sources or "").split(",")
+                if s.strip()
+            }),
+            "tools_run": [provider],
+            "tools_skipped": [],
+            "diagnostics": normalized[:25],
+            "counts": counts,
+            "truncated": len(normalized) > 25,
+            "total_count": len(normalized),
+            "source": provider,
+            "confidence": "high",
+            "local_first": True,
+            "local_authority": True,
+            "warnings": [],
+            "overlay": bool(result.get("overlay")),
+            "restored": bool(result.get("restored")),
+        }
+
+    async def _collect_local_lsp_impact_evidence(
+        *,
+        symbol: str,
+        definition: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        import asyncio
+        import os as _os
+
+        file = str(
+            definition.get("file_path")
+            or definition.get("file")
+            or definition.get("path")
+            or ""
+        )
+        suffix = Path(file).suffix.lower()
+        if suffix not in {".java", ".scala", ".sc"}:
+            return {"available": False, "reason": "not_jvm_language"}
+        language = "java" if suffix == ".java" else "scala"
+        capability = _workspace_diagnostics_capability(language)
+        if not (
+            capability.get("toolchain_ready")
+            and capability.get("start_allowed")
+        ):
+            return {
+                "available": False,
+                "reason": capability.get("reason") or "lsp_unavailable",
+                "capability": capability,
+            }
+        try:
+            local_path = _resolve_workspace_path(file)
+        except ValueError as exc:
+            return {
+                "available": False,
+                "reason": _sanitize_error_text(str(exc)),
+                "capability": capability,
+            }
+        if not local_path.is_file():
+            return {
+                "available": False,
+                "reason": "local_definition_file_not_found",
+                "capability": capability,
+            }
+        try:
+            line_number = int(
+                definition.get("line_start")
+                or definition.get("line")
+                or definition.get("line_number")
+                or 1
+            )
+        except (TypeError, ValueError):
+            line_number = 1
+        try:
+            lines = local_path.read_text(
+                encoding="utf-8",
+                errors="replace",
+            ).splitlines()
+            source_line = (
+                lines[line_number - 1]
+                if 1 <= line_number <= len(lines)
+                else ""
+            )
+            column = max(source_line.find(symbol), 0)
+        except OSError:
+            column = 0
+
+        from omnicode_core.lsp.bridge import get_lsp_bridge
+
+        bridge = get_lsp_bridge(str(_get_workspace_root()[0]))
+        try:
+            timeout = float(
+                _os.environ.get("OMNICODE_LSP_IMPACT_TIMEOUT", "8")
+            )
+        except (TypeError, ValueError):
+            timeout = 8.0
+        try:
+            references_result, hierarchy_result = await asyncio.wait_for(
+                asyncio.gather(
+                    bridge.find_references(
+                        file,
+                        max(line_number - 1, 0),
+                        column,
+                        include_declaration=True,
+                    ),
+                    bridge.call_hierarchy(
+                        file,
+                        max(line_number - 1, 0),
+                        column,
+                    ),
+                ),
+                timeout=max(timeout, 1.0),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "available": False,
+                "reason": _sanitize_error_text(
+                    f"{exc.__class__.__name__}: {exc}"
+                ),
+                "capability": _workspace_diagnostics_capability(language),
+            }
+        provider = "jdtls" if language == "java" else "metals"
+        if not isinstance(references_result, dict):
+            references_result = {}
+        if not isinstance(hierarchy_result, dict):
+            hierarchy_result = {}
+        if references_result.get("error") and hierarchy_result.get("error"):
+            return {
+                "available": False,
+                "reason": str(
+                    references_result.get("error_code")
+                    or hierarchy_result.get("error_code")
+                    or "lsp_impact_unavailable"
+                ),
+                "capability": _workspace_diagnostics_capability(language),
+            }
+        references = [
+            {
+                "file": str(row.get("file") or ""),
+                "line": int(row.get("line") or 0) + 1,
+                "column": int(row.get("col") or 0) + 1,
+                "source": provider,
+                "confidence": "high",
+            }
+            for row in (references_result.get("locations") or [])
+            if isinstance(row, dict) and row.get("file")
+        ]
+        incoming = [
+            row for row in (hierarchy_result.get("incoming") or [])
+            if isinstance(row, dict) and row.get("name")
+        ]
+        outgoing = [
+            row for row in (hierarchy_result.get("outgoing") or [])
+            if isinstance(row, dict) and row.get("name")
+        ]
+        try:
+            workspace_id = (
+                _os.environ.get("OMNICODE_WORKSPACE_ID")
+                or _get_workspace_root()[0].name
+                or "workspace"
+            )
+            from omnicode_core.workspace.graph_index import WorkspaceGraphIndex
+
+            WorkspaceGraphIndex().upsert_lsp_references(
+                workspace_id=workspace_id,
+                symbol=symbol,
+                references=references,
+                revision=int(definition.get("revision") or 0),
+                language=language,
+                provider=provider,
+            )
+        except Exception:
+            pass
+        return {
+            "available": True,
+            "provider": provider,
+            "language": language,
+            "references": references,
+            "incoming": incoming,
+            "outgoing": outgoing,
+            "capability": _workspace_diagnostics_capability(language),
+        }
+
     async def _collect_local_diagnostics_payload(
         file: str,
         severity: str = "all",
@@ -5105,6 +6594,35 @@ def register_high_level_tools(mcp, make_request):
             return None
 
         wanted = {s.strip() for s in (sources or "").split(",") if s.strip()}
+        language = local_path.suffix.lower()
+        if "lsp" in wanted and language in {".java", ".scala", ".sc"}:
+            lsp_payload = await _collect_local_lsp_diagnostics_payload(
+                file=file,
+                language="java" if language == ".java" else "scala",
+                severity=severity,
+                sources=sources,
+            )
+            if lsp_payload.get("ok"):
+                return lsp_payload
+            if language != ".java":
+                lsp_payload["ok"] = True
+                return lsp_payload
+
+        if local_path.suffix.lower() == ".java":
+            fallback = _java_diagnostics_payload(
+                file=file,
+                content=local_path.read_text(encoding="utf-8", errors="replace"),
+                severity=severity,
+                sources=sources,
+                local_first=True,
+            )
+            if "lsp" in wanted:
+                fallback["lsp_fallback"] = lsp_payload
+                fallback.setdefault("warnings", []).extend(
+                    list(lsp_payload.get("warnings") or [])
+                )
+            return fallback
+
         diagnostics: List[Dict[str, Any]] = []
         tools_run: List[str] = []
         tools_skipped: List[str] = []
@@ -5131,6 +6649,7 @@ def register_high_level_tools(mcp, make_request):
                         "column": getattr(issue, "column", None),
                         "rule": getattr(issue, "code", None) or "",
                         "message": getattr(issue, "message", "") or "",
+                        "_file": getattr(issue, "file_path", None),
                     })
                 if not tools_run and not tools_skipped:
                     tools_run.append("guard")
@@ -5159,21 +6678,7 @@ def register_high_level_tools(mcp, make_request):
             d.get("line") or 0,
         ))
 
-        counts = {
-            "error": sum(
-                1 for d in diagnostics
-                if (d.get("severity") or "").lower() == "error"
-            ),
-            "warning": sum(
-                1 for d in diagnostics
-                if (d.get("severity") or "").lower() in ("warning", "warn")
-            ),
-            "info": sum(
-                1 for d in diagnostics
-                if (d.get("severity") or "").lower() in ("info", "hint")
-            ),
-            "total": len(diagnostics),
-        }
+        scoped = _diagnostic_scope_fields(diagnostics, target_file=file)
 
         return {
             "ok": True,
@@ -5182,13 +6687,10 @@ def register_high_level_tools(mcp, make_request):
             "sources": sorted(wanted),
             "tools_run": tools_run,
             "tools_skipped": tools_skipped,
-            "diagnostics": diagnostics[:25],
-            "counts": counts,
-            "truncated": len(diagnostics) > 25,
-            "total_count": len(diagnostics),
             "source": "local_guard",
             "local_first": True,
             "local_authority": True,
+            **scoped,
         }
 
     def _current_executor_mode() -> str:
@@ -5249,6 +6751,29 @@ def register_high_level_tools(mcp, make_request):
                 "file": file,
                 "error": f"Unknown sources '{sources}'. Use: guard, lsp",
             }
+
+        try:
+            local_path = _resolve_workspace_path(file)
+            if (
+                local_path.is_file()
+                and local_path.suffix.lower() in {".java", ".scala", ".sc"}
+            ):
+                local_payload = await _collect_local_diagnostics_payload(
+                    file=file,
+                    severity=severity,
+                    sources=sources,
+                )
+                if local_payload is not None:
+                    return local_payload
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "file": file,
+                "error": str(exc),
+                "next_actions": _path_guard_next_actions(file),
+            }
+        except Exception:
+            pass
 
         try:
             if _current_executor_mode() == "hybrid":
@@ -5314,6 +6839,7 @@ def register_high_level_tools(mcp, make_request):
                         "column": it.get("column"),
                         "rule": it.get("code") or "",
                         "message": it.get("message") or "",
+                        "_file": it.get("file_path") or it.get("file"),
                     })
                 tools_run.append(label)
                 if not issues and (data.get("errors") or "").strip():
@@ -5369,24 +6895,7 @@ def register_high_level_tools(mcp, make_request):
             i.get("line") or 0,
         ))
 
-        counts = {
-            "error": sum(
-                1 for i in all_issues
-                if (i.get("severity") or "").lower() == "error"
-            ),
-            "warning": sum(
-                1 for i in all_issues
-                if (i.get("severity") or "").lower() in ("warning", "warn")
-            ),
-            "info": sum(
-                1 for i in all_issues
-                if (i.get("severity") or "").lower() == "info"
-            ),
-            "total": len(all_issues),
-        }
-
-        shown = all_issues[:25]
-        truncated = len(all_issues) > 25
+        scoped = _diagnostic_scope_fields(all_issues, target_file=file)
 
         return {
             "ok": True,
@@ -5399,10 +6908,7 @@ def register_high_level_tools(mcp, make_request):
             "source": list(wanted),
             "tools_run": tools_run,
             "tools_skipped": tools_skipped,
-            "diagnostics": shown,
-            "counts": counts,
-            "truncated": truncated,
-            "total_count": len(all_issues),
+            **scoped,
         }
 
     async def _get_backend_file_markers(file: str) -> Dict[str, Any]:
@@ -5547,6 +7053,100 @@ def register_high_level_tools(mcp, make_request):
           ok, validation_passed, message, checks, counts,
           tools_run, tools_skipped, source.
         """
+        try:
+            from omnicode_core.capabilities.languages import language_for_path
+
+            language = language_for_path(target_file)
+        except Exception:
+            language = "unknown"
+        if language == "java":
+            java_validation = _java_validation_payload(target_file, target_content)
+            if java_validation is not None:
+                return java_validation
+
+        if language == "scala":
+            workspace_capability = _workspace_diagnostics_capability(language)
+            can_attempt_lsp = bool(
+                workspace_capability.get("toolchain_ready")
+                and workspace_capability.get("start_allowed")
+            )
+            if can_attempt_lsp:
+                lsp_payload = await _collect_local_lsp_diagnostics_payload(
+                    file=target_file,
+                    language=language,
+                    severity="all",
+                    sources="lsp",
+                    content=target_content,
+                )
+                if lsp_payload.get("ok"):
+                    counts = dict(lsp_payload.get("counts") or {})
+                    passed = int(counts.get("error") or 0) == 0
+                    provider = "jdtls" if language == "java" else "metals"
+                    return {
+                        "ok": passed,
+                        "validation_passed": passed,
+                        "validation": {
+                            "status": "passed" if passed else "failed",
+                            "passed": passed,
+                            "reason": (
+                                f"{language}_workspace_lsp_passed"
+                                if passed
+                                else f"{language}_workspace_lsp_errors"
+                            ),
+                            "language": language,
+                        },
+                        "message": (
+                            f"{language.title()} workspace LSP validation "
+                            f"{'passed' if passed else 'failed'}: "
+                            f"{int(counts.get('error') or 0)} error(s), "
+                            f"{int(counts.get('warning') or 0)} warning(s)"
+                        ),
+                        "checks": list(lsp_payload.get("diagnostics") or []),
+                        "counts": counts,
+                        "tools_run": [provider],
+                        "tools_skipped": [],
+                        "warnings": list(lsp_payload.get("warnings") or []),
+                        "source": provider,
+                        "workspace_diagnostics": lsp_payload.get(
+                            "workspace_diagnostics"
+                        ),
+                        "overlay": bool(lsp_payload.get("overlay")),
+                        "restored": bool(lsp_payload.get("restored")),
+                    }
+                if language == "scala":
+                    reason = str(
+                        (lsp_payload.get("tools_skipped") or [
+                            "scala_workspace_diagnostics_unavailable"
+                        ])[0]
+                    )
+                    return {
+                        "ok": True,
+                        "validation_passed": None,
+                        "validation": {
+                            "status": "not_performed",
+                            "passed": None,
+                            "reason": reason,
+                            "language": "scala",
+                        },
+                        "message": (
+                            "Scala validation was not performed because "
+                            f"Metals workspace diagnostics failed: {reason}"
+                        ),
+                        "checks": [],
+                        "counts": {
+                            "error": 0,
+                            "warning": 0,
+                            "info": 0,
+                            "total": 0,
+                        },
+                        "tools_run": [],
+                        "tools_skipped": [reason],
+                        "warnings": [reason],
+                        "source": "metals",
+                        "workspace_diagnostics": lsp_payload.get(
+                            "workspace_diagnostics"
+                        ),
+                    }
         try:
             raw = await make_request("POST", "/patch/validate", json={
                 "file_path": target_file, "content": target_content,
@@ -5733,6 +7333,18 @@ def register_high_level_tools(mcp, make_request):
             "freshness_mode": freshness_mode,
             "stale": visible_stale,
             "semantic_stale": semantic_stale,
+            "semantic_index_ready": bool(state.get("semantic_index_ready", False)),
+            "semantic_index_model": state.get("semantic_index_model"),
+            "semantic_index_dimension": state.get("semantic_index_dimension"),
+            "semantic_index_invalid": bool(
+                state.get("semantic_index_invalid", False)
+            ),
+            "semantic_index_stale_reason": state.get(
+                "semantic_index_stale_reason"
+            ),
+            "semantic_index_stale": bool(state.get("semantic_index_stale", False)),
+            "semantic_vector_count": int(state.get("semantic_vector_count") or 0),
+            "graph_index_ready": bool(state.get("graph_index_ready", False)),
             "exact_fresh": exact_fresh,
             "exact_stale": state.get("exact_stale"),
             "cloud_available": state.get("cloud_available"),
@@ -5797,6 +7409,45 @@ def register_high_level_tools(mcp, make_request):
             return _backend_error_message(nested)
         return None
 
+    def _semantic_runtime_fields(raw_semantic: Any) -> Dict[str, Any]:
+        """Normalize /search/stats semantic metadata for readiness decisions."""
+        if not isinstance(raw_semantic, dict):
+            return {}
+        fields: Dict[str, Any] = {}
+        for key in (
+            "semantic_index_ready",
+            "semantic_index_model",
+            "semantic_index_dimension",
+            "semantic_index_stale_reason",
+            "semantic_index_invalid",
+            "semantic_index_stale",
+            "chunker_version",
+            "vector_count",
+            "faiss_dimension",
+            "error_code",
+            "error",
+        ):
+            if key in raw_semantic:
+                fields[key] = raw_semantic[key]
+
+        reason = (
+            fields.get("semantic_index_stale_reason")
+            or fields.get("error_code")
+            or fields.get("error")
+        )
+        invalid = bool(fields.get("semantic_index_invalid", False))
+        stale = bool(fields.get("semantic_index_stale", False))
+        ready = bool(fields.get("semantic_index_ready", False))
+        if invalid or stale or reason:
+            ready = False
+        if not ready and not reason:
+            reason = "semantic_runtime_unavailable"
+        fields["semantic_index_ready"] = ready
+        fields["semantic_index_stale_reason"] = reason
+        fields["semantic_index_invalid"] = invalid
+        fields["semantic_index_stale"] = stale
+        return fields
+
     async def _analysis_freshness_state() -> Dict[str, Any]:
         import os as _os
 
@@ -5829,6 +7480,9 @@ def register_high_level_tools(mcp, make_request):
         accepted_revision = 0
         indexed_revision = 0
         exact_indexed_revision = 0
+        semantic_index_ready = False
+        graph_index_ready = False
+        semantic_runtime_status: Dict[str, Any] = {}
         pending_count = 0
         manifest_present = False
         manifest_warning: Optional[str] = None
@@ -5890,6 +7544,8 @@ def register_high_level_tools(mcp, make_request):
                     exact_indexed_revision,
                     int(data.get("exact_indexed_revision") or 0),
                 )
+                semantic_index_ready = bool(data.get("semantic_index_ready"))
+                graph_index_ready = bool(data.get("graph_index_ready"))
             else:
                 status_warning = str(
                     (data or {}).get("error")
@@ -5898,6 +7554,43 @@ def register_high_level_tools(mcp, make_request):
                 )
         except Exception as exc:
             status_warning = f"{exc.__class__.__name__}: {exc}"
+
+        if not status_warning:
+            try:
+                raw_search_stats = await make_request("GET", "/search/stats")
+                search_stats = (
+                    raw_search_stats.get("result", raw_search_stats)
+                    if isinstance(raw_search_stats, dict)
+                    else {}
+                )
+                raw_semantic = (
+                    search_stats.get("semantic_index")
+                    if isinstance(search_stats, dict)
+                    else None
+                )
+                semantic_runtime_status = _semantic_runtime_fields(raw_semantic)
+                if semantic_runtime_status:
+                    semantic_index_ready = (
+                        semantic_index_ready
+                        and bool(semantic_runtime_status.get("semantic_index_ready"))
+                    )
+                else:
+                    if semantic_index_ready:
+                        semantic_runtime_status = {
+                            "semantic_index_ready": False,
+                            "semantic_index_stale_reason": (
+                                "semantic_runtime_unreported"
+                            ),
+                        }
+                    semantic_index_ready = False
+            except Exception as exc:
+                semantic_index_ready = False
+                semantic_runtime_status = {
+                    "semantic_index_ready": False,
+                    "semantic_index_stale_reason": (
+                        f"semantic_status_unavailable:{exc.__class__.__name__}"
+                    ),
+                }
 
         if status_warning:
             required_revision = (
@@ -5917,6 +7610,9 @@ def register_high_level_tools(mcp, make_request):
                 "accepted_revision": accepted_revision,
                 "indexed_revision": indexed_revision,
                 "exact_indexed_revision": exact_indexed_revision,
+                "semantic_index_ready": False,
+                "semantic_index_stale_reason": "cloud_unavailable",
+                "graph_index_ready": False,
                 "required_revision": required_revision,
                 "manifest_present": manifest_present,
                 "manifest_warning": manifest_warning,
@@ -5937,6 +7633,26 @@ def register_high_level_tools(mcp, make_request):
                 "accepted_revision": accepted_revision,
                 "indexed_revision": indexed_revision,
                 "exact_indexed_revision": exact_indexed_revision,
+                "semantic_index_ready": semantic_index_ready,
+                "semantic_index_model": semantic_runtime_status.get(
+                    "semantic_index_model"
+                ),
+                "semantic_index_dimension": semantic_runtime_status.get(
+                    "semantic_index_dimension"
+                ),
+                "semantic_index_invalid": bool(
+                    semantic_runtime_status.get("semantic_index_invalid", False)
+                ),
+                "semantic_index_stale": bool(
+                    semantic_runtime_status.get("semantic_index_stale", False)
+                ),
+                "semantic_index_stale_reason": semantic_runtime_status.get(
+                    "semantic_index_stale_reason"
+                ),
+                "semantic_vector_count": int(
+                    semantic_runtime_status.get("vector_count") or 0
+                ),
+                "graph_index_ready": graph_index_ready,
                 "required_revision": None,
                 "manifest_present": manifest_present,
                 "manifest_warning": manifest_warning,
@@ -5974,6 +7690,26 @@ def register_high_level_tools(mcp, make_request):
             "accepted_revision": accepted_revision,
             "indexed_revision": indexed_revision,
             "exact_indexed_revision": exact_indexed_revision,
+            "semantic_index_ready": semantic_index_ready,
+            "semantic_index_model": semantic_runtime_status.get(
+                "semantic_index_model"
+            ),
+            "semantic_index_dimension": semantic_runtime_status.get(
+                "semantic_index_dimension"
+            ),
+            "semantic_index_invalid": bool(
+                semantic_runtime_status.get("semantic_index_invalid", False)
+            ),
+            "semantic_index_stale": bool(
+                semantic_runtime_status.get("semantic_index_stale", False)
+            ),
+            "semantic_index_stale_reason": semantic_runtime_status.get(
+                "semantic_index_stale_reason"
+            ),
+            "semantic_vector_count": int(
+                semantic_runtime_status.get("vector_count") or 0
+            ),
+            "graph_index_ready": graph_index_ready,
             "required_revision": required_revision,
             "pending_count": pending_count,
             "manifest_present": manifest_present,
@@ -6174,9 +7910,22 @@ def register_high_level_tools(mcp, make_request):
                 resolved_mode=resolved_mode,
                 freshness_required=bool(freshness_meta),
             )
-            runtime_capabilities = _runtime_capability_registry_snapshot()
+            runtime_capabilities = _runtime_capability_registry_snapshot(
+                cloud_available=(
+                    bool(freshness_meta.get("cloud_available"))
+                    if "cloud_available" in freshness_meta
+                    else None
+                ),
+                semantic_index_ready=bool(
+                    freshness_meta.get("semantic_index_ready")
+                ),
+                graph_index_ready=bool(freshness_meta.get("graph_index_ready")),
+            )
             preflight_fallbacks = list(search_plan.fallback_capabilities)
-            if resolved_mode == "semantic":
+            if resolved_mode == "semantic" and (mode or "").strip().lower() == "semantic":
+                # Explicit semantic search is an exact capability request: if
+                # vectors are unavailable, report that directly. Auto/hybrid
+                # can still use deterministic fallbacks.
                 preflight_fallbacks = []
             capability_preflight = _capability_preflight_payload(
                 runtime_capabilities,
@@ -6186,11 +7935,9 @@ def register_high_level_tools(mcp, make_request):
             if resolved_mode == "semantic":
                 import os as _os
 
-                backend_url = (
-                    _os.environ.get("OMNICODE_REMOTE")
-                    or _os.environ.get("OMNICODE_FASTAPI_BASE_URL")
-                    or ""
-                )
+                executor_mode = (
+                    _os.environ.get("OMNICODE_EXECUTOR_MODE") or ""
+                ).strip().lower()
                 semantic_state = str(
                     (
                         capability_preflight.get("states", {})
@@ -6199,10 +7946,52 @@ def register_high_level_tools(mcp, make_request):
                     )
                     or "unavailable"
                 )
-                if not backend_url and not freshness_meta and semantic_state in {
-                    "unavailable",
-                    "unsupported",
-                }:
+                semantic_execution = capability_preflight.get(
+                    "execution_policy", {}
+                )
+                semantic_unavailable_reason = str(
+                    freshness_meta.get("semantic_index_stale_reason") or ""
+                )
+                semantic_sync_status_reported = any(
+                    key in freshness_meta
+                    for key in (
+                        "semantic_query_safe",
+                        "strict_semantic_safe",
+                        "semantic_index_coverage",
+                    )
+                )
+                semantic_unreported = (
+                    semantic_unavailable_reason
+                    in {"", "semantic_runtime_unreported"}
+                    or semantic_unavailable_reason.startswith(
+                        "semantic_status_unavailable:"
+                    )
+                )
+                semantic_explicitly_unavailable = (
+                    (
+                        not freshness_meta
+                        and executor_mode != "hybrid"
+                        and semantic_state in {"unsupported", "unavailable"}
+                    )
+                    or (
+                        semantic_sync_status_reported
+                        and freshness_meta.get("semantic_index_ready") is False
+                        and not semantic_unreported
+                    )
+                    or bool(freshness_meta.get("semantic_index_invalid"))
+                    or (
+                        bool(semantic_unavailable_reason)
+                        and not semantic_unreported
+                    )
+                )
+                semantic_blocked = (
+                    semantic_state in {"unsupported", "unavailable"}
+                    and semantic_sync_status_reported
+                    or semantic_execution.get("can_execute") is False
+                    and semantic_sync_status_reported
+                    or semantic_explicitly_unavailable
+                )
+                if resolved_mode == "semantic" and semantic_blocked:
                     payload = {
                         "ok": False,
                         "query": query,
@@ -6246,6 +8035,7 @@ def register_high_level_tools(mcp, make_request):
             # below can reference it without a NameError.
             _references_meta: Dict[str, Any] = {}
             _text_meta: Dict[str, Any] = {}
+            _semantic_meta: Dict[str, Any] = {}
 
             if resolved_mode == "hybrid":
                 results, total = await _run_hybrid(
@@ -6253,7 +8043,12 @@ def register_high_level_tools(mcp, make_request):
                 )
             elif resolved_mode == "semantic":
                 results, total = await _run_semantic(
-                    analysis_request, effective_query, file_pattern, max_results, rerank
+                    analysis_request,
+                    effective_query,
+                    file_pattern,
+                    max_results,
+                    rerank,
+                    meta_out=_semantic_meta,
                 )
             elif resolved_mode == "symbol":
                 results, total = await _run_symbol(
@@ -6267,7 +8062,13 @@ def register_high_level_tools(mcp, make_request):
                 )
             elif resolved_mode == "references":
                 results, total, _ref_meta = await _run_references(
-                    analysis_request, effective_query, max_results
+                    analysis_request,
+                    effective_query,
+                    max_results,
+                    try_lsp=_references_should_try_lsp(
+                        runtime_capabilities,
+                        freshness_meta=freshness_meta,
+                    ),
                 )
                 # Stash for the JSON envelope below.
                 _references_meta = _ref_meta
@@ -6298,6 +8099,7 @@ def register_high_level_tools(mcp, make_request):
                             )
                             out["source"] = out.get("source") or src
                             out["confidence"] = out.get("confidence") or conf
+                structured = _dedupe_structured_search_results(structured)
                 payload = {
                     "ok": True,
                     "query": query,
@@ -6307,12 +8109,14 @@ def register_high_level_tools(mcp, make_request):
                         providers=(
                             _text_meta.get("provider_chain")
                             if resolved_mode == "text"
+                            else _semantic_meta.get("provider_chain")
+                            if resolved_mode == "semantic"
                             else None
                         )
                     ),
                     "capability_preflight": capability_preflight,
                     "total": total,
-                    "count": min(len(results), max_results),
+                    "count": len(structured),
                     "results": structured,
                 }
                 if freshness_meta:
@@ -6348,10 +8152,38 @@ def register_high_level_tools(mcp, make_request):
                     if _text_meta.get("empty_reason"):
                         payload["empty_reason"] = _text_meta["empty_reason"]
 
+                if resolved_mode == "semantic" and _semantic_meta:
+                    for _key in (
+                        "provider",
+                        "provider_chain",
+                        "capabilities_used",
+                        "capabilities_missing",
+                        "fallback_used",
+                        "fallback_reason",
+                        "warnings",
+                        "empty_reason",
+                        "snapshot_store_used",
+                        "snapshot_exact_boost",
+                        "snapshot_lexical_boost",
+                        "semantic_exact_only_fast_path",
+                        "debug_timing",
+                    ):
+                        if _key in _semantic_meta:
+                            payload[_key] = _semantic_meta[_key]
+
                 # For references mode, also emit the LSP-shaped contract:
                 # ``definition`` + ``references[]`` + ``source`` +
                 # ``confidence`` + ``ambiguous`` flag. Audit minimum spec.
                 if resolved_mode == "references":
+                    before_filter = len(structured)
+                    structured = [
+                        r for r in structured
+                        if r.get("kind") == "definition"
+                        or _is_reference_source_path(str(r.get("file") or ""))
+                    ]
+                    if len(structured) != before_filter:
+                        payload["results"] = structured
+                        payload["count"] = len(structured)
                     defs = [r for r in structured if r.get("kind") == "definition"]
                     usages = [r for r in structured if r.get("kind") != "definition"]
                     sources = {r.get("source") for r in structured if r.get("source")}
@@ -6395,6 +8227,17 @@ def register_high_level_tools(mcp, make_request):
                             payload["fallback_reason"] = (
                                 _references_meta["fallback_reason"]
                             )
+                        for _key in (
+                            "definition_provider",
+                            "callsite_provider",
+                            "callsite_fallback_reason",
+                            "reference_file_pattern",
+                            "callsite_results_considered",
+                            "callsite_results_filtered",
+                            "callsite_excluded_prefixes",
+                        ):
+                            if _key in _references_meta:
+                                payload[_key] = _references_meta[_key]
                     if not structured:
                         payload["note"] = (
                             "No exact-match definition found. "
@@ -7102,6 +8945,87 @@ def register_high_level_tools(mcp, make_request):
             impact: Dict[str, Any] = _safe(impact_raw)
             tests: Dict[str, Any] = _safe(tests_raw)
 
+            lsp_impact_evidence: Dict[str, Any] = {}
+            definition_for_lsp: Optional[Dict[str, Any]] = None
+            if isinstance(impact.get("snapshot_symbol"), dict):
+                definition_for_lsp = dict(impact["snapshot_symbol"])
+            elif isinstance(impact.get("definitions"), list):
+                definition_for_lsp = next(
+                    (
+                        dict(row)
+                        for row in impact["definitions"]
+                        if isinstance(row, dict)
+                    ),
+                    None,
+                )
+            if definition_for_lsp is not None:
+                lsp_impact_evidence = (
+                    await _collect_local_lsp_impact_evidence(
+                        symbol=symbol,
+                        definition=definition_for_lsp,
+                    )
+                )
+                if lsp_impact_evidence.get("available"):
+                    provider = str(
+                        lsp_impact_evidence.get("provider") or "lsp"
+                    )
+                    incoming_names = [
+                        str(row.get("name"))
+                        for row in lsp_impact_evidence.get("incoming") or []
+                        if isinstance(row, dict) and row.get("name")
+                    ]
+                    outgoing_names = [
+                        str(row.get("name"))
+                        for row in lsp_impact_evidence.get("outgoing") or []
+                        if isinstance(row, dict) and row.get("name")
+                    ]
+                    impact["dependent_symbols"] = sorted(set(
+                        list(impact.get("dependent_symbols") or [])
+                        + incoming_names
+                    ))
+                    impact["affected_symbols"] = sorted(set(
+                        list(impact.get("affected_symbols") or [])
+                        + outgoing_names
+                    ))
+                    lsp_refs = list(
+                        lsp_impact_evidence.get("references") or []
+                    )
+                    impact["references"] = list(
+                        impact.get("references") or []
+                    ) + lsp_refs
+                    files = set(impact.get("files_involved") or [])
+                    files.update(
+                        str(row.get("file"))
+                        for row in lsp_refs
+                        if isinstance(row, dict) and row.get("file")
+                    )
+                    impact["files_involved"] = sorted(files)
+                    impact["files_count"] = len(files)
+                    impact["symbol_found"] = True
+                    impact["found"] = True
+                    providers = set(
+                        impact.get("evidence_providers") or []
+                    )
+                    providers.add(provider)
+                    impact["evidence_providers"] = sorted(providers)
+                    if incoming_names or outgoing_names:
+                        impact["graph_available"] = True
+                        impact["graph_status"] = "ready"
+                        impact["impact_status"] = "available"
+                    else:
+                        impact["graph_status"] = "partial"
+                        impact["impact_status"] = "degraded"
+                    lsp_test_candidates = _impact_test_candidates_from_paths(
+                        [
+                            str(row.get("file") or "")
+                            for row in lsp_refs
+                        ]
+                    )
+                    impact["test_candidates"] = sorted(set(
+                        list(impact.get("test_candidates") or [])
+                        + lsp_test_candidates
+                    ))
+
             risk_level = risk.get("risk", "unknown")
             risk_reasons = risk.get("reasons", []) or []
 
@@ -7137,33 +9061,124 @@ def register_high_level_tools(mcp, make_request):
             confidence_caveats: List[str] = []
             symbol_resolution = "found"
             symbol_fallback_hit: Optional[Dict[str, Any]] = None
-            if files_count == 0 and not callers and not callees:
+            graph_fallback = (
+                impact.get("fallback")
+                if isinstance(impact.get("fallback"), dict)
+                else {}
+            )
+            fallback_references: List[Dict[str, Any]] = list(
+                graph_fallback.get("references")
+                or impact.get("references")
+                or []
+            )
+            fallback_test_candidates: List[str] = list(
+                graph_fallback.get("test_candidates")
+                or impact.get("test_candidates")
+                or []
+            )
+            graph_degraded = bool(
+                impact.get("graph_available") is False
+                or str(impact.get("graph_status") or "").lower()
+                in {"partial", "unavailable", "unsupported"}
+                or str(impact.get("impact_status") or "").lower()
+                in {"unknown", "degraded"}
+            )
+            impact_symbol_found = bool(
+                impact.get("symbol_found") or impact.get("found")
+            )
+            if graph_degraded or (
+                files_count == 0 and not callers and not callees
+            ):
                 confidence = "low"
                 risk_level = "unknown"
                 risk_reasons = []
                 symbol_hits: List[Dict[str, Any]] = []
-                try:
-                    symbol_hits, _symbol_total = await _run_symbol(
-                        analysis_request, symbol, None, 3
+                if impact_symbol_found:
+                    raw_symbol = (
+                        impact.get("snapshot_symbol")
+                        if isinstance(impact.get("snapshot_symbol"), dict)
+                        else {}
                     )
-                except Exception as exc:
-                    confidence_caveats.append(
-                        "symbol fallback lookup failed: "
-                        + _sanitize_error_text(str(exc))
-                    )
-                for hit in symbol_hits:
-                    hit_name = (
-                        hit.get("symbol_name")
-                        or hit.get("name")
-                        or hit.get("symbol")
-                        or ""
-                    )
-                    if hit_name == symbol:
-                        symbol_fallback_hit = hit
-                        break
+                    symbol_fallback_hit = dict(raw_symbol)
+                    symbol_fallback_hit.setdefault("symbol_name", symbol)
+                else:
+                    try:
+                        symbol_hits, _symbol_total = await _run_symbol(
+                            analysis_request, symbol, None, 3
+                        )
+                    except Exception as exc:
+                        confidence_caveats.append(
+                            "symbol fallback lookup failed: "
+                            + _sanitize_error_text(str(exc))
+                        )
+                    for hit in symbol_hits:
+                        hit_name = (
+                            hit.get("symbol_name")
+                            or hit.get("name")
+                            or hit.get("symbol")
+                            or ""
+                        )
+                        if hit_name == symbol:
+                            symbol_fallback_hit = hit
+                            break
                 if symbol_fallback_hit is not None:
                     symbol_resolution = "found"
+                    if not fallback_references:
+                        try:
+                            reference_rows, _reference_total, _reference_meta = (
+                                await _run_references(
+                                    analysis_request,
+                                    symbol,
+                                    12,
+                                    try_lsp=_references_should_try_lsp(
+                                        _runtime_capability_registry_snapshot(
+                                            cloud_available=(
+                                                bool(freshness_meta.get("cloud_available"))
+                                                if "cloud_available" in freshness_meta
+                                                else None
+                                            ),
+                                            semantic_index_ready=bool(
+                                                freshness_meta.get(
+                                                    "semantic_index_ready"
+                                                )
+                                            ),
+                                            graph_index_ready=bool(
+                                                freshness_meta.get("graph_index_ready")
+                                            ),
+                                        ),
+                                        freshness_meta=freshness_meta,
+                                    ),
+                                )
+                            )
+                            structured_refs = [
+                                _to_structured(row) for row in reference_rows[:12]
+                            ]
+                            fallback_references = _dedupe_structured_search_results(
+                                structured_refs
+                            )[:8]
+                        except Exception as exc:
+                            confidence_caveats.append(
+                                "reference fallback lookup failed: "
+                                + _sanitize_error_text(str(exc))
+                            )
+                    candidate_paths: List[str] = [
+                        str(
+                            symbol_fallback_hit.get("file_path")
+                            or symbol_fallback_hit.get("file")
+                            or ""
+                        )
+                    ]
+                    candidate_paths.extend(
+                        str(row.get("file") or "")
+                        for row in fallback_references
+                    )
+                    fallback_test_candidates = _impact_test_candidates_from_paths(
+                        candidate_paths
+                    )
                     graph_problem = (
+                        str(impact.get("note"))
+                        if graph_degraded and impact.get("note")
+                        else
                         "graph backend returned an error"
                         if "error" in impact
                         else "call graph has no callers/callees for this symbol"
@@ -7281,6 +9296,18 @@ def register_high_level_tools(mcp, make_request):
                     else "graph"
                 ),
                 "confidence": confidence,
+                "graph_status": impact.get("graph_status"),
+                "impact_status": impact.get("impact_status"),
+                "references": fallback_references,
+                "inheritance": impact.get("inheritance") or {
+                    "bases": [],
+                    "subclasses": [],
+                    "edges": [],
+                },
+                "evidence_providers": list(
+                    impact.get("evidence_providers") or []
+                ),
+                "lsp_evidence": lsp_impact_evidence,
                 # ---- audit-bundle.r15 (P3): symbol_resolution parity
                 # with omni_intelligence / omni_context. AI editors can
                 # now use a single field across the surface to detect
@@ -7308,11 +9335,23 @@ def register_high_level_tools(mcp, make_request):
                     or "symbol_fallback",
                 }
                 payload["capabilities_used"] = ["search.symbol_exact"]
+                if fallback_references:
+                    payload["capabilities_used"].append("search.references")
                 payload["capabilities_missing"] = ["impact.graph"]
                 payload["fallback"] = {
                     "reason": "graph_index_unavailable_or_empty",
-                    "references": [],
-                    "test_candidates": test_files[:5],
+                    "references": fallback_references,
+                    "test_candidates": (
+                        test_files[:5]
+                        or fallback_test_candidates[:5]
+                    ),
+                    "test_candidate_source": (
+                        "graph_related_tests"
+                        if test_files
+                        else "path_heuristic"
+                        if fallback_test_candidates
+                        else "none"
+                    ),
                 }
             else:
                 payload["capabilities_used"] = ["impact.graph"]
@@ -7489,13 +9528,26 @@ def register_high_level_tools(mcp, make_request):
             local_path = _resolve_workspace_path(file)
             caps = capabilities_for_path(file)
             language = language_for_path(file)
-            if local_path.is_file() and caps.diagnostics == "unsupported":
-                reason = f"{language}_diagnostics_unsupported"
+            workspace_diagnostics = _workspace_diagnostics_capability(language)
+            can_attempt_workspace_diagnostics = bool(
+                workspace_diagnostics.get("toolchain_ready")
+                and workspace_diagnostics.get("start_allowed")
+            )
+            if (
+                local_path.is_file()
+                and caps.diagnostics == "unsupported"
+                and not can_attempt_workspace_diagnostics
+            ):
+                reason = str(
+                    workspace_diagnostics.get("reason")
+                    or f"{language}_diagnostics_unsupported"
+                )
                 payload = {
                     "ok": True,
                     "file": file,
                     "diagnostics": [],
                     "diagnostics_status": "unsupported",
+                    "workspace_diagnostics": workspace_diagnostics,
                     "language": language,
                     "severity_filter": severity,
                     "sources": sources,
@@ -7792,6 +9844,11 @@ def register_high_level_tools(mcp, make_request):
             target_file: str,
             target_content: str,
         ) -> Dict[str, Any]:
+            if str(target_file or "").lower().endswith(
+                (".java", ".scala", ".sc")
+            ):
+                return await _do_validate(target_file, target_content)
+
             try:
                 result = await _local_patch_manager().validate_patch(
                     target_file,
@@ -7878,7 +9935,7 @@ def register_high_level_tools(mcp, make_request):
                     workspace_id=workspace_id,
                 )
                 manifest = LocalManifest.load(workspace=local_ws)
-                change = manifest.mark_changed(target_file)
+                change = manifest.mark_changed(target_file, force=True)
                 if change is not None:
                     manifest.save()
                     meta: Dict[str, Any] = {
@@ -7973,8 +10030,20 @@ def register_high_level_tools(mcp, make_request):
                 language = language_for_path(target_file)
                 if caps.validate not in {"unsupported", "not_performed"}:
                     return None
+                workspace_capability = _workspace_diagnostics_capability(
+                    language
+                )
+                if (
+                    language in {"java", "scala"}
+                    and workspace_capability.get("toolchain_ready")
+                    and workspace_capability.get("start_allowed")
+                ):
+                    return None
                 reason = (
-                    f"{language}_validation_unsupported"
+                    str(workspace_capability.get("reason"))
+                    if language in {"java", "scala"}
+                    and workspace_capability.get("reason")
+                    else f"{language}_validation_unsupported"
                     if language != "unknown"
                     else "validation_not_performed_for_unknown_language"
                 )
@@ -7999,6 +10068,7 @@ def register_high_level_tools(mcp, make_request):
                     "tools_skipped": [reason],
                     "warnings": [reason],
                     "source": "language_capability_matrix",
+                    "workspace_diagnostics": workspace_capability,
                 }
             except Exception:
                 return None
@@ -8180,6 +10250,13 @@ def register_high_level_tools(mcp, make_request):
                             f"omni_patch(action='apply', file='{file}', "
                             f"content=...) to create the file.",
                         ]
+                    elif "not found" in str(data.get("message") or "").lower():
+                        extra["next_actions"] = [
+                            f"omni_read(file='{file}', mode='outline', "
+                            "format='json') to confirm the target path.",
+                            f"omni_search(query='{Path(file).name}', mode='text', "
+                            "format='json') to locate the intended file.",
+                        ]
                     return _err(
                         f"Preview failed: {data.get('message', 'unknown')}",
                         **extra,
@@ -8256,6 +10333,9 @@ def register_high_level_tools(mcp, make_request):
                     "tools_skipped": v["tools_skipped"],
                     "warnings": list(v.get("warnings") or []),
                     "source": v["source"],
+                    "workspace_diagnostics": v.get("workspace_diagnostics"),
+                    "overlay": bool(v.get("overlay")),
+                    "restored": bool(v.get("restored")),
                     "local_authority": local_patch_authority,
                     "next_actions": (
                         [
@@ -8304,6 +10384,22 @@ def register_high_level_tools(mcp, make_request):
             if action == "apply":
                 if not file or content is None:
                     return _err("omni_patch apply needs both file and content.")
+                if force and not (force_reason and force_reason.strip()):
+                    return _err(
+                        "omni_patch apply: force=True requires a non-empty "
+                        "force_reason.",
+                        action="apply",
+                        file=file,
+                        force=True,
+                        force_reason=None,
+                        validation_bypassed=False,
+                        next_actions=[
+                            "Re-call with force_reason='<why this validation "
+                            "bypass is acceptable>'.",
+                            "Fix the content and apply without force=True "
+                            "(recommended).",
+                        ],
+                    )
 
                 # Validate gate — runs by default, refuses on errors
                 # unless the caller set force=True with a reason.
@@ -8321,6 +10417,8 @@ def register_high_level_tools(mcp, make_request):
                         "error": "apply blocked by validation failure",
                         "validation_passed": False,
                         "validation_bypassed": False,
+                        "force": False,
+                        "force_reason": None,
                         "checks": v["checks"],
                         "counts": v["counts"],
                         "tools_run": v["tools_run"],
@@ -8411,6 +10509,7 @@ def register_high_level_tools(mcp, make_request):
                     "validation_bypassed": (
                         v["validation_passed"] is False
                     ) and force,
+                    "force": force,
                     "force_reason": force_reason if force else None,
                     "warnings": list(v.get("warnings") or []),
                     "original_hash": data.get("original_hash"),
@@ -9041,6 +11140,34 @@ def register_high_level_tools(mcp, make_request):
                 result = await make_request("POST", "/search/symbols/relations", json=payload)
 
                 if "error" in result:
+                    error_text = str(result.get("error") or "")
+                    if (
+                        "workspace_id not registered" in error_text
+                        or "HTTP 404" in error_text
+                        or "not found" in error_text.lower()
+                    ):
+                        delegated_raw = await omni_impact(
+                            symbol=symbol_clean,
+                            depth=depth,
+                            max_files=200,
+                            format="json",
+                        )
+                        delegated = json.loads(delegated_raw)
+                        delegated.update({
+                            "analysis": analysis,
+                            "delegated_to": "omni_impact",
+                            "alias_fallback_reason": (
+                                "legacy_relations_endpoint_unavailable"
+                            ),
+                        })
+                        if fmt == "json":
+                            return _alias_json(delegated)
+                        return await omni_impact(
+                            symbol=symbol_clean,
+                            depth=depth,
+                            max_files=200,
+                            format="text",
+                        )
                     if fmt == "json":
                         return _alias_json({
                             "ok": False, "error": f"Analysis error: {result['error']}",
@@ -9869,10 +11996,10 @@ def register_high_level_tools(mcp, make_request):
                     logger.debug("omni_context symbol resolve failed: %s", exc)
                     sym_results = []
 
-                exact = [
+                exact = _dedupe_symbol_definition_rows([
                     r for r in sym_results
                     if (r.get("symbol_name") or "") == symbol
-                ]
+                ])
                 if not exact:
                     symbol_resolution = "not_found"
                     why.append(
@@ -9924,6 +12051,41 @@ def register_high_level_tools(mcp, make_request):
                         "line": symbol_def_line,
                         "signature": (symbol_def_signature or "")[:160],
                     }
+                    if (
+                        fmt == "json"
+                        and not file
+                        and not task
+                        and bool(freshness_meta)
+                        and symbol_def_file
+                    ):
+                        fast_payload = _build_fast_file_symbol_context_payload(
+                            file=symbol_def_file,
+                            symbol=symbol,
+                            task=task,
+                            token_budget=token_budget,
+                            max_files=max_files,
+                        )
+                        if fast_payload is not None:
+                            fast_payload["resolved_from_symbol_only"] = True
+                            fast_payload["symbol_definition_source"] = (
+                                first.get("source") or "symbol_index"
+                            )
+                            fast_payload["why_selected"] = [
+                                (
+                                    f"symbol:{symbol} resolved to "
+                                    f"{symbol_def_file}:{symbol_def_line}"
+                                ),
+                                *list(fast_payload.get("why_selected") or []),
+                            ]
+                            if freshness_meta:
+                                fast_payload.update(freshness_meta)
+                            _stamp(fast_payload, tool="omni_context")
+                            return json.dumps(
+                                fast_payload,
+                                ensure_ascii=False,
+                                indent=2,
+                                default=str,
+                            )
 
             # The "anchor file" is the explicit file= param OR the
             # symbol's resolved file. Used for diagnostics + recent
@@ -9993,7 +12155,25 @@ def register_high_level_tools(mcp, make_request):
             if symbol and symbol_resolution == "found":
                 try:
                     ref_results, _ref_total, _ref_meta = await _run_references(
-                        make_request, symbol, max_results=ref_max,
+                        make_request,
+                        symbol,
+                        max_results=ref_max,
+                        try_lsp=_references_should_try_lsp(
+                            _runtime_capability_registry_snapshot(
+                                cloud_available=(
+                                    bool(freshness_meta.get("cloud_available"))
+                                    if "cloud_available" in freshness_meta
+                                    else None
+                                ),
+                                semantic_index_ready=bool(
+                                    freshness_meta.get("semantic_index_ready")
+                                ),
+                                graph_index_ready=bool(
+                                    freshness_meta.get("graph_index_ready")
+                                ),
+                            ),
+                            freshness_meta=freshness_meta,
+                        ),
                     )
                 except Exception as exc:
                     logger.debug("omni_context references failed: %s", exc)
@@ -10850,6 +13030,54 @@ def register_high_level_tools(mcp, make_request):
                         return _alias_json(payload)
                     return "ERROR ai_edit: LLM editing is disabled"
 
+            # These compatibility actions are a strict alias of omni_patch.
+            # A second implementation here previously drifted on new-file
+            # preview and hybrid local-authority routing.
+            if action in {"preview", "validate", "apply", "rollback"}:
+                delegated_raw = await omni_patch(
+                    action=action,
+                    file=file,
+                    content=edit_content,
+                    session_id=session_id,
+                    format="json",
+                    force=force,
+                    force_reason=force_reason,
+                )
+                try:
+                    delegated = json.loads(delegated_raw)
+                except (TypeError, ValueError):
+                    delegated = {
+                        "ok": False,
+                        "action": action,
+                        "file": file,
+                        "error": "omni_patch returned a non-JSON response",
+                    }
+                delegated_contract = delegated.pop("contract_version", None)
+                delegated.pop("handler_version", None)
+                delegated["delegated_to"] = "omni_patch"
+                if (
+                    not delegated.get("ok")
+                    and delegated.get("error")
+                    and not delegated.get("message")
+                ):
+                    alias_message = str(delegated["error"])
+                    preview_prefix = "Preview failed: "
+                    if action == "preview" and alias_message.startswith(
+                        preview_prefix
+                    ):
+                        alias_message = alias_message[len(preview_prefix):]
+                    delegated["message"] = alias_message
+                if delegated_contract:
+                    delegated["delegated_contract_version"] = delegated_contract
+                if fmt == "json":
+                    return _alias_json(delegated)
+                message = str(
+                    delegated.get("message")
+                    or delegated.get("error")
+                    or ("completed" if delegated.get("ok") else "failed")
+                )
+                return _alias_text(bool(delegated.get("ok")), message)
+
             # ---------------------------------------------------------------
             # Path guard — applies to every action that takes a file and may
             # touch disk (ai_edit / preview / validate / apply). Runs BEFORE
@@ -11372,6 +13600,32 @@ def register_high_level_tools(mcp, make_request):
                 "POST", "/intelligence/context", json=payload
             )
             if not res.get("success"):
+                error_text = str(res.get("error") or "")
+                if (
+                    "workspace_id not registered" in error_text
+                    or "HTTP 404" in error_text
+                    or "not found" in error_text.lower()
+                ):
+                    delegated_raw = await omni_context(
+                        task=task or query,
+                        file=file,
+                        symbol=symbol,
+                        token_budget=token_budget,
+                        max_files=max_search_results,
+                        format="json",
+                    )
+                    delegated = json.loads(delegated_raw)
+                    delegated.update({
+                        "delegated_to": "omni_context",
+                        "alias_fallback_reason": (
+                            "legacy_intelligence_endpoint_unavailable"
+                        ),
+                    })
+                    return json.dumps(
+                        _alias_envelope("omni_intelligence", delegated),
+                        ensure_ascii=False,
+                        default=str,
+                    )
                 return json.dumps(
                     _alias_envelope("omni_intelligence", {
                         "ok": False,
@@ -11756,18 +14010,29 @@ def register_high_level_tools(mcp, make_request):
         Actions:
           - status:    inspect the current background snapshot-index job
           - bootstrap: start explicit snapshot indexing
+          - pause:     pause a running background semantic job
+          - resume:    resume a paused background semantic job
+          - retry:     retry a failed/interrupted semantic job
 
         Scopes:
           - semantic:     full semantic bootstrap over snapshot content
           - exact_policy: index only policy-selected source-like files
           - workspace:    deterministic local exact index (files/lines/symbols)
+          - graph:        deterministic persistent call graph
+          - lsp:          Java/Scala language-server workspace bootstrap
         """
 
         fmt = (format or "json").lower()
         action_value = (action or "status").strip().lower()
         scope_value = (scope or "semantic").strip().lower()
-        valid_actions = ("status", "bootstrap")
-        valid_scopes = ("semantic", "exact_policy", "workspace")
+        valid_actions = ("status", "bootstrap", "pause", "resume", "retry")
+        valid_scopes = (
+            "semantic",
+            "exact_policy",
+            "workspace",
+            "graph",
+            "lsp",
+        )
 
         def _render(payload: Dict[str, Any]) -> str:
             _stamp(payload, tool="omni_index")
@@ -11799,7 +14064,10 @@ def register_high_level_tools(mcp, make_request):
                 {
                     "ok": False,
                     "action": action_value,
-                    "error": "action must be one of: status, bootstrap",
+                    "error": (
+                        "action must be one of: status, bootstrap, "
+                        "pause, resume, retry"
+                    ),
                     "allowed_actions": list(valid_actions),
                     "next_actions": [
                         "omni_index(action='status', format='json')",
@@ -11813,7 +14081,10 @@ def register_high_level_tools(mcp, make_request):
                     "ok": False,
                     "action": action_value,
                     "scope": scope_value,
-                    "error": "scope must be one of: semantic, exact_policy, workspace",
+                    "error": (
+                        "scope must be one of: semantic, exact_policy, "
+                        "workspace, graph, lsp"
+                    ),
                     "allowed_scopes": list(valid_scopes),
                     "next_actions": [
                         "omni_index(action='bootstrap', scope='workspace', background=False, format='json')",
@@ -11834,7 +14105,179 @@ def register_high_level_tools(mcp, make_request):
             headers["X-Omnicode-Workspace"] = effective_workspace_id
 
         try:
+            if scope_value == "lsp":
+                if action_value not in {"status", "bootstrap"}:
+                    return _render({
+                        "ok": False,
+                        "action": action_value,
+                        "scope": scope_value,
+                        "error": (
+                            "LSP bootstrap is process-managed; "
+                            "pause/resume/retry apply to semantic jobs"
+                        ),
+                        "next_actions": [
+                            "omni_index(action='status', scope='lsp', format='json')",
+                            "omni_index(action='bootstrap', scope='lsp', background=False, format='json')",
+                        ],
+                    })
+
+                from omnicode_core.lsp.bridge import get_lsp_bridge
+
+                ws_root, ws_source, ws_warnings = _get_workspace_root()
+                bridge = get_lsp_bridge(str(ws_root))
+                if action_value == "status":
+                    status = bridge.status_snapshot({"java", "scala"})
+                    ready = bool(status) and all(
+                        bool(item.get("running"))
+                        for item in status.values()
+                    )
+                    payload = {
+                        "ok": True,
+                        "action": action_value,
+                        "scope": scope_value,
+                        "source": "local_lsp_runtime",
+                        "state": "ready" if ready else "not_ready",
+                        "workspace_root_source": ws_source,
+                        "workspace_warnings": ws_warnings,
+                        "lsp_ready": ready,
+                        "status": status,
+                        "next_actions": (
+                            [
+                                "omni_diagnostics(file='<java-or-scala-file>', format='json') to use workspace diagnostics.",
+                                "omni_impact(symbol='<symbol>', format='json') to use LSP references and call hierarchy.",
+                            ]
+                            if ready
+                            else [
+                                "Install JDT LS and Metals, then run omni_index(action='bootstrap', scope='lsp', background=False, format='json').",
+                            ]
+                        ),
+                    }
+                    return _render(payload)
+
+                result = await bridge.bootstrap({"java", "scala"})
+                ready = bool(result.get("ready"))
+                payload = {
+                    "ok": ready,
+                    "action": action_value,
+                    "scope": scope_value,
+                    "source": "local_lsp_runtime",
+                    "background": False,
+                    "state": "ready" if ready else "degraded",
+                    "workspace_root_source": ws_source,
+                    "workspace_warnings": ws_warnings,
+                    "lsp_ready": ready,
+                    "result": result,
+                    "error": (
+                        None
+                        if ready
+                        else "One or more requested language servers are unavailable."
+                    ),
+                    "next_actions": [
+                        "omni_index(action='status', scope='lsp', format='json') to inspect each language server.",
+                        "Install the missing JDT LS/Metals toolchain shown in the status, then retry bootstrap.",
+                    ],
+                }
+                return _render(payload)
+
+            if scope_value == "graph":
+                if action_value not in {"status", "bootstrap"}:
+                    return _render({
+                        "ok": False,
+                        "action": action_value,
+                        "scope": scope_value,
+                        "error": (
+                            "graph indexing is currently synchronous; "
+                            "pause/resume/retry apply to semantic background jobs"
+                        ),
+                        "next_actions": [
+                            "omni_index(action='status', scope='graph', format='json')",
+                            "omni_index(action='bootstrap', scope='graph', background=False, format='json')",
+                        ],
+                    })
+                from omnicode_core.workspace.exact_index import SnapshotExactIndex
+                from omnicode_core.workspace.graph_index import WorkspaceGraphIndex
+
+                ws_root, ws_source, ws_warnings = _get_workspace_root()
+                local_workspace_id = (
+                    effective_workspace_id or ws_root.name or "workspace"
+                )
+                exact_status = SnapshotExactIndex().status(
+                    workspace_id=local_workspace_id
+                )
+                accepted_revision = max(
+                    int(exact_status.get("exact_indexed_revision") or 0),
+                    1,
+                )
+                graph_index = WorkspaceGraphIndex()
+                if action_value == "status":
+                    status = graph_index.status(
+                        workspace_id=local_workspace_id,
+                        accepted_revision=accepted_revision,
+                    )
+                    payload = {
+                        "ok": True,
+                        "action": action_value,
+                        "scope": scope_value,
+                        "workspace_id": local_workspace_id,
+                        "source": "local_graph_index",
+                        "state": "ready" if status.get("ready") else "not_ready",
+                        "workspace_root_source": ws_source,
+                        "workspace_warnings": ws_warnings,
+                        "graph_index_ready": bool(status.get("ready")),
+                        "status": status,
+                        "next_actions": (
+                            [
+                                "omni_impact(symbol='<symbol>', format='json') to use the persisted graph.",
+                            ]
+                            if status.get("ready")
+                            else [
+                                "omni_index(action='bootstrap', scope='graph', background=False, format='json') to build the persistent graph.",
+                            ]
+                        ),
+                    }
+                    return _render(payload)
+
+                result = graph_index.index_workspace_root(
+                    workspace_id=local_workspace_id,
+                    root=ws_root,
+                    revision=accepted_revision,
+                    force=bool(force),
+                )
+                status = result.get("status") or {}
+                payload = {
+                    "ok": True,
+                    "action": action_value,
+                    "scope": scope_value,
+                    "workspace_id": local_workspace_id,
+                    "source": "local_graph_index",
+                    "background": False,
+                    "state": "ready" if status.get("ready") else "degraded",
+                    "workspace_root_source": ws_source,
+                    "workspace_warnings": ws_warnings,
+                    "result": result,
+                    "graph_index_ready": bool(status.get("ready")),
+                    "next_actions": [
+                        "omni_status(format='json') to confirm graph_index_ready.",
+                        "omni_impact(symbol='<symbol>', format='json') to query the persisted graph.",
+                    ],
+                }
+                return _render(payload)
+
             if scope_value == "workspace":
+                if action_value not in {"status", "bootstrap"}:
+                    return _render({
+                        "ok": False,
+                        "action": action_value,
+                        "scope": scope_value,
+                        "error": (
+                            "workspace exact indexing is synchronous; "
+                            "pause/resume/retry apply to semantic background jobs"
+                        ),
+                        "next_actions": [
+                            "omni_index(action='status', scope='workspace', format='json')",
+                            "omni_index(action='bootstrap', scope='workspace', background=False, format='json')",
+                        ],
+                    })
                 from omnicode_core.workspace.exact_index import SnapshotExactIndex
 
                 ws_root, ws_source, ws_warnings = _get_workspace_root()
@@ -11909,6 +14352,16 @@ def register_high_level_tools(mcp, make_request):
                     params=params,
                     headers=headers,
                 )
+            elif action_value in {"pause", "resume", "retry"}:
+                raw = await make_request(
+                    "POST",
+                    "/search/index/control",
+                    params={
+                        **params,
+                        "action": action_value,
+                    },
+                    headers=headers,
+                )
             else:
                 raw = await make_request(
                     "POST",
@@ -11947,22 +14400,36 @@ def register_high_level_tools(mcp, make_request):
                 "backend_action": (
                     "GET /search/index/status"
                     if action_value == "status"
+                    else "POST /search/index/control"
+                    if action_value in {"pause", "resume", "retry"}
                     else "POST /search/index"
                 ),
             }
             if isinstance(data, dict):
                 payload.update(data)
-            payload["next_actions"] = (
-                [
-                    "omni_status(format='json') to confirm semantic_index_ready and recommended_query_mode.",
+            if action_value == "bootstrap":
+                payload["next_actions"] = [
+                    "omni_index(action='status', scope='semantic', format='json') to monitor progress.",
                     "omni_search(query='<task>', mode='semantic', format='json') after semantic indexing completes.",
                 ]
-                if action_value == "bootstrap"
-                else [
+            elif action_value == "pause":
+                payload["next_actions"] = [
+                    "omni_index(action='resume', scope='semantic', format='json') to continue.",
+                    "omni_index(action='status', scope='semantic', format='json') to inspect paused progress.",
+                ]
+            elif action_value == "resume":
+                payload["next_actions"] = [
+                    "omni_index(action='status', scope='semantic', format='json') to monitor resumed progress.",
+                ]
+            elif action_value == "retry":
+                payload["next_actions"] = [
+                    "omni_index(action='status', scope='semantic', format='json') to monitor the retry.",
+                ]
+            else:
+                payload["next_actions"] = [
                     "omni_index(action='bootstrap', scope='semantic', background=True, format='json') to start full semantic bootstrap.",
                     "omni_status(format='json') to inspect index_readiness_contract.",
                 ]
-            )
             return _render(payload)
         except Exception as exc:  # noqa: BLE001
             return _render(
@@ -11982,7 +14449,7 @@ def register_high_level_tools(mcp, make_request):
             )
 
     @mcp.tool()
-    async def omni_status() -> str:
+    async def omni_status(detail: str = "full") -> str:
         """Runtime self-check for the live MCP host.
 
         Returns a JSON envelope describing the actual code that's serving
@@ -12013,6 +14480,7 @@ def register_high_level_tools(mcp, make_request):
         on-disk source. A non-empty list means a stale binding — fix by
         killing the MCP host process (not a soft reload) and restarting.
         """
+        import asyncio as _asyncio
         import datetime as _dt
         import hashlib as _hashlib
         import os as _os
@@ -12028,6 +14496,46 @@ def register_high_level_tools(mcp, make_request):
             _PROCESS_START_TIME = _dt.datetime.now(_dt.timezone.utc).isoformat()
 
         warnings_list: List[str] = []
+        detail_mode = (detail or "full").strip().lower()
+        compact_requested = detail_mode in {"compact", "lite", "summary"}
+        if detail_mode not in {"full", "compact", "lite", "summary"}:
+            detail_mode = "full"
+            compact_requested = False
+            warnings_list.append(
+                f"invalid_status_detail:{detail}; using full detail"
+            )
+        try:
+            status_probe_timeout = float(
+                _os.environ.get("OMNICODE_STATUS_PROBE_TIMEOUT", "2.0")
+                or "2.0"
+            )
+        except Exception:
+            status_probe_timeout = 2.0
+        status_probe_timeout = max(0.05, min(status_probe_timeout, 10.0))
+
+        async def _status_request(
+            method: str,
+            endpoint: str,
+            *,
+            label: Optional[str] = None,
+            **kwargs: Any,
+        ) -> Dict[str, Any]:
+            probe_label = label or endpoint
+            try:
+                return await _asyncio.wait_for(
+                    make_request(method, endpoint, **kwargs),
+                    timeout=status_probe_timeout,
+                )
+            except _asyncio.TimeoutError:
+                warnings_list.append(f"status_probe_timeout:{probe_label}")
+                return {
+                    "error": (
+                        f"{probe_label} timed out after "
+                        f"{status_probe_timeout:.2f}s"
+                    ),
+                    "error_type": "TimeoutError",
+                    "status_probe_timeout": True,
+                }
 
         # --- Module identity ------------------------------------------
         module_path = ""
@@ -12154,7 +14662,14 @@ def register_high_level_tools(mcp, make_request):
         backend_workspace_root_source: Optional[str] = None
         workspace_root_warning: Optional[str] = None
         try:
-            probe = await _get_backend_file_markers("README.md")
+            if compact_requested:
+                raise RuntimeError(
+                    "backend_root_probe_skipped_in_compact_status"
+                )
+            probe = await _asyncio.wait_for(
+                _get_backend_file_markers("README.md"),
+                timeout=status_probe_timeout,
+            )
             backend_workspace_root = probe.get("backend_workspace_root")
             resolved = probe.get("resolved_file_path")
             if backend_workspace_root:
@@ -12180,9 +14695,16 @@ def register_high_level_tools(mcp, make_request):
                     "backend workspace root not exposed via /read probe"
                 )
         except Exception as exc:
-            workspace_root_warning = (
-                f"backend root probe failed: {exc.__class__.__name__}"
-            )
+            if str(exc) == "backend_root_probe_skipped_in_compact_status":
+                workspace_root_warning = (
+                    "backend root probe skipped in compact status"
+                )
+            else:
+                if isinstance(exc, _asyncio.TimeoutError):
+                    warnings_list.append("status_probe_timeout:backend_root_probe")
+                workspace_root_warning = (
+                    f"backend root probe failed: {exc.__class__.__name__}"
+                )
 
         # workspace-bridge step 12: aggregate local sync state, cloud snapshot
         # state, and HybridToolRouter decisions. This is deliberately
@@ -12269,9 +14791,10 @@ def register_high_level_tools(mcp, make_request):
 
                 if backend_url and executor_mode in {"hybrid", "remote"}:
                     try:
-                        raw_status = await make_request(
+                        raw_status = await _status_request(
                             "GET",
                             "/sync/status",
+                            label="sync/status",
                             params={"workspace_id": workspace_id},
                         )
                         cloud_status = (
@@ -12298,6 +14821,14 @@ def register_high_level_tools(mcp, make_request):
                                     "semantic_index_ready",
                                     "semantic_index_coverage",
                                     "semantic_initial_exact_only",
+                                    "semantic_runtime_ready",
+                                    "semantic_runtime",
+                                    "semantic_index_model",
+                                    "semantic_index_dimension",
+                                    "semantic_index_stale_reason",
+                                    "semantic_index_invalid",
+                                    "semantic_index_stale",
+                                    "semantic_vector_count",
                                     "exact_index_ready",
                                     "snapshot_ready",
                                     "index_worker_busy",
@@ -12349,17 +14880,21 @@ def register_high_level_tools(mcp, make_request):
                         cloud_available = False
                         cloud_status_warning = f"{exc.__class__.__name__}: {exc}"
 
-                    if cloud_available:
+                    if cloud_available and not compact_requested:
                         try:
-                            raw_search_stats = await make_request(
+                            raw_search_stats = await _status_request(
                                 "GET",
                                 "/search/stats",
+                                label="search/stats",
                             )
                             search_stats = (
                                 raw_search_stats.get("result", raw_search_stats)
                                 if isinstance(raw_search_stats, dict)
                                 else {}
                             )
+                            stats_error = _backend_error_message(search_stats)
+                            if stats_error:
+                                raise TimeoutError(stats_error)
                             if isinstance(search_stats, dict):
                                 raw_semantic = search_stats.get("semantic_index")
                                 if isinstance(raw_semantic, dict):
@@ -12377,7 +14912,37 @@ def register_high_level_tools(mcp, make_request):
                                     ):
                                         if key in raw_semantic:
                                             cloud_index_status[key] = raw_semantic[key]
+                                else:
+                                    semantic_claimed_ready = bool(
+                                        cloud_index_status.get("semantic_index_ready")
+                                        or cloud_index_status.get(
+                                            "strict_semantic_safe"
+                                        )
+                                        or cloud_index_status.get(
+                                            "semantic_query_safe"
+                                        )
+                                    )
+                                    cloud_index_status["semantic_index_ready"] = False
+                                    if semantic_claimed_ready:
+                                        cloud_index_status.setdefault(
+                                            "semantic_index_stale_reason",
+                                            "semantic_runtime_unreported",
+                                        )
                         except Exception as exc:  # noqa: BLE001
+                            semantic_claimed_ready = bool(
+                                cloud_index_status.get("semantic_index_ready")
+                                or cloud_index_status.get("strict_semantic_safe")
+                                or cloud_index_status.get("semantic_query_safe")
+                            )
+                            cloud_index_status["semantic_index_ready"] = False
+                            if semantic_claimed_ready:
+                                cloud_index_status.setdefault(
+                                    "semantic_index_stale_reason",
+                                    (
+                                        "semantic_status_unavailable:"
+                                        f"{exc.__class__.__name__}"
+                                    ),
+                                )
                             cloud_index_status.setdefault(
                                 "semantic_index_status_warning",
                                 f"{exc.__class__.__name__}: {exc}",
@@ -12435,22 +15000,77 @@ def register_high_level_tools(mcp, make_request):
                 cloud_index_status.get("exact_query_safe")
                 or cloud_index_status.get("exact_index_ready")
             )
+            semantic_runtime_reason = cloud_index_status.get(
+                "semantic_index_stale_reason"
+            )
+            semantic_runtime_invalid = bool(
+                cloud_index_status.get("semantic_index_invalid", False)
+                or cloud_index_status.get("semantic_index_stale", False)
+                or semantic_runtime_reason
+            )
+            raw_semantic_runtime = cloud_index_status.get("semantic_runtime")
+            if isinstance(raw_semantic_runtime, dict):
+                semantic_runtime_reason = (
+                    semantic_runtime_reason
+                    or raw_semantic_runtime.get("stale_reason")
+                )
+                semantic_runtime_invalid = bool(
+                    semantic_runtime_invalid
+                    or raw_semantic_runtime.get("invalid", False)
+                    or raw_semantic_runtime.get("stale", False)
+                    or semantic_runtime_reason
+                )
+                cloud_index_status.setdefault(
+                    "semantic_index_model",
+                    raw_semantic_runtime.get("model"),
+                )
+                cloud_index_status.setdefault(
+                    "semantic_index_dimension",
+                    raw_semantic_runtime.get("dimension"),
+                )
+                cloud_index_status.setdefault(
+                    "chunker_version",
+                    raw_semantic_runtime.get("chunker_version"),
+                )
+                cloud_index_status.setdefault(
+                    "vector_count",
+                    raw_semantic_runtime.get("vector_count"),
+                )
+            semantic_runtime_ready = bool(
+                cloud_index_status.get(
+                    "semantic_runtime_ready",
+                    cloud_index_status.get("semantic_index_ready", False),
+                )
+            ) and not semantic_runtime_invalid
             strict_semantic_safe = bool(
                 cloud_index_status.get("strict_semantic_safe")
-                or cloud_index_status.get("semantic_index_ready", index_fresh)
+                and semantic_runtime_ready
             )
-            recommended_query_mode = str(
-                cloud_index_status.get("recommended_query_mode")
-                or (
-                    "semantic_first"
-                    if strict_semantic_safe
-                    else "exact_first"
-                    if exact_query_safe
-                    else "snapshot_only"
-                    if indexed_file_count
-                    else "local_only"
-                )
+            supported_query_modes = list(
+                cloud_index_status.get("supported_query_modes") or []
             )
+            if not strict_semantic_safe:
+                supported_query_modes = [
+                    mode for mode in supported_query_modes
+                    if str(mode).lower() not in {"semantic", "semantic_first"}
+                ]
+            raw_recommended_query_mode = str(
+                cloud_index_status.get("recommended_query_mode") or ""
+            )
+            if raw_recommended_query_mode == "semantic_first" and not strict_semantic_safe:
+                raw_recommended_query_mode = ""
+            recommended_query_mode = raw_recommended_query_mode or (
+                "semantic_first"
+                if strict_semantic_safe
+                else "exact_first"
+                if exact_query_safe
+                else "snapshot_only"
+                if indexed_file_count
+                else "local_only"
+            )
+            query_mode_reason = cloud_index_status.get("query_mode_reason")
+            if not strict_semantic_safe and semantic_runtime_reason:
+                query_mode_reason = str(semantic_runtime_reason)
             index_readiness = {
                 "text_index_ready": bool(
                     exact_query_safe
@@ -12459,22 +15079,19 @@ def register_high_level_tools(mcp, make_request):
                 "symbol_index_ready": bool(
                     exact_query_safe or strict_semantic_safe
                 ),
-                "graph_index_ready": False,
+                "graph_index_ready": bool(
+                    cloud_index_status.get("graph_index_ready", False)
+                ),
                 "fresh": bool(index_fresh),
                 "exact_query_safe": exact_query_safe,
                 "semantic_query_safe": strict_semantic_safe,
                 "strict_semantic_safe": strict_semantic_safe,
                 "recommended_query_mode": recommended_query_mode,
-                "query_mode_reason": cloud_index_status.get(
-                    "query_mode_reason"
-                ),
-                "supported_query_modes": cloud_index_status.get(
-                    "supported_query_modes",
-                    [],
-                ),
-                "semantic_index_ready": bool(
-                    cloud_index_status.get("semantic_index_ready", index_fresh)
-                ),
+                "query_mode_reason": query_mode_reason,
+                "supported_query_modes": supported_query_modes,
+                "semantic_runtime_ready": semantic_runtime_ready,
+                "semantic_runtime": raw_semantic_runtime if isinstance(raw_semantic_runtime, dict) else {},
+                "semantic_index_ready": strict_semantic_safe,
                 "semantic_index_model": cloud_index_status.get(
                     "semantic_index_model"
                 ),
@@ -12523,9 +15140,15 @@ def register_high_level_tools(mcp, make_request):
                     cloud_index_status.get("exact_pending_revisions") or 0
                 ),
                 "graph_index_reason": (
-                    "graph bootstrap is not persisted yet; omni_impact may "
-                    "run a bounded live graph scan and report caveats."
+                    None
+                    if cloud_index_status.get("graph_index_ready", False)
+                    else "persistent graph index is not ready; omni_impact "
+                    "will use deterministic references/test fallbacks."
                 ),
+                "graph_indexed_revision": int(
+                    cloud_index_status.get("graph_indexed_revision") or 0
+                ),
+                "graph_index": cloud_index_status.get("graph_index", {}),
             }
             router = HybridToolRouter(executor=executor_mode)
             route_tools = (
@@ -12583,8 +15206,51 @@ def register_high_level_tools(mcp, make_request):
                     or "local-first"
                 ),
             )
+            cloud_embedding_runtime_available: Optional[bool] = None
+            semantic_runtime_for_contract = (
+                sync_payload.get("semantic_index")
+                if isinstance(sync_payload.get("semantic_index"), dict)
+                else {}
+            )
+            if not semantic_runtime_for_contract:
+                cloud_status_for_contract = (
+                    sync_payload.get("cloud_index_status")
+                    if isinstance(sync_payload.get("cloud_index_status"), dict)
+                    else {}
+                )
+                semantic_runtime_for_contract = (
+                    cloud_status_for_contract.get("semantic_runtime")
+                    if isinstance(
+                        cloud_status_for_contract.get("semantic_runtime"),
+                        dict,
+                    )
+                    else cloud_status_for_contract
+                )
+            if runtime_for_status.embedding_mode.lower() == "cloud":
+                if "embedding_available" in semantic_runtime_for_contract:
+                    cloud_embedding_runtime_available = bool(
+                        semantic_runtime_for_contract.get("embedding_available")
+                    )
+                elif "ready" in semantic_runtime_for_contract:
+                    cloud_embedding_runtime_available = bool(
+                        semantic_runtime_for_contract.get("ready")
+                    )
+                elif (
+                    semantic_runtime_for_contract.get("semantic_index_stale_reason")
+                    == "EMBEDDING_MODEL_NOT_FOUND"
+                ):
+                    cloud_embedding_runtime_available = False
+                elif compact_requested:
+                    readiness_for_contract = (
+                        sync_payload.get("index_readiness")
+                        if isinstance(sync_payload.get("index_readiness"), dict)
+                        else {}
+                    )
+                    if not bool(readiness_for_contract.get("semantic_query_safe")):
+                        cloud_embedding_runtime_available = False
             capability_contract = build_capability_contract(
                 runtime_for_status,
+                cloud_embedding_available=cloud_embedding_runtime_available,
             ).to_dict()
         except Exception as exc:  # noqa: BLE001
             capability_contract = {
@@ -12620,6 +15286,88 @@ def register_high_level_tools(mcp, make_request):
             embedding_payload = embedding_status(
                 deployment_mode=executor_mode,
             )
+            embedding_payload.setdefault(
+                "local_cache_available",
+                bool(embedding_payload.get("available")),
+            )
+            embedding_mode_for_status = (
+                _os.environ.get("OMNICODE_EMBEDDING_MODE") or "cloud"
+            ).lower()
+            semantic_runtime_for_embedding = (
+                sync_payload.get("semantic_index")
+                if isinstance(sync_payload.get("semantic_index"), dict)
+                else {}
+            )
+            if not semantic_runtime_for_embedding:
+                cloud_status_for_embedding = (
+                    sync_payload.get("cloud_index_status")
+                    if isinstance(sync_payload.get("cloud_index_status"), dict)
+                    else {}
+                )
+                semantic_runtime_for_embedding = (
+                    cloud_status_for_embedding.get("semantic_runtime")
+                    if isinstance(
+                        cloud_status_for_embedding.get("semantic_runtime"),
+                        dict,
+                    )
+                    else cloud_status_for_embedding
+                )
+            cloud_runtime_known = (
+                "embedding_available" in semantic_runtime_for_embedding
+                or "ready" in semantic_runtime_for_embedding
+                or semantic_runtime_for_embedding.get(
+                    "semantic_index_stale_reason"
+                )
+                == "EMBEDDING_MODEL_NOT_FOUND"
+            )
+            if (
+                compact_requested
+                and embedding_mode_for_status == "cloud"
+                and backend_url
+                and not cloud_runtime_known
+            ):
+                readiness_for_embedding = (
+                    sync_payload.get("index_readiness")
+                    if isinstance(sync_payload.get("index_readiness"), dict)
+                    else {}
+                )
+                if not bool(readiness_for_embedding.get("semantic_query_safe")):
+                    semantic_runtime_for_embedding = {
+                        "embedding_available": False,
+                        "semantic_index_stale_reason": (
+                            "semantic_runtime_not_probed_in_compact_status"
+                        ),
+                    }
+                    cloud_runtime_known = True
+            if (
+                embedding_mode_for_status == "cloud"
+                and backend_url
+                and cloud_runtime_known
+            ):
+                runtime_available = bool(
+                    semantic_runtime_for_embedding.get(
+                        "embedding_available",
+                        semantic_runtime_for_embedding.get("ready", False),
+                    )
+                )
+                runtime_reason = semantic_runtime_for_embedding.get(
+                    "semantic_index_stale_reason",
+                    semantic_runtime_for_embedding.get("stale_reason"),
+                )
+                embedding_payload["runtime_source"] = "cloud_semantic_index"
+                embedding_payload["runtime_available"] = runtime_available
+                embedding_payload["available"] = runtime_available
+                if not runtime_available:
+                    error_code = runtime_reason or "EMBEDDING_RUNTIME_UNAVAILABLE"
+                    embedding_payload["error_code"] = error_code
+                    embedding_payload["error"] = (
+                        "cloud embedding runtime is unavailable"
+                        + (f": {runtime_reason}" if runtime_reason else "")
+                    )
+                    next_actions = list(embedding_payload.get("next_actions") or [])
+                    if "omnicode models status" not in next_actions:
+                        next_actions.insert(0, "omnicode models status")
+                    embedding_payload["next_actions"] = next_actions
         except Exception as exc:  # noqa: BLE001
             embedding_payload = {
                 "available": False,
@@ -12631,12 +15379,19 @@ def register_high_level_tools(mcp, make_request):
         local_index_payload: Dict[str, Any]
         try:
             from omnicode_core.workspace.exact_index import SnapshotExactIndex
+            from omnicode_core.workspace.graph_index import WorkspaceGraphIndex
 
             local_index_workspace_id = (
                 workspace_id or ws_root.name or "workspace"
             )
             exact_status = SnapshotExactIndex().status(
                 workspace_id=local_index_workspace_id,
+            )
+            local_graph_status = WorkspaceGraphIndex().status(
+                workspace_id=local_index_workspace_id,
+                accepted_revision=int(
+                    exact_status.get("exact_indexed_revision") or 0
+                ),
             )
             local_index_payload = {
                 "workspace_id": local_index_workspace_id,
@@ -12650,6 +15405,10 @@ def register_high_level_tools(mcp, make_request):
                 "local_line_fts_available": bool(
                     exact_status.get("line_fts_available")
                 ),
+                "local_line_fts_mode": exact_status.get("line_fts_mode"),
+                "local_line_fts_auto_line_limit": exact_status.get(
+                    "line_fts_auto_line_limit"
+                ),
                 "local_line_fts_reason": exact_status.get("line_fts_reason"),
                 "schema_version": exact_status.get("schema_version"),
                 "exact_indexed_revision": exact_status.get(
@@ -12658,6 +15417,10 @@ def register_high_level_tools(mcp, make_request):
                 "local_index_state_dir": str(
                     SnapshotExactIndex().store.workspaces_root
                 ),
+                "local_graph_index_ready": bool(
+                    local_graph_status.get("ready")
+                ),
+                "local_graph_index": local_graph_status,
             }
         except Exception as exc:  # noqa: BLE001
             local_index_payload = {
@@ -12667,6 +15430,7 @@ def register_high_level_tools(mcp, make_request):
 
         capability_registry_payload: Dict[str, Any]
         language_matrix_payload: Dict[str, Any]
+        toolchain_status_payload: Dict[str, Any]
         try:
             from omnicode_core.capabilities.languages import (
                 capability_matrix_payload,
@@ -12674,11 +15438,28 @@ def register_high_level_tools(mcp, make_request):
             from omnicode_core.capabilities.registry import (
                 build_runtime_capabilities,
             )
+            from omnicode_core.capabilities.toolchains import (
+                detect_workspace_toolchains,
+            )
+            from omnicode_core.lsp.bridge import lsp_runtime_status
 
             readiness = (
                 sync_payload.get("index_readiness")
                 if isinstance(sync_payload.get("index_readiness"), dict)
                 else {}
+            )
+            if (
+                executor_mode == "local"
+                and local_index_payload.get("local_graph_index_ready")
+            ):
+                readiness["graph_index_ready"] = True
+                readiness["graph_index_reason"] = None
+            toolchain_status_payload = detect_workspace_toolchains(
+                ws_root,
+                lsp_runtime=lsp_runtime_status(
+                    str(ws_root),
+                    languages={"java", "scala"},
+                ),
             )
             capability_registry_payload = build_runtime_capabilities(
                 cloud_available=bool(sync_payload.get("cloud_available")),
@@ -12693,6 +15474,7 @@ def register_high_level_tools(mcp, make_request):
                     readiness.get("semantic_index_ready")
                 ),
                 graph_index_ready=bool(readiness.get("graph_index_ready")),
+                toolchain_status=toolchain_status_payload,
             )
             language_matrix_payload = capability_matrix_payload()
         except Exception as exc:  # noqa: BLE001
@@ -12700,6 +15482,9 @@ def register_high_level_tools(mcp, make_request):
                 "warning": f"{exc.__class__.__name__}: {exc}",
             }
             language_matrix_payload = {}
+            toolchain_status_payload = {
+                "warning": f"{exc.__class__.__name__}: {exc}",
+            }
 
         payload: Dict[str, Any] = {
             "ok": not warnings_list,
@@ -12712,6 +15497,7 @@ def register_high_level_tools(mcp, make_request):
             "python_version": _platform.python_version(),
             "handler_version": _HANDLER_VERSION,
             "handler_features": list(_HANDLER_FEATURES),
+            "detail": detail_mode,
             "registered_tools": registered_tools,
             "deprecated_aliases_present": deprecated,
             "expected_contract_versions": dict(_CONTRACT_VERSIONS),
@@ -12721,6 +15507,7 @@ def register_high_level_tools(mcp, make_request):
             "workspace_id": workspace_id,
             "executor_mode": executor_mode,
             "backend_url": backend_url,
+            "status_probe_timeout_seconds": status_probe_timeout,
             "local_workspace_root": (
                 _os.environ.get("OMNICODE_WORKSPACE_ROOT")
                 or _os.environ.get("OMNICODE_WORKSPACE")
@@ -12730,6 +15517,7 @@ def register_high_level_tools(mcp, make_request):
             "capability_contract": capability_contract,
             "embedding": embedding_payload,
             "local_index": local_index_payload,
+            "toolchains": toolchain_status_payload,
             "capabilities": capability_registry_payload,
             "language_capabilities": language_matrix_payload,
             "agent_auto": agent_auto,
@@ -12741,9 +15529,161 @@ def register_high_level_tools(mcp, make_request):
             "workspace_root_warning": workspace_root_warning,
             "warnings": warnings_list,
         }
+        if compact_requested:
+            sync_readiness = (
+                sync_payload.get("index_readiness")
+                if isinstance(sync_payload.get("index_readiness"), dict)
+                else {}
+            )
+            compact_capabilities: Dict[str, Any] = {}
+            if isinstance(capability_registry_payload, dict):
+                for name in (
+                    "read.full",
+                    "read.range",
+                    "read.outline",
+                    "read.symbol",
+                    "search.symbol_exact",
+                    "search.text_exact",
+                    "search.references",
+                    "search.semantic",
+                    "impact.graph",
+                    "context.deterministic",
+                    "diagnostics.java",
+                    "diagnostics.java.workspace",
+                    "diagnostics.scala",
+                    "diagnostics.scala.workspace",
+                    "lsp.jdtls",
+                    "lsp.metals",
+                    "build.maven",
+                    "build.gradle",
+                    "build.sbt",
+                    "build.bloop",
+                    "patch.safe_edit",
+                    "sync.cloud",
+                    "embedding.local",
+                ):
+                    value = capability_registry_payload.get(name)
+                    if isinstance(value, dict):
+                        compact_capabilities[name] = {
+                            "state": value.get("state"),
+                            "provider": value.get("provider"),
+                            "safe_to_use_by_default": value.get(
+                                "safe_to_use_by_default"
+                            ),
+                            "reason": value.get("reason"),
+                        }
+            payload = {
+                "ok": payload["ok"],
+                "detail": detail_mode,
+                "pid": payload["pid"],
+                "process_start_time": payload["process_start_time"],
+                "module_sha1": payload["module_sha1"],
+                "module_mtime": payload["module_mtime"],
+                "handler_version": payload["handler_version"],
+                "handler_features_count": len(_HANDLER_FEATURES),
+                "registered_tools_count": len(registered_tools),
+                "deprecated_aliases_present": deprecated,
+                "workspace_root": payload["workspace_root"],
+                "workspace_root_source": payload["workspace_root_source"],
+                "workspace_id": payload["workspace_id"],
+                "executor_mode": payload["executor_mode"],
+                "backend_url": payload["backend_url"],
+                "status_probe_timeout_seconds": status_probe_timeout,
+                "sync": {
+                    "configured": sync_payload.get("configured"),
+                    "cloud_available": sync_payload.get("cloud_available"),
+                    "cloud_unavailable": sync_payload.get("cloud_unavailable"),
+                    "cloud_status_warning": sync_payload.get(
+                        "cloud_status_warning"
+                    ),
+                    "local_revision": sync_payload.get("local_revision"),
+                    "accepted_revision": sync_payload.get("accepted_revision"),
+                    "indexed_revision": sync_payload.get("indexed_revision"),
+                    "pending_count": sync_payload.get("pending_count"),
+                    "fresh": sync_readiness.get("fresh"),
+                    "recommended_query_mode": sync_readiness.get(
+                        "recommended_query_mode"
+                    ),
+                    "exact_query_safe": sync_readiness.get("exact_query_safe"),
+                    "semantic_query_safe": sync_readiness.get(
+                        "semantic_query_safe"
+                    ),
+                    "semantic_runtime_ready": sync_readiness.get(
+                        "semantic_runtime_ready"
+                    ),
+                    "semantic_index_invalid": sync_readiness.get(
+                        "semantic_index_invalid"
+                    ),
+                    "semantic_index_stale_reason": sync_readiness.get(
+                        "semantic_index_stale_reason"
+                    ),
+                    "graph_index_ready": sync_readiness.get(
+                        "graph_index_ready"
+                    ),
+                },
+                "embedding": {
+                    "model": embedding_payload.get("model"),
+                    "dimension": embedding_payload.get("dimension"),
+                    "cache_dir": embedding_payload.get("cache_dir"),
+                    "local_files_only": embedding_payload.get(
+                        "local_files_only"
+                    ),
+                    "cached": embedding_payload.get("cached"),
+                    "local_cache_available": embedding_payload.get(
+                        "local_cache_available"
+                    ),
+                    "loaded": embedding_payload.get("loaded"),
+                    "available": embedding_payload.get("available"),
+                    "runtime_source": embedding_payload.get("runtime_source"),
+                    "runtime_available": embedding_payload.get(
+                        "runtime_available"
+                    ),
+                    "error_code": embedding_payload.get("error_code"),
+                },
+                "local_index": {
+                    "local_index_ready": local_index_payload.get(
+                        "local_index_ready"
+                    ),
+                    "local_files": local_index_payload.get("local_files"),
+                    "local_symbols": local_index_payload.get("local_symbols"),
+                    "local_lines": local_index_payload.get("local_lines"),
+                    "local_line_fts_available": local_index_payload.get(
+                        "local_line_fts_available"
+                    ),
+                    "local_line_fts_mode": local_index_payload.get(
+                        "local_line_fts_mode"
+                    ),
+                    "local_line_fts_auto_line_limit": local_index_payload.get(
+                        "local_line_fts_auto_line_limit"
+                    ),
+                    "local_line_fts_reason": local_index_payload.get(
+                        "local_line_fts_reason"
+                    ),
+                },
+                "capability_contract": capability_contract,
+                "capabilities": compact_capabilities,
+                "toolchains": {
+                    "java": (
+                        toolchain_status_payload.get("java")
+                        if isinstance(toolchain_status_payload, dict)
+                        else None
+                    ),
+                    "scala": (
+                        toolchain_status_payload.get("scala")
+                        if isinstance(toolchain_status_payload, dict)
+                        else None
+                    ),
+                    "build_files": (
+                        toolchain_status_payload.get("build_files")
+                        if isinstance(toolchain_status_payload, dict)
+                        else None
+                    ),
+                },
+                "warnings": warnings_list,
+            }
         # Note: _stamp injects contract_version="status.v1" + handler_version
         # for omni_status itself. expected_contract_versions above is the
-        # per-tool reference table — callers compare each tool's response
+        # per-tool reference table: callers compare each tool's response
         # contract_version against this map to detect a stale binding.
         _stamp(payload, tool="omni_status")
         return json.dumps(payload, ensure_ascii=False, indent=2)
@@ -12757,10 +15697,10 @@ def register_high_level_tools(mcp, make_request):
         """Discover available OmniCode tools and their capabilities.
 
         Call with no query to get the full default tool listing plus the
-        recommended pre-edit workflow.  Call with a free-text query —
-        in **English or Chinese** — and the tool runs the workspace's
-        Tool Intent Registry against it: tokeniser → per-tool keyword
-        match (EN + ZH) → multilingual intent patterns → ranked output
+        recommended pre-edit workflow. Call with a free-text query
+        in **English or Chinese** and the tool runs the workspace's
+        Tool Intent Registry against it: tokeniser -> per-tool keyword
+        match (EN + ZH) -> multilingual intent patterns -> ranked output
         with ``why_matched`` annotations and a tailored next-step
         pipeline.
 
@@ -12783,9 +15723,9 @@ def register_high_level_tools(mcp, make_request):
         Eight core tools:
           - omni_search:      search code (auto/semantic/symbol/text/hybrid/references)
           - omni_read:        read files (outline/symbols/full/imports/diagnostics/range)
-          - omni_impact:      blast radius — callers / callees / risk / related tests
+          - omni_impact:      blast radius: callers / callees / risk / related tests
           - omni_diagnostics: lint / type / static analysis for a file
-          - omni_context:     composer — outline + impact + memory + git in one call
+          - omni_context:     composer: outline + impact + memory + git in one call
           - omni_memory:      project memory (search/store/advisory)
           - omni_patch:       safe edit (preview / validate / apply / rollback)
           - omni_skill:       discover packaged workflow recipes (skills)
