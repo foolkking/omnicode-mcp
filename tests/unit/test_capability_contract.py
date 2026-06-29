@@ -90,6 +90,24 @@ def test_embedding_cloud_requires_cloud_backend() -> None:
     assert missing.embedding.available is False
 
 
+def test_embedding_cloud_uses_runtime_probe_when_known() -> None:
+    available = build_capability_contract(
+        _runtime(embedding_mode="cloud"),
+        cloud_embedding_available=True,
+    )
+    missing = build_capability_contract(
+        _runtime(embedding_mode="cloud"),
+        cloud_embedding_available=False,
+    )
+
+    assert available.embedding.target == "cloud"
+    assert available.embedding.available is True
+    assert available.embedding.reason == "cloud embedding backend is available"
+    assert missing.embedding.target == "cloud"
+    assert missing.embedding.available is False
+    assert missing.embedding.reason == "cloud embedding backend is unavailable"
+
+
 def test_diagnostics_local_first_is_available_without_cloud() -> None:
     contract = build_capability_contract(
         _runtime(diagnostics_mode="local-first", backend_url=None)

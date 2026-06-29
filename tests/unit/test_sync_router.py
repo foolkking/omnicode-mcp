@@ -26,17 +26,20 @@ def _wait_indexed(
     *,
     workspace_id: str = "repo-a",
     revision: int,
-    attempts: int = 200,
+    attempts: int = 500,
 ) -> dict:
+    last_status: dict[str, Any] = {}
     for _ in range(attempts):
-        status = client.get(
+        last_status = client.get(
             "/sync/status",
             headers={"X-Omnicode-Workspace": workspace_id},
         ).json()
-        if int(status.get("indexed_revision") or 0) >= revision:
-            return cast(Dict[str, Any], status)
+        if int(last_status.get("indexed_revision") or 0) >= revision:
+            return cast(Dict[str, Any], last_status)
         time.sleep(0.01)
-    raise AssertionError(f"indexed_revision did not reach {revision}")
+    raise AssertionError(
+        f"indexed_revision did not reach {revision}; last_status={last_status}"
+    )
 
 
 def _wait_until(predicate: Callable[[], bool], *, attempts: int = 50) -> None:
@@ -57,6 +60,42 @@ def _reset_index_worker_state() -> None:
     sync_router._INDEX_QUEUE = None
     sync_router._INDEX_WORKER_TASK = None
     sync_router._INDEX_LOOP = None
+
+
+def test_sync_graph_rebuild_policy_skips_large_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Store:
+        @staticmethod
+        def status(_workspace_id: str) -> dict[str, int]:
+            return {"file_count": 7000}
+
+    monkeypatch.delenv("OMNICODE_SYNC_GRAPH_REBUILD_MODE", raising=False)
+    monkeypatch.delenv("OMNICODE_SYNC_GRAPH_REBUILD_MAX_FILES", raising=False)
+    monkeypatch.setattr(sync_router, "_SNAPSHOT_STORE", _Store())
+
+    assert sync_router._should_sync_rebuild_graph(
+        workspace_id="repo-a",
+        graph_status={"coverage_complete": False, "needs_rebuild": False},
+    ) is False
+
+
+def test_sync_graph_rebuild_policy_keeps_small_workspace_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Store:
+        @staticmethod
+        def status(_workspace_id: str) -> dict[str, int]:
+            return {"file_count": 5}
+
+    monkeypatch.delenv("OMNICODE_SYNC_GRAPH_REBUILD_MODE", raising=False)
+    monkeypatch.delenv("OMNICODE_SYNC_GRAPH_REBUILD_MAX_FILES", raising=False)
+    monkeypatch.setattr(sync_router, "_SNAPSHOT_STORE", _Store())
+
+    assert sync_router._should_sync_rebuild_graph(
+        workspace_id="repo-a",
+        graph_status={"coverage_complete": False, "needs_rebuild": False},
+    ) is True
 
 
 @pytest.fixture
@@ -140,6 +179,269 @@ def test_unknown_workspace_is_auto_registered_on_empty_registry(
     assert registry.get("missing") is not None
 
 
+def test_sync_status_uses_workspace_cache_until_state_changes(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"exact": 0, "snapshot": 0, "semantic": 0, "graph": 0}
+
+    def _exact_status(*, workspace_id: str) -> dict[str, Any]:
+        calls["exact"] += 1
+        return {
+            "workspace_id": workspace_id,
+            "schema_version": 2,
+            "index_kind": "workspace_exact",
+            "exact_indexed_revision": 1,
+            "files": 1,
+            "symbols": 1,
+            "lines": 1,
+            "line_fts_available": False,
+            "line_fts_reason": "ready",
+        }
+
+    def _snapshot_status(workspace_id: str) -> dict[str, Any]:
+        calls["snapshot"] += 1
+        return {
+            "workspace_id": workspace_id,
+            "latest_revision": 1,
+            "accepted_revision": 1,
+            "indexed_revision": 1,
+            "file_count": 1,
+            "delete_count": 0,
+            "semantic_index_coverage": "exact_only_initial_sync",
+            "semantic_initial_exact_only": True,
+        }
+
+    def _semantic_status() -> dict[str, Any]:
+        calls["semantic"] += 1
+        return {
+            "semantic_index_ready": False,
+            "semantic_index_stale": False,
+            "semantic_index_invalid": False,
+            "semantic_index_stale_reason": None,
+            "embedding_available": True,
+            "semantic_index_model": "sentence-transformers/all-MiniLM-L6-v2",
+            "semantic_index_dimension": 384,
+            "faiss_dimension": 384,
+            "chunker_version": "ast-chunker.v1",
+            "workspace_id": "repo-a",
+            "vector_count": 1,
+            "metadata": {},
+        }
+
+    def _graph_status(*, workspace_id: str, accepted_revision: int) -> dict[str, Any]:
+        calls["graph"] += 1
+        return {
+            "ready": True,
+            "current": True,
+            "graph_indexed_revision": accepted_revision,
+            "accepted_revision": accepted_revision,
+            "pending_revisions": 0,
+            "files": 1,
+            "supported_files": 1,
+            "unsupported_files": 0,
+            "parse_error_files": 0,
+            "edges": 1,
+            "definitions": 1,
+            "callers": 1,
+            "callees": 1,
+            "languages": ["python"],
+            "last_error": None,
+            "needs_rebuild": False,
+            "coverage_complete": True,
+            "schema_version": 2,
+            "index_kind": "workspace_call_graph",
+        }
+
+    monkeypatch.setattr(
+        sync_router,
+        "_exact_index",
+        lambda: SimpleNamespace(status=_exact_status),
+    )
+    monkeypatch.setattr(
+        sync_router,
+        "_SNAPSHOT_STORE",
+        SimpleNamespace(status=_snapshot_status),
+    )
+    monkeypatch.setattr(
+        sync_router,
+        "_graph_index",
+        lambda: SimpleNamespace(status=_graph_status),
+    )
+    monkeypatch.setattr(
+        sync_router,
+        "get_search_engine",
+        lambda: SimpleNamespace(semantic_index_status=_semantic_status),
+    )
+    monkeypatch.setattr(sync_router, "_STATUS_CACHE_TTL_SECONDS", 30.0)
+    sync_router._STATUS_CACHE.clear()
+
+    first = client.get("/sync/status", headers={"X-Omnicode-Workspace": "repo-a"})
+    second = client.get("/sync/status", headers={"X-Omnicode-Workspace": "repo-a"})
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["status_cache_hit"] is False
+    assert second.json()["status_cache_hit"] is True
+    assert calls == {"exact": 1, "snapshot": 2, "semantic": 1, "graph": 1}
+
+    with sync_router._LOCK:
+        state = sync_router._state_for("repo-a")
+        state.accepted_revision += 1
+
+    third = client.get("/sync/status", headers={"X-Omnicode-Workspace": "repo-a"})
+    assert third.status_code == 200
+    assert third.json()["status_cache_hit"] is False
+    assert calls["exact"] == 2
+    assert calls["snapshot"] == 3
+    assert calls["semantic"] == 2
+    assert calls["graph"] >= 2
+
+
+def test_external_index_completion_invalidates_sync_status_cache() -> None:
+    sync_router._STATUS_CACHE["repo-a"] = (
+        ("stale",),
+        1.0,
+        {"ok": True, "status_cache_hit": False},
+    )
+
+    sync_router.record_external_indexed_revision("repo-a", 9)
+
+    assert "repo-a" not in sync_router._STATUS_CACHE
+    assert sync_router._state_for("repo-a").indexed_revision >= 9
+
+
+def test_snapshot_status_merge_is_monotonic_during_worker_commit() -> None:
+    state = sync_router._SyncWorkspaceState(
+        workspace_id="repo-a",
+        accepted_revision=7,
+        indexed_revision=7,
+        file_count=3,
+        delete_count=1,
+    )
+
+    merged = sync_router._merge_snapshot_status_with_state(
+        state,
+        {
+            "latest_revision": 7,
+            "accepted_revision": 7,
+            "indexed_revision": 0,
+            "file_count": 3,
+            "delete_count": 1,
+        },
+    )
+
+    assert merged["accepted_revision"] == 7
+    assert merged["latest_revision"] == 7
+    assert merged["indexed_revision"] == 7
+    assert merged["file_count"] == 3
+    assert merged["delete_count"] == 1
+
+
+def test_sync_status_degrades_instead_of_blocking_on_slow_index_probe(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import time
+
+    def _slow_exact_status(*, workspace_id: str) -> dict[str, Any]:
+        time.sleep(0.5)
+        return {"workspace_id": workspace_id, "files": 1}
+
+    monkeypatch.setattr(
+        sync_router,
+        "_exact_index",
+        lambda: SimpleNamespace(status=_slow_exact_status),
+    )
+    monkeypatch.setattr(sync_router, "_STATUS_PROBE_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(sync_router, "_STATUS_CACHE_TTL_SECONDS", 0.0)
+    sync_router._STATUS_CACHE.clear()
+
+    started = time.perf_counter()
+    response = client.get(
+        "/sync/status",
+        headers={"X-Omnicode-Workspace": "repo-a"},
+    )
+    elapsed = time.perf_counter() - started
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert elapsed < 0.4
+    assert payload["status_probe_degraded"] is True
+    assert "exact_status_probe_degraded:TimeoutError" in (
+        payload["status_probe_warnings"]
+    )
+
+
+def test_sync_status_allows_large_repo_exact_probe_under_default_budget(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import time
+
+    def _large_exact_status(*, workspace_id: str) -> dict[str, Any]:
+        time.sleep(0.25)
+        return {
+            "workspace_id": workspace_id,
+            "exact_indexed_revision": 2,
+            "files": 7000,
+            "symbols": 6000,
+            "lines": 1000000,
+            "line_fts_available": False,
+            "line_fts_reason": "disabled_for_large_workspace",
+        }
+
+    monkeypatch.setattr(
+        sync_router,
+        "_exact_index",
+        lambda: SimpleNamespace(status=_large_exact_status),
+    )
+    monkeypatch.setattr(sync_router, "_STATUS_PROBE_TIMEOUT_SECONDS", 1.0)
+    monkeypatch.setattr(sync_router, "_STATUS_CACHE_TTL_SECONDS", 0.0)
+    sync_router._STATUS_CACHE.clear()
+
+    content = "class ReplicaManager {}\n"
+    response = client.post(
+        "/sync/batch",
+        headers={"X-Omnicode-Workspace": "repo-a"},
+        json={
+            "client_id": "local-1",
+            "base_revision": 1,
+            "client_revision": 2,
+            "files": [
+                {
+                    "path": "core/src/main/scala/ReplicaManager.scala",
+                    "hash": _sha(content),
+                    "size": len(content),
+                    "mtime_ms": 123,
+                    "encoding": "utf-8",
+                    "content": content,
+                }
+            ],
+            "deletes": [],
+        },
+    )
+    assert response.status_code == 200
+    sync_router.record_external_indexed_revision("repo-a", 2)
+
+    started = time.perf_counter()
+    status = client.get(
+        "/sync/status",
+        headers={"X-Omnicode-Workspace": "repo-a"},
+    )
+    elapsed = time.perf_counter() - started
+
+    assert status.status_code == 200
+    payload = status.json()
+    assert elapsed < 1.0
+    assert payload["status_probe_degraded"] is False
+    assert payload["exact_index_ready"] is True
+    assert payload["exact_query_safe"] is True
+    assert payload["exact_index"]["files"] == 7000
+    assert payload["exact_index"]["symbols"] == 6000
+    assert payload["exact_index"]["line_fts_available"] is False
+
+
 def test_batch_updates_accepted_revision_and_status(client: TestClient) -> None:
     content = "print('hello')\n"
     response = client.post(
@@ -190,6 +492,10 @@ def test_batch_updates_accepted_revision_and_status(client: TestClient) -> None:
     assert status["exact_index_ready"] is True
     assert status["exact_index"]["files"] == 1
     assert status["exact_index"]["lines"] == 1
+    assert status["graph_index_ready"] is True
+    assert status["graph_indexed_revision"] == 2
+    assert status["graph_index"]["files"] == 1
+    assert status["graph_index"]["supported_files"] == 1
     assert status["indexing"] is False
     assert status["last_index_error"] is None
     assert "last_batch_elapsed_ms" in status
@@ -209,6 +515,8 @@ def test_batch_updates_accepted_revision_and_status(client: TestClient) -> None:
     assert restored["accepted_revision"] == 2
     assert restored["indexed_revision"] == 2
     assert restored["exact_indexed_revision"] == 2
+    assert restored["graph_indexed_revision"] == 2
+    assert restored["graph_index_ready"] is True
     assert restored["indexed_files"] == 1
 
     query_status = client.get("/sync/status?workspace_id=repo-a").json()
@@ -388,14 +696,14 @@ def test_batch_filters_low_value_files_from_semantic_index(
     assert body["files_accepted"] == 4
     assert body["semantic_files_enqueued"] == 1
     assert body["semantic_files_skipped"] == 3
-    assert body["semantic_skip_reasons"] == {"extension_not_enabled": 3}
+    assert body["semantic_skip_reasons"] == {"path_excluded": 3}
 
     status = _wait_indexed(client, revision=1)
     assert bulk_calls == [["src/included.py"]]
     assert status["exact_index"]["files"] == 4
     assert status["last_semantic_files_enqueued"] == 1
     assert status["last_semantic_files_skipped"] == 3
-    assert status["last_semantic_skip_reasons"] == {"extension_not_enabled": 3}
+    assert status["last_semantic_skip_reasons"] == {"path_excluded": 3}
     assert ".py" in status["semantic_index_policy"]["extensions"]
     assert ".json" not in status["semantic_index_policy"]["extensions"]
 
@@ -436,11 +744,14 @@ def test_semantic_filter_barrier_advances_for_all_skipped_batch(
     assert body["accepted_revision"] == 5
     assert body["semantic_files_enqueued"] == 0
     assert body["semantic_files_skipped"] == 1
-    assert body["semantic_skip_reasons"] == {"extension_not_enabled": 1}
+    assert body["semantic_skip_reasons"] == {"path_excluded": 1}
 
     status = _wait_indexed(client, revision=5)
     assert status["indexed_revision"] == 5
-    assert status["semantic_index_ready"] is True
+    assert status["semantic_index_ready"] is False
+    assert status["semantic_index_coverage"] == "filtered_empty"
+    assert status["semantic_query_safe"] is False
+    assert status["query_mode_reason"] == "semantic_filtered_empty"
     assert status["exact_index"]["files"] == 1
 
 
@@ -655,6 +966,56 @@ def test_semantic_filter_skips_oversized_source_file(
     assert status["exact_index"]["files"] == 1
 
 
+def test_semantic_filter_skips_low_value_paths(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bulk_calls: list[list[str]] = []
+
+    class _Engine:
+        async def upsert_contents(self, files, *, refresh: bool = True) -> int:
+            bulk_calls.append([item[0] for item in files])
+            return len(files)
+
+        def refresh_stats(self) -> None:
+            return None
+
+    monkeypatch.setattr(sync_router, "get_search_engine", lambda: _Engine())
+    content = "function vendored() { return 1; }\n"
+
+    response = client.post(
+        "/sync/batch",
+        headers={"X-Omnicode-Workspace": "repo-a"},
+        json={
+            "client_id": "local-1",
+            "base_revision": 0,
+            "client_revision": 3,
+            "files": [
+                {
+                    "path": "django/contrib/admin/static/admin/js/vendor/jquery/jquery.js",
+                    "hash": _sha(content),
+                    "size": len(content),
+                    "mtime_ms": 1,
+                    "encoding": "utf-8",
+                    "content": content,
+                }
+            ],
+            "deletes": [],
+        },
+    )
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["ok"] is True
+    assert body["semantic_files_enqueued"] == 0
+    assert body["semantic_files_skipped"] == 1
+    assert body["semantic_skip_reasons"] == {"path_excluded": 1}
+    status = _wait_indexed(client, revision=3)
+    assert bulk_calls == []
+    assert status["exact_index"]["files"] == 1
+    assert status["semantic_index_policy"]["exclude_parts"]
+    assert status["last_semantic_skip_reasons"] == {"path_excluded": 1}
+
+
 def test_index_worker_serializes_background_updates(
     client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -835,6 +1196,7 @@ def test_status_payload_reports_search_readiness() -> None:
             "indexed_revision": 10,
             "file_count": 4,
             "delete_count": 0,
+            "semantic_index_coverage": "semantic_full",
         },
         {
             "exact_indexed_revision": 10,
@@ -886,17 +1248,95 @@ def test_status_payload_reports_exact_only_query_contract() -> None:
             "lines": 1100000,
             "line_fts_available": False,
         },
+        {
+            "semantic_index_ready": True,
+            "embedding_available": True,
+            "semantic_index_model": "BAAI/bge-small-en-v1.5",
+            "semantic_index_dimension": 384,
+            "faiss_dimension": 384,
+            "chunker_version": "ast-chunker.v1",
+            "workspace_id": "repo-a",
+            "vector_count": 500,
+            "semantic_index_stale": False,
+            "semantic_index_invalid": False,
+            "semantic_index_stale_reason": None,
+            "metadata": {
+                "embedding_model": "BAAI/bge-small-en-v1.5",
+                "embedding_dimension": 384,
+                "chunker_version": "ast-chunker.v1",
+            },
+        },
     )
 
     assert payload["snapshot_ready"] is True
     assert payload["exact_index_ready"] is True
     assert payload["semantic_index_ready"] is False
+    assert payload["semantic_runtime_ready"] is True
+    assert payload["semantic_runtime"]["model"] == "BAAI/bge-small-en-v1.5"
+    assert payload["semantic_index_invalid"] is False
     assert payload["search_degraded"] is True
     assert payload["recommended_query_mode"] == "exact_first"
     assert payload["query_mode_reason"] == "exact_only_initial_sync"
     assert payload["exact_query_safe"] is True
+    assert payload["semantic_query_safe"] is False
     assert payload["strict_semantic_safe"] is False
     assert payload["index_readiness_contract"]["semantic"]["initial_exact_only"] is True
+
+
+def test_status_payload_surfaces_semantic_bootstrap_job(monkeypatch) -> None:
+    def _running_job(workspace_id: str) -> dict:
+        return {
+            "workspace_id": workspace_id,
+            "background": True,
+            "state": "running",
+            "job": {
+                "state": "running",
+                "records_seen": 10,
+                "records_total": 20,
+                "indexed_chunks": 30,
+                "current_path": "src/app.py",
+            },
+        }
+
+    import api.v1.routers.search as search_router
+
+    monkeypatch.setattr(search_router, "snapshot_index_job_status", _running_job)
+
+    state = sync_router._SyncWorkspaceState(
+        workspace_id="repo-a",
+        accepted_revision=10,
+        indexed_revision=10,
+        file_count=4,
+    )
+    payload = sync_router._status_payload(
+        state,
+        {
+            "latest_revision": 10,
+            "accepted_revision": 10,
+            "indexed_revision": 10,
+            "file_count": 4,
+            "delete_count": 0,
+            "semantic_index_coverage": "semantic_full",
+        },
+        {
+            "exact_indexed_revision": 10,
+            "files": 4,
+            "symbols": 2,
+            "lines": 20,
+        },
+        {
+            "semantic_index_ready": True,
+            "embedding_available": True,
+            "vector_count": 30,
+        },
+    )
+
+    assert payload["semantic_bootstrap_running"] is True
+    assert payload["semantic_bootstrap_job"]["state"] == "running"
+    assert payload["semantic_bootstrap_job"]["job"]["records_seen"] == 10
+    assert payload["index_worker_busy"] is True
+    assert payload["semantic_index_ready"] is False
+    assert payload["query_mode_reason"] == "semantic_index_catching_up"
 
 
 def test_index_update_refreshes_stats_without_reinitializing_engine(
@@ -1126,6 +1566,65 @@ def test_index_update_marks_exact_only_when_semantic_embedding_unavailable(
     assert coverages == ["exact_only_initial_sync"]
 
 
+def test_merge_semantic_coverage_promotes_selected_after_exact_only() -> None:
+    assert sync_router.merge_semantic_coverages({
+        "exact_only_initial_sync",
+        "selected_files",
+    }) == "selected_files"
+    assert sync_router.merge_semantic_coverages({
+        "exact_only_initial_sync",
+        "filtered",
+    }) == "filtered"
+
+
+def test_index_update_marks_exact_when_semantic_metadata_incompatible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bulk_calls: list[tuple[list[tuple[str, str]], bool]] = []
+    coverages: list[str | None] = []
+    refresh_stats_calls = 0
+
+    class _Engine:
+        def semantic_available(self) -> bool:
+            return True
+
+        async def upsert_contents(
+            self,
+            files: list[tuple[str, str]],
+            *,
+            refresh: bool = True,
+        ) -> int:
+            bulk_calls.append((files, refresh))
+            raise RuntimeError(
+                "SEMANTIC_INDEX_INCOMPATIBLE: metadata_missing; "
+                "run omni_index(scope='semantic', force=true)"
+            )
+
+        def refresh_stats(self) -> None:
+            nonlocal refresh_stats_calls
+            refresh_stats_calls += 1
+
+    def _mark_indexed(*, workspace_id, revision, semantic_coverage=None, **_kwargs):
+        coverages.append(semantic_coverage)
+        return revision
+
+    monkeypatch.setattr(sync_router, "get_search_engine", lambda: _Engine())
+    monkeypatch.setattr(sync_router._SNAPSHOT_STORE, "mark_indexed", _mark_indexed)
+
+    indexed = sync_router._run_index_update_blocking(
+        "repo-a",
+        11,
+        [("tests/tmp_cloudsim_a.py", "A")],
+        [],
+        semantic_coverage="selected_files",
+    )
+
+    assert indexed == 11
+    assert bulk_calls == [([("tests/tmp_cloudsim_a.py", "A")], False)]
+    assert refresh_stats_calls == 1
+    assert coverages == ["exact_only_semantic_incompatible"]
+
+
 def test_batch_skips_unchanged_hash_without_revision_bump(
     client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1289,6 +1788,8 @@ def test_large_sync_auto_disables_line_fts_without_breaking_exact_index(
     assert status["exact_index"]["symbols"] >= 1
     assert status["exact_index"]["lines"] == 5
     assert status["exact_index"]["line_fts_available"] is False
+    assert status["exact_index"]["line_fts_mode"] == "auto"
+    assert status["exact_index"]["line_fts_auto_line_limit"] == 3
     assert status["exact_index"]["line_fts_reason"] == "disabled_for_large_workspace"
 
     symbols = sync_router._exact_index().search_symbols(

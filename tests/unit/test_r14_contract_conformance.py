@@ -189,12 +189,13 @@ def test_omni_impact_empty_symbol_has_next_actions() -> None:
 # ===========================================================================
 
 
-def test_omni_diagnostics_exposes_singular_source(tmp_path) -> None:
+def test_omni_diagnostics_exposes_singular_source(tmp_path, monkeypatch) -> None:
     """omni_diagnostics must emit ``source`` (singular) alongside the
     legacy ``sources`` plural for contract parity with the rest of the
     surface."""
     file = tmp_path / "x.py"
     file.write_text("def f():\n    return 1\n")
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(tmp_path))
 
     async def make_request(method: str, endpoint: str, **kwargs: Any) -> Dict[str, Any]:
         if endpoint == "/diagnostics/file":
@@ -202,7 +203,7 @@ def test_omni_diagnostics_exposes_singular_source(tmp_path) -> None:
         return {"result": {}}
 
     tools = build_tools_from_request(make_request)
-    raw = _run(tools["omni_diagnostics"](file=str(file), format="json"))
+    raw = _run(tools["omni_diagnostics"](file=file.name, format="json"))
     payload = json.loads(raw)
     assert payload["ok"] is True
     # P2-2: BOTH keys present.

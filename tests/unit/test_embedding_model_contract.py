@@ -234,3 +234,77 @@ def test_resolve_backend_offline_cache_miss_skips_model_load(
     backend = mod.resolve_backend("sentence-transformers/all-MiniLM-L6-v2")
     assert isinstance(backend, mod.UnavailableEmbeddingBackend)
     assert backend.status()["error_code"] == "EMBEDDING_MODEL_NOT_FOUND"
+
+
+def test_default_backend_retries_after_unavailable(monkeypatch) -> None:
+    import omnicode_core.embeddings.backend as mod
+
+    class ReadyBackend(mod.EmbeddingBackend):
+        name = "ready"
+        dimension = 384
+
+        def __init__(self, model_name: str) -> None:
+            self._model_name = model_name
+
+        def encode(self, text):  # pragma: no cover - not needed here
+            return [0.0] * 384
+
+    calls: list[str] = []
+
+    def fake_resolve(model_name: str):
+        calls.append(model_name)
+        if len(calls) == 1:
+            return mod.UnavailableEmbeddingBackend(
+                model_name,
+                error="missing model",
+                dimension=384,
+            )
+        return ReadyBackend(model_name)
+
+    monkeypatch.setattr(mod, "_DEFAULT", None)
+    monkeypatch.setattr(mod, "resolve_backend", fake_resolve)
+
+    first = mod.get_default_backend("sentence-transformers/all-MiniLM-L6-v2")
+    second = mod.get_default_backend("sentence-transformers/all-MiniLM-L6-v2")
+
+    assert isinstance(first, mod.UnavailableEmbeddingBackend)
+    assert isinstance(second, ReadyBackend)
+    assert calls == [
+        "sentence-transformers/all-MiniLM-L6-v2",
+        "sentence-transformers/all-MiniLM-L6-v2",
+    ]
+
+
+def test_default_backend_reloads_when_model_changes(monkeypatch) -> None:
+    import omnicode_core.embeddings.backend as mod
+
+    class ReadyBackend(mod.EmbeddingBackend):
+        name = "ready"
+
+        def __init__(self, model_name: str) -> None:
+            self._model_name = model_name
+            self.dimension = 384 if "MiniLM" in model_name else 768
+
+        def encode(self, text):  # pragma: no cover - not needed here
+            return [0.0] * int(self.dimension or 0)
+
+    calls: list[str] = []
+
+    def fake_resolve(model_name: str):
+        calls.append(model_name)
+        return ReadyBackend(model_name)
+
+    monkeypatch.setattr(mod, "_DEFAULT", None)
+    monkeypatch.setattr(mod, "resolve_backend", fake_resolve)
+
+    first = mod.get_default_backend("sentence-transformers/all-MiniLM-L6-v2")
+    second = mod.get_default_backend("sentence-transformers/all-mpnet-base-v2")
+
+    assert isinstance(first, ReadyBackend)
+    assert isinstance(second, ReadyBackend)
+    assert first is not second
+    assert second.dimension == 768
+    assert calls == [
+        "sentence-transformers/all-MiniLM-L6-v2",
+        "sentence-transformers/all-mpnet-base-v2",
+    ]

@@ -6,7 +6,8 @@ Covers the contract changes made when fixing the omni_read regression:
 * ``mode=range`` without ``start_line`` returns a structured error
   rather than silently falling back to ``full``.
 * ``mode=relevant_chunks`` requires ``query`` and forwards it.
-* ``mode=full`` truncates above the soft token budget with a clear hint.
+* Raw content modes (``full`` / ``range`` / ``symbol``) truncate above the
+  soft token budget with a clear hint.
 * Outline rendering surfaces both top-level and nested symbols.
 
 These tests exercise the helpers directly so they don't need to spin up
@@ -167,6 +168,58 @@ def test_build_payload_full_within_budget_does_not_truncate():
     )
     assert payload["truncated"] is False
     assert payload["content"] == "a = 1\n"
+
+
+def test_build_payload_symbol_truncates_above_budget():
+    big_content = "\n".join(f"{i} | {'body ' * 40}" for i in range(1000))
+    payload = _build_read_payload(
+        file="big.py",
+        requested_mode="symbol",
+        data={
+            "language": "python",
+            "total_lines": 1000,
+            "content": big_content,
+            "start_line": 1,
+            "end_line": 1000,
+            "symbol_name": "LargeSymbol",
+        },
+        start_line=None,
+        end_line=None,
+        symbol="LargeSymbol",
+        query=None,
+        max_tokens=500,
+    )
+    assert payload["mode"] == "symbol"
+    assert payload["truncated"] is True
+    assert payload["token_estimate"] <= 600
+    assert payload["lines_returned"] < 1000
+    assert "LargeSymbol" in payload["truncation_hint"]
+    assert any("range" in action for action in payload["next_actions"])
+
+
+def test_build_payload_range_truncates_above_budget():
+    big_content = "\n".join(f"{i} | {'range ' * 40}" for i in range(1000))
+    payload = _build_read_payload(
+        file="big.py",
+        requested_mode="range",
+        data={
+            "language": "python",
+            "total_lines": 1000,
+            "content": big_content,
+            "start_line": 10,
+            "end_line": 1000,
+        },
+        start_line=10,
+        end_line=1000,
+        symbol=None,
+        query=None,
+        max_tokens=500,
+    )
+    assert payload["mode"] == "range"
+    assert payload["truncated"] is True
+    assert payload["token_estimate"] <= 600
+    assert payload["lines_returned"] < 1000
+    assert "Narrow start_line/end_line" in payload["truncation_hint"]
 
 
 # ---------------------------------------------------------------------------

@@ -71,6 +71,25 @@ def test_stamp_adds_diagnostics_language_preflight(monkeypatch) -> None:
     assert preflight["execution_policy"]["blocking_missing"] == ["diagnostics.scala"]
 
 
+def test_java_diagnostics_capability_is_partial_syntax_provider(monkeypatch) -> None:
+    monkeypatch.setattr(
+        hlt,
+        "_runtime_capability_registry_snapshot",
+        lambda **_kwargs: _caps(local_index=True),
+    )
+    payload = {"ok": True, "file": "src/main/java/App.java", "language": "java"}
+
+    hlt._stamp(payload, tool="omni_diagnostics")
+
+    preflight = payload["capability_preflight"]
+    java_state = preflight["states"]["diagnostics.java"]
+    assert preflight["required"] == ["diagnostics.java"]
+    assert java_state["state"] == "partial"
+    assert java_state["provider"] == "tree_sitter_java+javac"
+    assert "syntax" in java_state["reason"]
+    assert preflight["execution_policy"]["mode"] == "degraded"
+
+
 def test_stamp_adds_patch_validate_preflight(monkeypatch) -> None:
     monkeypatch.setattr(
         hlt,
@@ -120,6 +139,36 @@ def test_references_preflight_uses_registered_capability(monkeypatch) -> None:
         row.get("reason") != "capability not reported by registry"
         for row in preflight["states"].values()
     )
+
+
+def test_stamp_passes_live_payload_capabilities_to_registry(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_snapshot(**kwargs):
+        seen.update(kwargs)
+        return _caps(local_index=True, semantic=True, graph=True)
+
+    monkeypatch.setattr(hlt, "_runtime_capability_registry_snapshot", fake_snapshot)
+    plan = build_search_plan(
+        query="middleware",
+        requested_mode="semantic",
+        resolved_mode="semantic",
+    )
+    payload = {
+        "ok": True,
+        "query": "middleware",
+        "query_plan": plan.to_dict(),
+        "cloud_available": True,
+        "semantic_index_ready": True,
+        "graph_index_ready": True,
+    }
+
+    hlt._stamp(payload, tool="omni_search")
+
+    assert seen["cloud_available"] is True
+    assert seen["semantic_index_ready"] is True
+    assert seen["graph_index_ready"] is True
+    assert payload["capability_preflight"]["states"]["search.semantic"]["state"] == "ready"
 
 
 def test_runtime_snapshot_does_not_treat_configured_backend_as_reachable(

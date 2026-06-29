@@ -139,6 +139,16 @@ def test_skill_safe_refactor_includes_memory_advisory(safe_refactor) -> None:
     assert "omni_memory" in safe_refactor["tools_used"]
 
 
+def test_skill_recipes_begin_with_live_capability_status(all_recipes) -> None:
+    for recipe in all_recipes:
+        first = recipe["steps"][0]
+        assert first["id"] == "capability_status", recipe["name"]
+        assert first["tool"] == "omni_status", recipe["name"]
+        assert "omni_status" in recipe["tools_used"], recipe["name"]
+        blob = json.dumps(recipe, ensure_ascii=False).lower()
+        assert "capabilit" in blob, recipe["name"]
+
+
 # ---------------------------------------------------------------------------
 # 2. patch.v2 path guard / validate gate / force=True notes
 # ---------------------------------------------------------------------------

@@ -294,11 +294,15 @@ def test_discover_tools_no_match_carries_next_actions() -> None:
 # ===========================================================================
 
 
-def test_omni_diagnostics_with_errors_includes_line_locator(tmp_path) -> None:
+def test_omni_diagnostics_with_errors_includes_line_locator(
+    tmp_path,
+    monkeypatch,
+) -> None:
     """When there are errors, next_actions must include an
     omni_read(mode='range', ...) locator targeting the first error."""
     file = tmp_path / "x.py"
     file.write_text("def f(): return 1\n")
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(tmp_path))
 
     async def make_request(
         method: str, endpoint: str, **kwargs: Any
@@ -326,7 +330,7 @@ def test_omni_diagnostics_with_errors_includes_line_locator(tmp_path) -> None:
         return {"result": {}}
 
     tools = build_tools_from_request(make_request)
-    raw = _run(tools["omni_diagnostics"](file=str(file), format="json"))
+    raw = _run(tools["omni_diagnostics"](file=file.name, format="json"))
     payload = json.loads(raw)
     assert payload["ok"] is True
     blob = " ".join(payload["next_actions"])
@@ -336,10 +340,14 @@ def test_omni_diagnostics_with_errors_includes_line_locator(tmp_path) -> None:
     assert "end_line=45" in blob, "first error line 42 → end_line=42+3=45"
 
 
-def test_omni_diagnostics_clean_file_no_locator_action(tmp_path) -> None:
+def test_omni_diagnostics_clean_file_no_locator_action(
+    tmp_path,
+    monkeypatch,
+) -> None:
     """A clean file should not surface a locator (no errors to point at)."""
     file = tmp_path / "x.py"
     file.write_text("def f(): return 1\n")
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(tmp_path))
 
     async def make_request(
         method: str, endpoint: str, **kwargs: Any
@@ -351,7 +359,7 @@ def test_omni_diagnostics_clean_file_no_locator_action(tmp_path) -> None:
         return {"result": {}}
 
     tools = build_tools_from_request(make_request)
-    raw = _run(tools["omni_diagnostics"](file=str(file), format="json"))
+    raw = _run(tools["omni_diagnostics"](file=file.name, format="json"))
     payload = json.loads(raw)
     blob = " ".join(payload["next_actions"])
     # No errors → no locator.

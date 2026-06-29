@@ -428,6 +428,6 @@ def test_handler_features_advertise_r17_flags() -> None:
 
 def test_handler_version_is_r17() -> None:
     import re
-    m = re.search(r"\.r(\d+)", hlt._HANDLER_VERSION)
+    m = re.search(r"(?:\.|-)?r(\d+)", hlt._HANDLER_VERSION)
     assert m is not None
     assert int(m.group(1)) >= 17, hlt._HANDLER_VERSION

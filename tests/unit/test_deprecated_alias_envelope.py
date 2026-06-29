@@ -154,6 +154,42 @@ def test_omni_analyze_text_still_human_readable() -> None:
         json.loads(raw)
 
 
+def test_omni_analyze_delegates_when_legacy_local_route_is_unregistered() -> None:
+    tools = _build_tools({
+        "/search/symbols/relations": {
+            "error": "workspace_id not registered: repo-a",
+        },
+        "/graph/impact": {
+            "result": {
+                "symbol_found": True,
+                "dependent_symbols": ["caller"],
+                "affected_symbols": ["callee"],
+                "files_count": 1,
+                "files_involved": ["pkg/service.py"],
+            }
+        },
+        "/graph/risk": {
+            "result": {"risk": "medium", "reasons": ["one caller"]}
+        },
+        "/graph/related-tests": {
+            "result": {"test_files": [], "suggested_commands": []}
+        },
+    })
+
+    payload = json.loads(_run(tools["omni_analyze"](
+        symbol="foo",
+        analysis="callers",
+        format="json",
+    )))
+
+    assert payload["ok"] is True
+    assert payload["deprecated"] is True
+    assert payload["delegated_to"] == "omni_impact"
+    assert payload["alias_fallback_reason"] == (
+        "legacy_relations_endpoint_unavailable"
+    )
+
+
 # ---------------------------------------------------------------------------
 # omni_intelligence JSON envelope.
 # ---------------------------------------------------------------------------
@@ -191,6 +227,30 @@ def test_omni_intelligence_failure_envelope() -> None:
     assert "boom" in payload["error"]
 
 
+def test_omni_intelligence_delegates_when_legacy_local_route_is_unregistered() -> None:
+    tools = _build_tools({
+        "/intelligence/context": {
+            "success": False,
+            "error": "workspace_id not registered: repo-a",
+        },
+        "/search/symbols": {"result": {"results": [], "total_results": 0}},
+        "/search": {"result": {"results": [], "total_results": 0}},
+        "/memory/advisory": {"result": {"memories": []}},
+    })
+
+    payload = json.loads(_run(tools["omni_intelligence"](
+        task="understand local code",
+        token_budget=1000,
+    )))
+
+    assert payload["ok"] is True
+    assert payload["deprecated"] is True
+    assert payload["delegated_to"] == "omni_context"
+    assert payload["alias_fallback_reason"] == (
+        "legacy_intelligence_endpoint_unavailable"
+    )
+
+
 # ---------------------------------------------------------------------------
 # No alias returns a traceback / raw exception string.
 # ---------------------------------------------------------------------------
@@ -210,3 +270,27 @@ def test_aliases_do_not_leak_traceback_on_error() -> None:
     assert payload["ok"] is False
     assert payload["deprecated"] is True
     assert "Traceback" not in payload["error"]
+
+
+def test_omni_edit_new_file_preview_delegates_to_omni_patch() -> None:
+    tools = _build_tools({
+        "/read": {"success": False, "error": "File not found"},
+        "/patch/preview": {
+            "success": False,
+            "message": "File does not exist",
+        },
+    })
+
+    payload = json.loads(_run(tools["omni_edit"](
+        action="preview",
+        file="tests/tmp_eval_alias_new.py",
+        content="VALUE = 1\n",
+        format="json",
+    )))
+
+    assert payload["ok"] is True
+    assert payload["deprecated"] is True
+    assert payload["replacement"] == "omni_patch"
+    assert payload["delegated_to"] == "omni_patch"
+    assert payload["new_file"] is True
+    assert payload["preview_synthesized"] is True

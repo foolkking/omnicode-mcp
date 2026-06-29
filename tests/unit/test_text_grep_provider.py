@@ -48,6 +48,55 @@ def test_grep_workspace_prefers_ripgrep_provider(
     assert result.hits[0].line_number == 1
 
 
+def test_ripgrep_provider_command_contract(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "pkg"
+    source.mkdir()
+    (source / "a.py").write_text("needle\n", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(text_grep.shutil, "which", lambda name: "rg" if name == "rg" else None)
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured.update(kwargs)
+        event = {
+            "type": "match",
+            "data": {
+                "path": {"text": "pkg/a.py"},
+                "lines": {"text": "needle\n"},
+                "line_number": 1,
+                "submatches": [{"start": 0, "end": 6}],
+            },
+        }
+        return SimpleNamespace(returncode=0, stdout=json.dumps(event) + "\n", stderr="")
+
+    monkeypatch.setattr(text_grep.subprocess, "run", fake_run)
+
+    result = text_grep.grep_workspace_with_provider(
+        tmp_path,
+        "needle",
+        file_patterns=["*.py"],
+        max_results=2,
+        timeout_seconds=0.25,
+        max_file_bytes=32,
+    )
+
+    cmd = captured["cmd"]
+    assert result.provider == "ripgrep_fallback"
+    assert captured["cwd"] == tmp_path
+    assert captured["timeout"] == 0.25
+    assert "--json" in cmd
+    assert "--fixed-strings" in cmd
+    assert "--max-filesize" in cmd
+    assert "32" in cmd
+    assert "--glob" in cmd
+    assert "*.py" in cmd
+    assert "--no-ignore" not in cmd
+
+
 def test_grep_workspace_falls_back_to_python_when_rg_missing(
     tmp_path: Path,
     monkeypatch,

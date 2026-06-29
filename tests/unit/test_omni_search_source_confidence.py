@@ -20,13 +20,14 @@ from typing import Any, Callable, Dict, List
 
 import pytest
 
+from omnicode_adapters.mcp_server import high_level_tools as hlt
 from omnicode_adapters.mcp_server.high_level_tools import (
+    _dedupe_structured_search_results,
     _infer_source_confidence,
+    _to_structured,
     register_high_level_tools,
 )
-from omnicode_adapters.mcp_server import high_level_tools as hlt
 from omnicode_core.capabilities.registry import build_runtime_capabilities
-
 
 # ---------------------------------------------------------------------------
 # Helpers — minimal MCP + make_request fakes.
@@ -90,6 +91,60 @@ def _semantic_ready_caps() -> Dict[str, Any]:
         semantic_index_ready=True,
         graph_index_ready=False,
     )
+
+
+def test_dedupe_structured_search_results_preserves_provider_evidence() -> None:
+    rows = [
+        {
+            "file": "pkg/a.py",
+            "line": 10,
+            "end_line": 20,
+            "symbol": "Thing",
+            "kind": "class",
+            "score": 1.0,
+            "why_matched": ["symbol:exact"],
+            "signature": "class Thing:",
+            "snippet": None,
+            "source": "local_exact_index",
+            "confidence": "high",
+        },
+        {
+            "file": "pkg/a.py",
+            "line": 10,
+            "end_line": 20,
+            "symbol": "Thing",
+            "kind": "class",
+            "score": 0.8,
+            "why_matched": ["cloud:exact"],
+            "signature": "class Thing:",
+            "snippet": None,
+            "source": "cloud_exact_symbols",
+            "confidence": "medium",
+        },
+    ]
+
+    deduped = _dedupe_structured_search_results(rows)
+
+    assert len(deduped) == 1
+    row = deduped[0]
+    assert row["source"] == "mixed"
+    assert row["providers"] == ["local_exact_index", "cloud_exact_symbols"]
+    assert row["confidence"] == "high"
+    assert row["score"] == 1.0
+    assert row["why_matched"] == ["symbol:exact", "cloud:exact"]
+
+
+def test_to_structured_accepts_file_and_line_aliases() -> None:
+    row = _to_structured({
+        "file": "pkg/a.py",
+        "line": 12,
+        "symbol_name": "Thing",
+        "kind": "function",
+    })
+
+    assert row["file"] == "pkg/a.py"
+    assert row["line"] == 12
+    assert row["symbol"] == "Thing"
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +232,27 @@ def test_search_json_blocks_unavailable_local_semantic_provider() -> None:
     assert preflight["states"]["search.semantic"]["state"] == "unavailable"
     assert preflight["execution_policy"]["mode"] == "block"
     assert preflight["execution_policy"]["can_execute"] is False
+
+
+def test_search_json_blocks_explicit_semantic_when_provider_unavailable() -> None:
+    omni_search = _build_omni_search({
+        "/search": {"results": [], "total_results": 0},
+    })
+
+    raw = _run(omni_search(
+        query="how semantic ranking works",
+        mode="semantic",
+        format="json",
+    ))
+    payload = json.loads(raw)
+
+    assert payload["ok"] is False
+    assert payload["error_code"] == "SEMANTIC_INDEX_NOT_READY"
+    assert payload["empty_reason"] == "provider_unavailable"
+    assert payload["query_plan"]["required_capabilities"] == ["search.semantic"]
+    assert payload["capability_preflight"]["execution_policy"]["mode"] == "block"
+    assert payload["capabilities_missing"] == ["search.semantic"]
+    assert "mode='auto'" in " ".join(payload["next_actions"])
 
 
 def test_search_json_backend_failure_is_structured_envelope() -> None:
@@ -440,6 +516,95 @@ def test_references_mode_falls_back_without_claiming_lsp() -> None:
 # ---------------------------------------------------------------------------
 # 5. Empty results → structured envelope.
 # ---------------------------------------------------------------------------
+
+
+def test_references_mode_can_skip_lsp_probe_end_to_end(monkeypatch) -> None:
+    """Production degraded references should return fallback rows quickly."""
+    monkeypatch.setenv("OMNICODE_REFERENCES_LSP_PROBE", "off")
+    monkeypatch.setattr(
+        hlt,
+        "_lookup_local_exact_text",
+        lambda **_kwargs: ([], {"empty_reason": "index_not_ready"}),
+    )
+
+    sym_payload = {
+        "results": [
+            {
+                "symbol_name": "_detect_mode",
+                "file_path": "high_level_tools.py",
+                "line_start": 80,
+                "line_end": 123,
+                "signature": "def _detect_mode(query: str) -> str:",
+                "symbol_type": "function",
+                "relevance_score": 1.0,
+                "why_matched": ["symbol:exact"],
+            }
+        ],
+        "total_results": 1,
+    }
+    text_payload = {
+        "results": [
+            {
+                "file_path": "restored_sessions/session.md",
+                "line_number": 10,
+                "line_content": "_detect_mode audit prompt",
+                "context_before": [],
+                "context_after": [],
+                "match_type": "text",
+                "relevance_score": 0.6,
+                "why_matched": ["text:line_match"],
+            },
+            {
+                "file_path": "high_level_tools.py",
+                "line_number": 1650,
+                "line_content": (
+                    "resolved_mode = _detect_mode(query) "
+                    "if mode == 'auto' else mode"
+                ),
+                "context_before": ["try:"],
+                "context_after": [""],
+                "match_type": "text",
+                "relevance_score": 0.6,
+                "why_matched": ["text:line_match"],
+            }
+        ],
+        "total_results": 2,
+    }
+
+    def lsp_guard(
+        _method: str,
+        endpoint: str,
+        _kwargs: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        raise AssertionError(f"LSP endpoint should be skipped: {endpoint}")
+
+    omni_search = _build_omni_search({
+        "/lsp/workspace-symbols": lsp_guard,
+        "/lsp/references": lsp_guard,
+        "/search/symbols": sym_payload,
+        "/search/text": text_payload,
+    })
+
+    raw = _run(
+        omni_search(query="_detect_mode", mode="references", format="json")
+    )
+    payload = json.loads(raw)
+
+    assert payload["ok"] is True
+    assert payload["resolved_mode"] == "references"
+    assert payload["lsp_attempted"] is False
+    assert payload["lsp_available"] is False
+    assert payload["fallback_used"] == "ast+text_grep"
+    assert "degraded" in payload["fallback_reason"]
+    assert payload["definition"]["source"] == "ast_symbol"
+    assert payload["references"]
+    assert payload["references"][0]["source"] == "text_grep"
+    assert payload["reference_file_pattern"]
+    assert "*.md" not in payload["reference_file_pattern"]
+    assert all(
+        not row["file"].startswith("restored_sessions/")
+        for row in payload["references"]
+    )
 
 
 @pytest.mark.parametrize(

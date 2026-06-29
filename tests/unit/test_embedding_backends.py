@@ -14,7 +14,9 @@ import pytest
 from omnicode_core.embeddings.backend import (
     EmbeddingBackend,
     HybridBackend,
+    LocalSentenceTransformerBackend,
     RemoteOpenAIBackend,
+    get_default_backend,
     resolve_backend,
 )
 
@@ -163,6 +165,62 @@ def test_resolve_backend_hybrid_without_url_falls_back(monkeypatch):
     assert out is fake
 
 
+def test_get_default_backend_reuses_loaded_model_for_same_config(monkeypatch):
+    import omnicode_core.embeddings.backend as mod
+
+    calls: list[dict[str, Any]] = []
+
+    class _FakeLocal(_FakeBackend):
+        name = "fake-local"
+
+        def __init__(self, model_name: str, **kwargs: Any) -> None:
+            super().__init__(dim=384)
+            self._model_name = model_name
+            self.kwargs = kwargs
+            calls.append({"model": model_name, **kwargs})
+
+    monkeypatch.setattr(mod, "_DEFAULT", None)
+    monkeypatch.setattr(mod, "_DEFAULT_KEY", None)
+    monkeypatch.delenv("OMNICODE_EMBEDDING_BACKEND", raising=False)
+    monkeypatch.setenv("OMNICODE_EMBEDDING_LOCAL_FILES_ONLY", "false")
+    monkeypatch.setattr(mod, "LocalSentenceTransformerBackend", _FakeLocal)
+
+    first = get_default_backend("sentence-transformers/all-MiniLM-L6-v2")
+    second = get_default_backend("sentence-transformers/all-MiniLM-L6-v2")
+
+    assert first is second
+    assert len(calls) == 1
+
+
+def test_get_default_backend_refreshes_when_cache_dir_changes(monkeypatch):
+    import omnicode_core.embeddings.backend as mod
+
+    calls: list[dict[str, Any]] = []
+
+    class _FakeLocal(_FakeBackend):
+        name = "fake-local"
+
+        def __init__(self, model_name: str, **kwargs: Any) -> None:
+            super().__init__(dim=384)
+            self._model_name = model_name
+            self.kwargs = kwargs
+            calls.append({"model": model_name, **kwargs})
+
+    monkeypatch.setattr(mod, "_DEFAULT", None)
+    monkeypatch.setattr(mod, "_DEFAULT_KEY", None)
+    monkeypatch.delenv("OMNICODE_EMBEDDING_BACKEND", raising=False)
+    monkeypatch.setenv("OMNICODE_EMBEDDING_LOCAL_FILES_ONLY", "false")
+    monkeypatch.setenv("OMNICODE_EMBEDDING_CACHE_DIR", "C:/cache/a")
+    monkeypatch.setattr(mod, "LocalSentenceTransformerBackend", _FakeLocal)
+
+    first = get_default_backend("sentence-transformers/all-MiniLM-L6-v2")
+    monkeypatch.setenv("OMNICODE_EMBEDDING_CACHE_DIR", "C:/cache/b")
+    second = get_default_backend("sentence-transformers/all-MiniLM-L6-v2")
+
+    assert first is not second
+    assert len(calls) == 2
+
+
 def test_configure_torch_threads_from_env(monkeypatch):
     import omnicode_core.embeddings.backend as mod
 
@@ -177,3 +235,41 @@ def test_configure_torch_threads_from_env(monkeypatch):
     mod._configure_torch_threads()
 
     assert calls == [("threads", 2), ("interop", 2)]
+
+
+def test_local_embedding_encode_uses_configured_batch_without_progress(
+    monkeypatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    class _FakeSentenceTransformer:
+        def __init__(self, model_name: str, **kwargs: Any) -> None:
+            self.model_name = model_name
+            self.kwargs = kwargs
+
+        def get_embedding_dimension(self) -> int:
+            return 384
+
+        def encode(self, text: Any, **kwargs: Any) -> np.ndarray:
+            calls.append({"text": text, **kwargs})
+            count = 1 if isinstance(text, str) else len(text)
+            return np.ones((count, 384), dtype="float32")
+
+    monkeypatch.setenv("OMNICODE_EMBEDDING_BATCH_SIZE", "96")
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        SimpleNamespace(SentenceTransformer=_FakeSentenceTransformer),
+    )
+
+    backend = LocalSentenceTransformerBackend(
+        "sentence-transformers/all-MiniLM-L6-v2",
+        local_files_only=True,
+    )
+    backend.encode(["a", "b"])
+
+    assert calls == [{
+        "text": ["a", "b"],
+        "batch_size": 96,
+        "show_progress_bar": False,
+    }]

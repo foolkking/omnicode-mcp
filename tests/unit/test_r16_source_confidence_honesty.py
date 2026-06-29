@@ -181,6 +181,191 @@ def test_omni_search_references_surfaces_lsp_probe_metadata() -> None:
     assert "lsp" in payload["fallback_reason"].lower()
 
 
+def test_run_references_can_skip_lsp_probe_for_degraded_capability() -> None:
+    """Hybrid degraded references should not wait on slow LSP endpoints."""
+    captured: list[tuple[str, Dict[str, Any]]] = []
+
+    async def make_request(
+        _method: str,
+        endpoint: str,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        captured.append((endpoint, kwargs))
+        if endpoint.startswith("/lsp/"):
+            raise AssertionError(f"LSP endpoint should be skipped: {endpoint}")
+        if endpoint == "/search/symbols":
+            return {
+                "result": {
+                    "results": [{
+                        "symbol_name": "my_func",
+                        "file_path": "src/x.py",
+                        "line_start": 10,
+                        "line_end": 20,
+                        "signature": "def my_func():",
+                    }],
+                    "total_results": 1,
+                }
+            }
+        if endpoint == "/search/text":
+            return {
+                "result": {
+                    "results": [
+                        {
+                            "file_path": "restored_sessions/session.md",
+                            "line_number": 4,
+                            "line_content": "my_func() in audit notes",
+                        },
+                        {
+                            "file_path": "src/y.py",
+                            "line_number": 5,
+                            "line_content": "my_func()",
+                        },
+                    ],
+                    "total_results": 2,
+                }
+            }
+        return {"result": {"results": [], "total_results": 0}}
+
+    rows, total, meta = _run(
+        hlt._run_references(
+            make_request,
+            "my_func",
+            10,
+            try_lsp=False,
+        )
+    )
+
+    endpoints = [endpoint for endpoint, _kwargs in captured]
+    assert "/lsp/workspace-symbols" not in endpoints
+    assert "/lsp/references" not in endpoints
+    text_calls = [kwargs for endpoint, kwargs in captured if endpoint == "/search/text"]
+    if text_calls:
+        file_pattern = (text_calls[0].get("params") or {}).get("file_pattern", "")
+        assert "*.md" not in file_pattern
+        assert "*.py" in file_pattern
+    assert meta["lsp_attempted"] is False
+    assert meta["lsp_available"] is False
+    assert meta["fallback_used"] == "ast+text_grep"
+    assert "degraded" in meta["fallback_reason"]
+    assert meta["reference_file_pattern"]
+    assert all(
+        not str(row.get("file_path", "")).startswith("restored_sessions/")
+        for row in rows
+    )
+    assert total >= 2
+    assert {row["source"] for row in rows} == {"ast_symbol", "text_grep"}
+
+
+def test_run_references_prefers_local_exact_symbol_when_lsp_skipped(monkeypatch) -> None:
+    """Degraded references should not block on cloud symbol search."""
+    captured: list[str] = []
+
+    monkeypatch.setattr(
+        hlt,
+        "_lookup_local_exact_symbols",
+        lambda **_kwargs: [{
+            "symbol_name": "my_func",
+            "file_path": "src/x.py",
+            "line_start": 10,
+            "line_end": 20,
+            "signature": "def my_func():",
+            "source": "local_exact_index",
+        }],
+    )
+    monkeypatch.setattr(
+        hlt,
+        "_lookup_local_exact_text",
+        lambda **_kwargs: ([{
+            "file_path": "src/y.py",
+            "line_number": 5,
+            "line_content": "my_func()",
+        }], {"provider": "local_exact_index"}),
+    )
+
+    async def make_request(
+        _method: str,
+        endpoint: str,
+        **_kwargs: Any,
+    ) -> Dict[str, Any]:
+        captured.append(endpoint)
+        if endpoint in {"/search/symbols", "/search/text"}:
+            raise AssertionError(f"remote search endpoint should be skipped: {endpoint}")
+        if endpoint.startswith("/lsp/"):
+            raise AssertionError(f"LSP endpoint should be skipped: {endpoint}")
+        return {"result": {"results": [], "total_results": 0}}
+
+    rows, total, meta = _run(
+        hlt._run_references(
+            make_request,
+            "my_func",
+            10,
+            try_lsp=False,
+        )
+    )
+
+    assert captured == []
+    assert meta["definition_provider"] == "local_exact_index"
+    assert meta["callsite_provider"] == "local_exact_index"
+    assert meta["fallback_used"] == "ast+text_grep"
+    assert total == 2
+    assert [row["file_path"] for row in rows] == ["src/x.py", "src/y.py"]
+
+
+def test_run_references_refreshes_local_exact_definition_line(monkeypatch) -> None:
+    """Local exact-index anchors should be refreshed from local parser rows."""
+    monkeypatch.setattr(
+        hlt,
+        "_lookup_local_exact_symbols",
+        lambda **_kwargs: [{
+            "symbol_name": "my_func",
+            "file_path": "src/x.py",
+            "line_start": 10,
+            "line_number": 10,
+            "line_end": 12,
+            "signature": "def my_func():",
+            "source": "local_exact_index",
+        }],
+    )
+    monkeypatch.setattr(
+        hlt,
+        "_refresh_symbol_rows_from_local_outline",
+        lambda rows: rows[0].update({
+            "line_start": 42,
+            "line_number": 42,
+            "line_end": 45,
+            "line_source": "local_ast",
+        }),
+    )
+    monkeypatch.setattr(
+        hlt,
+        "_lookup_local_exact_text",
+        lambda **_kwargs: ([], {"empty_reason": "true_empty"}),
+    )
+
+    async def make_request(
+        _method: str,
+        endpoint: str,
+        **_kwargs: Any,
+    ) -> Dict[str, Any]:
+        raise AssertionError(f"remote endpoint should be skipped: {endpoint}")
+
+    rows, total, meta = _run(
+        hlt._run_references(
+            make_request,
+            "my_func",
+            10,
+            try_lsp=False,
+        )
+    )
+
+    assert total == 1
+    assert rows[0]["kind"] == "definition"
+    assert rows[0]["line_number"] == 42
+    assert rows[0]["line_start"] == 42
+    assert rows[0]["line_end"] == 45
+    assert meta["definition_provider"] == "local_exact_index"
+
+
 def test_omni_search_references_lsp_success_marks_fallback_lsp() -> None:
     """When LSP returns refs, fallback_used='lsp' and confidence is high.
 
@@ -396,6 +581,6 @@ def test_handler_features_advertise_r16_flags() -> None:
 
 def test_handler_version_is_r16() -> None:
     import re
-    m = re.search(r"\.r(\d+)", hlt._HANDLER_VERSION)
+    m = re.search(r"(?:\.|-)?r(\d+)", hlt._HANDLER_VERSION)
     assert m is not None
     assert int(m.group(1)) >= 16, hlt._HANDLER_VERSION

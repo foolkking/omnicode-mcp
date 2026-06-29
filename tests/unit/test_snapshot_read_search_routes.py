@@ -9,8 +9,9 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from omnicode_core.workspace.registry import WorkspaceRegistry
 from omnicode_core.workspace.exact_index import SnapshotExactIndex
+from omnicode_core.workspace.graph_index import WorkspaceGraphIndex
+from omnicode_core.workspace.registry import WorkspaceRegistry
 from omnicode_core.workspace.snapshot_store import CloudSnapshotStore
 
 
@@ -481,18 +482,16 @@ def test_snapshot_index_marks_indexed_revision_and_uses_record_reads(
     assert result["skipped_by_policy"] == 0
     assert store.status("repo-a")["semantic_index_coverage"] == "semantic_full"
     assert store.status("repo-a")["semantic_initial_exact_only"] is False
-    assert engine.files == [
-        (
-            "django/core/handlers/base.py",
-            content,
-            {
-                "content_hash": _sha(content),
-                "snapshot_hash": _sha(content),
-                "snapshot_revision": 11,
-                "workspace_id": "repo-a",
-            },
-        )
-    ]
+    assert len(engine.files) == 1
+    path, body, metadata = engine.files[0]
+    assert path == "django/core/handlers/base.py"
+    assert body == content
+    assert metadata["content_hash"] == _sha(content)
+    assert metadata["snapshot_hash"] == _sha(content)
+    assert metadata["snapshot_revision"] == 11
+    assert metadata["workspace_id"] == "repo-a"
+    assert metadata["semantic_policy"] == "workspace_semantic.v2"
+    assert metadata["semantic_max_chunks_per_file"] >= 1
     assert store.status("repo-a")["indexed_revision"] == 11
 
 
@@ -638,7 +637,7 @@ def test_snapshot_index_exact_policy_skips_low_value_files(
     assert result["scope"] == "exact_policy"
     assert result["indexed_files"] == 1
     assert result["skipped_by_policy"] == 1
-    assert result["skip_policy_reasons"] == {"extension_not_enabled": 1}
+    assert result["skip_policy_reasons"] == {"path_excluded": 1}
     assert indexed_paths == ["django/core/handlers/base.py"]
     assert store.status("repo-a")["semantic_index_coverage"] == "filtered"
 
@@ -877,18 +876,16 @@ def test_snapshot_index_skips_records_at_indexed_revision_watermark(
     assert result["skipped_by_indexed_revision"] == 1
     assert result["indexed_revision_watermark"] == 5
     assert result["indexed_revision"] == 7
-    assert engine.files == [
-        (
-            "django/core/handlers/new.py",
-            new_content,
-            {
-                "content_hash": _sha(new_content),
-                "snapshot_hash": _sha(new_content),
-                "snapshot_revision": 7,
-                "workspace_id": "repo-a",
-            },
-        )
-    ]
+    assert len(engine.files) == 1
+    path, body, metadata = engine.files[0]
+    assert path == "django/core/handlers/new.py"
+    assert body == new_content
+    assert metadata["content_hash"] == _sha(new_content)
+    assert metadata["snapshot_hash"] == _sha(new_content)
+    assert metadata["snapshot_revision"] == 7
+    assert metadata["workspace_id"] == "repo-a"
+    assert metadata["semantic_policy"] == "workspace_semantic.v2"
+    assert metadata["semantic_max_chunks_per_file"] >= 1
 
 
 def test_snapshot_index_background_returns_job_without_blocking(
@@ -1308,6 +1305,16 @@ def test_semantic_search_uses_exact_index_boost_before_snapshot_scan(
     store = CloudSnapshotStore(root=tmp_path / "state" / "cloud-sync")
     exact = SnapshotExactIndex(store=store)
     content = "class BaseHandler:\n    pass\n"
+    store.upsert(
+        workspace_id="repo-a",
+        path="django/core/handlers/base.py",
+        content=content,
+        hash_value=_sha(content),
+        size=len(content),
+        mtime_ms=123,
+        encoding="utf-8",
+        revision=11,
+    )
     exact.update_batch(
         workspace_id="repo-a",
         changed_files=[
@@ -1377,6 +1384,424 @@ def test_semantic_search_uses_exact_index_boost_before_snapshot_scan(
     assert first["source"] == "exact_index"
     assert first["rank_reason"] == "exact_symbol_before_semantic"
     assert "semantic:exact_boost" in first["why_matched"]
+
+
+def test_semantic_not_ready_returns_snapshot_boost_without_vector_search(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = CloudSnapshotStore(root=tmp_path / "state" / "cloud-sync")
+    exact = SnapshotExactIndex(store=store)
+    content = "class BaseHandler:\n    pass\n"
+    exact.update_batch(
+        workspace_id="repo-a",
+        changed_files=[
+            {
+                "path": "django/core/handlers/base.py",
+                "hash": _sha(content),
+                "size": len(content),
+                "content": content,
+            }
+        ],
+        deleted_paths=[],
+        revision=11,
+    )
+
+    class _Engine:
+        def semantic_index_status(self):
+            return {
+                "semantic_index_ready": False,
+                "semantic_index_stale_reason": "exact_only_initial_sync",
+            }
+
+        async def search(self, _request):  # pragma: no cover - must not run
+            raise AssertionError("semantic vector search should not run")
+
+    registry = WorkspaceRegistry(store_path=tmp_path / "workspaces.json")
+    registry.add(
+        name="repo",
+        path=str(workspace),
+        set_active=True,
+        workspace_id="repo-a",
+    )
+    monkeypatch.setattr(
+        search_router,
+        "get_settings",
+        lambda: SimpleNamespace(WORKING_DIR=str(workspace)),
+    )
+    monkeypatch.setattr(search_router, "get_workspace_registry", lambda: registry)
+    monkeypatch.setattr(search_router, "_exact_index", lambda: exact)
+    monkeypatch.setattr(search_router, "CloudSnapshotStore", lambda: store)
+    monkeypatch.setattr(search_router, "get_search_engine", lambda: _Engine())
+    monkeypatch.setattr(
+        search_router,
+        "cloud_freshness_error",
+        lambda *, workspace_id, min_revision, **_kwargs: None,
+    )
+
+    app = FastAPI()
+    app.include_router(search_router.router)
+    client = TestClient(app)
+
+    response = client.post(
+        "/search",
+        headers={"X-Omnicode-Workspace": "repo-a"},
+        json={"query": "BaseHandler", "search_type": "semantic", "max_results": 3},
+    )
+
+    body = response.json()
+    result = body["result"]
+    first = result["results"][0]
+    assert response.status_code == 200
+    assert body["success"] is True
+    assert result["capabilities_missing"] == ["search.semantic"]
+    assert result["fallback_used"] is True
+    assert result["snapshot_exact_boost"] is True
+    assert result["semantic_index_ready"] is False
+    assert first["file_path"] == "django/core/handlers/base.py"
+
+
+def test_semantic_exact_only_snapshot_blocks_vector_search_even_if_runtime_ready(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = CloudSnapshotStore(root=tmp_path / "state" / "cloud-sync")
+    content = (
+        "class BaseHandler:\n"
+        "    def load_middleware(self):\n"
+        "        # Request handling builds the configured middleware chain.\n"
+    )
+    store.upsert(
+        workspace_id="repo-a",
+        path="django/core/handlers/base.py",
+        content=content,
+        hash_value=_sha(content),
+        size=len(content),
+        mtime_ms=123,
+        encoding="utf-8",
+        revision=11,
+    )
+    store.mark_indexed(
+        workspace_id="repo-a",
+        revision=11,
+        semantic_coverage="exact_only_initial_sync",
+    )
+
+    class _Engine:
+        def semantic_index_status(self):
+            return {"semantic_index_ready": True}
+
+        async def search(self, _request):  # pragma: no cover - must not run
+            raise AssertionError("semantic vector search should not run")
+
+    registry = WorkspaceRegistry(store_path=tmp_path / "workspaces.json")
+    registry.add(
+        name="repo",
+        path=str(workspace),
+        set_active=True,
+        workspace_id="repo-a",
+    )
+    monkeypatch.setattr(
+        search_router,
+        "get_settings",
+        lambda: SimpleNamespace(WORKING_DIR=str(workspace)),
+    )
+    monkeypatch.setattr(search_router, "get_workspace_registry", lambda: registry)
+    monkeypatch.setattr(search_router, "CloudSnapshotStore", lambda: store)
+    monkeypatch.setattr(search_router, "get_search_engine", lambda: _Engine())
+
+    def _fail_phrase_grep(*_args, **_kwargs):
+        raise AssertionError(
+            "natural-language semantic fallback must not use exact phrase grep"
+        )
+
+    monkeypatch.setattr(search_router, "_grep_snapshot_store", _fail_phrase_grep)
+    monkeypatch.setattr(
+        search_router,
+        "cloud_freshness_error",
+        lambda *, workspace_id, min_revision, **_kwargs: None,
+    )
+
+    app = FastAPI()
+    app.include_router(search_router.router)
+    client = TestClient(app)
+
+    response = client.post(
+        "/search",
+        headers={"X-Omnicode-Workspace": "repo-a"},
+        json={
+            "query": "request middleware chain",
+            "search_type": "semantic",
+            "max_results": 3,
+        },
+    )
+
+    result = response.json()["result"]
+    assert response.status_code == 200
+    assert result["capabilities_missing"] == ["search.semantic"]
+    assert result["fallback_used"] is True
+    assert result["semantic_index_ready"] is False
+    assert result["semantic_index_stale_reason"] == "exact_only_initial_sync"
+    assert result["semantic_coverage"] == "exact_only_initial_sync"
+    assert result["semantic_provider"] is None
+    assert result["vector_count"] == 0
+    assert result["rrf_used"] is False
+    assert result["rerank_used"] is False
+    assert result["results"][0]["file_path"] == "django/core/handlers/base.py"
+
+
+def test_semantic_ready_response_exposes_runtime_coverage_and_fusion(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = CloudSnapshotStore(root=tmp_path / "state" / "cloud-sync")
+    content = "class BaseHandler:\n    pass\n"
+    store.upsert(
+        workspace_id="repo-a",
+        path="django/core/handlers/base.py",
+        content=content,
+        hash_value=_sha(content),
+        size=len(content),
+        mtime_ms=123,
+        encoding="utf-8",
+        revision=12,
+    )
+    store.mark_indexed(
+        workspace_id="repo-a",
+        revision=12,
+        semantic_coverage="semantic_full",
+    )
+
+    class _Engine:
+        def semantic_index_status(self):
+            return {
+                "semantic_index_ready": True,
+                "vector_count": 321,
+                "runtime": {"embedding_backend": "local-sentence-transformers"},
+                "metadata": {"indexed_revision": 12},
+            }
+
+        async def search(self, _request):
+            return [
+                SimpleNamespace(
+                    file_path="django/core/handlers/base.py",
+                    symbol_name="BaseHandler",
+                    chunk_type="class",
+                    line_start=1,
+                    line_end=2,
+                    signature="class BaseHandler:",
+                    docstring="",
+                    relevance_score=0.91,
+                    why_matched=["semantic", "rrf"],
+                )
+            ]
+
+    registry = WorkspaceRegistry(store_path=tmp_path / "workspaces.json")
+    registry.add(
+        name="repo",
+        path=str(workspace),
+        set_active=True,
+        workspace_id="repo-a",
+    )
+    monkeypatch.setattr(
+        search_router,
+        "get_settings",
+        lambda: SimpleNamespace(WORKING_DIR=str(workspace)),
+    )
+    monkeypatch.setattr(search_router, "get_workspace_registry", lambda: registry)
+    monkeypatch.setattr(search_router, "CloudSnapshotStore", lambda: store)
+    monkeypatch.setattr(search_router, "get_search_engine", lambda: _Engine())
+    monkeypatch.setattr(
+        search_router,
+        "_snapshot_semantic_exact_boost",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        search_router,
+        "_snapshot_semantic_lexical_boost",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        search_router,
+        "cloud_freshness_error",
+        lambda **_kwargs: None,
+    )
+
+    app = FastAPI()
+    app.include_router(search_router.router)
+    client = TestClient(app)
+    response = client.post(
+        "/search",
+        headers={"X-Omnicode-Workspace": "repo-a"},
+        json={
+            "query": "request middleware handling",
+            "search_type": "semantic",
+            "max_results": 3,
+        },
+    )
+
+    result = response.json()["result"]
+    assert response.status_code == 200
+    assert result["semantic_index_ready"] is True
+    assert result["semantic_coverage"] == "semantic_full"
+    assert result["semantic_provider"] == "local-sentence-transformers"
+    assert result["vector_count"] == 321
+    assert result["rrf_used"] is True
+    assert result["rerank_used"] is False
+    assert result["semantic_indexed_revision"] == 12
+    assert result["freshness"] == "fresh"
+
+
+def test_semantic_exact_only_allows_exact_fresh_with_min_revision(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = CloudSnapshotStore(root=tmp_path / "state" / "cloud-sync")
+    exact = SnapshotExactIndex(store=store)
+    content = "class BaseHandler:\n    pass\n"
+    store.upsert(
+        workspace_id="repo-a",
+        path="django/core/handlers/base.py",
+        content=content,
+        hash_value=_sha(content),
+        size=len(content),
+        mtime_ms=123,
+        encoding="utf-8",
+        revision=11,
+    )
+    exact.update_batch(
+        workspace_id="repo-a",
+        changed_files=[
+            {
+                "path": "django/core/handlers/base.py",
+                "hash": _sha(content),
+                "size": len(content),
+                "content": content,
+            }
+        ],
+        deleted_paths=[],
+        revision=11,
+    )
+    store.mark_indexed(
+        workspace_id="repo-a",
+        revision=11,
+        semantic_coverage="exact_only_initial_sync",
+    )
+
+    class _Engine:
+        def semantic_index_status(self):
+            return {"semantic_index_ready": True}
+
+        async def search(self, _request):  # pragma: no cover - must not run
+            raise AssertionError("semantic vector search should not run")
+
+    registry = WorkspaceRegistry(store_path=tmp_path / "workspaces.json")
+    registry.add(
+        name="repo",
+        path=str(workspace),
+        set_active=True,
+        workspace_id="repo-a",
+    )
+    monkeypatch.setattr(
+        search_router,
+        "get_settings",
+        lambda: SimpleNamespace(WORKING_DIR=str(workspace)),
+    )
+    monkeypatch.setattr(search_router, "get_workspace_registry", lambda: registry)
+    monkeypatch.setattr(search_router, "_exact_index", lambda: exact)
+    monkeypatch.setattr(search_router, "CloudSnapshotStore", lambda: store)
+    monkeypatch.setattr(search_router, "get_search_engine", lambda: _Engine())
+
+    def _freshness_allows_exact(**kwargs):
+        assert kwargs["allow_exact_fresh"] is True
+        return None
+
+    monkeypatch.setattr(
+        search_router,
+        "cloud_freshness_error",
+        _freshness_allows_exact,
+    )
+
+    app = FastAPI()
+    app.include_router(search_router.router)
+    client = TestClient(app)
+
+    response = client.post(
+        "/search",
+        headers={
+            "X-Omnicode-Workspace": "repo-a",
+            "X-Omnicode-Min-Revision": "11",
+        },
+        json={"query": "BaseHandler", "search_type": "semantic", "max_results": 3},
+    )
+
+    body = response.json()
+    result = body["result"]
+    assert response.status_code == 200
+    assert body["success"] is True
+    assert result["fallback_used"] is True
+    assert result["capabilities_missing"] == ["search.semantic"]
+    assert result["semantic_index_ready"] is False
+    assert result["results"][0]["file_path"] == "django/core/handlers/base.py"
+
+
+def test_snapshot_semantic_bootstrap_respects_selected_file_limit(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = CloudSnapshotStore(root=tmp_path / "state" / "cloud-sync")
+    records = []
+    for idx in range(3):
+        content = f"def selected_{idx}():\n    return {idx}\n"
+        path = f"pkg/module_{idx}.py"
+        records.append(path)
+        store.upsert(
+            workspace_id="repo-a",
+            path=path,
+            content=content,
+            hash_value=_sha(content),
+            size=len(content),
+            mtime_ms=idx + 1,
+            encoding="utf-8",
+            revision=idx + 1,
+        )
+
+    indexed: list[str] = []
+
+    class _Engine:
+        async def upsert_contents(self, batch, *, refresh: bool = True):
+            indexed.extend(item[0] for item in batch)
+            return len(batch)
+
+        def prepare_semantic_index(self, **_kwargs):
+            return None
+
+        def get_stats(self):
+            return {"total_files": 0}
+
+        def refresh_stats(self):
+            return None
+
+    monkeypatch.setenv("OMNICODE_SYNC_SEMANTIC_SELECTED_FILE_LIMIT", "2")
+    monkeypatch.setattr(search_router, "CloudSnapshotStore", lambda: store)
+    monkeypatch.setattr(search_router, "get_search_engine", lambda: _Engine())
+
+    result = search_router._run_snapshot_index_blocking(
+        "repo-a",
+        force=True,
+        scope="exact_policy",
+    )
+
+    assert result["indexed_files"] == 2
+    assert indexed == records[:2]
+    assert result["skipped_by_policy"] == 1
+    assert result["skip_policy_reasons"] == {"selected_limit_reached": 1}
 
 
 def test_semantic_search_boosts_snapshot_lexical_overlap_above_noise(
@@ -1855,6 +2280,9 @@ def test_semantic_search_response_includes_query_plan(
 
     result = response.json()["result"]
     assert response.status_code == 200
+    assert result["ok"] is True
+    assert result["count"] == 0
+    assert result["total_count"] == 0
     assert result["query_plan"]["intent"] == "semantic"
     assert result["query_plan"]["resolved_mode"] == "semantic"
     assert result["provider_chain"] == ["semantic_vector"]
@@ -1910,6 +2338,7 @@ def test_search_stats_reports_semantic_metadata_mismatch_from_engine(
     monkeypatch,
 ) -> None:
     import asyncio
+
     import numpy as np
 
     from omnicode.search.engine import SemanticSearchEngine
@@ -1970,6 +2399,7 @@ def test_exact_symbol_search_still_works_when_semantic_metadata_is_invalid(
     monkeypatch,
 ) -> None:
     import asyncio
+
     import numpy as np
 
     from omnicode.search.engine import SemanticSearchEngine
@@ -2073,6 +2503,8 @@ def test_exact_symbol_search_still_works_when_semantic_metadata_is_invalid(
 def test_intelligence_context_promotes_same_file_after_snapshot_anchor(
     tmp_path: Path, monkeypatch,
 ) -> None:
+    from api.v1.routers import graph as graph_router
+
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     store = CloudSnapshotStore(root=tmp_path / "state" / "cloud-sync")
@@ -2147,6 +2579,9 @@ def test_intelligence_context_promotes_same_file_after_snapshot_anchor(
     )
     monkeypatch.setattr(search_router, "get_workspace_registry", lambda: registry)
     monkeypatch.setattr(search_router, "CloudSnapshotStore", lambda: store)
+    monkeypatch.setattr(graph_router, "CloudSnapshotStore", lambda: store)
+    graph_router._GRAPH_INDEX_CACHE.clear()
+    graph_router._EXACT_INDEX_CACHE.clear()
     monkeypatch.setattr(
         intelligence_router,
         "get_settings",
@@ -2161,7 +2596,7 @@ def test_intelligence_context_promotes_same_file_after_snapshot_anchor(
     monkeypatch.setattr(
         intelligence_router,
         "cloud_freshness_state",
-        lambda *, workspace_id, min_revision: {
+        lambda *, workspace_id, min_revision, **_kwargs: {
             "workspace_id": workspace_id,
             "accepted_revision": 11,
             "indexed_revision": 0,
@@ -2263,7 +2698,7 @@ def test_intelligence_context_snapshot_fast_path_skips_composer(
     monkeypatch.setattr(
         intelligence_router,
         "cloud_freshness_state",
-        lambda *, workspace_id, min_revision: {
+        lambda *, workspace_id, min_revision, **_kwargs: {
             "workspace_id": workspace_id,
             "accepted_revision": 11,
             "indexed_revision": 0,
@@ -2300,6 +2735,174 @@ def test_intelligence_context_snapshot_fast_path_skips_composer(
     assert result["impact"]["impact_status"] == "unknown"
     assert result["memory"]["skipped"] is True
     assert result["git_history"]["skipped"] is True
+
+
+def test_intelligence_context_uses_persisted_snapshot_graph(
+    monkeypatch,
+) -> None:
+    from api.v1.routers import graph as graph_router
+
+    monkeypatch.setattr(
+        graph_router,
+        "_persisted_graph_impact",
+        lambda **_kwargs: {
+            "symbol": "BaseHandler",
+            "graph_available": True,
+            "graph_status": "ready",
+            "impact_status": "available",
+            "confidence": "medium",
+            "direct_callers": ["WSGIHandler"],
+            "direct_callees": ["load_middleware"],
+            "accepted_revision": 12,
+            "indexed_revision": 12,
+        },
+    )
+    payload = {
+        "impact": {
+            "graph_available": False,
+            "impact_status": "unknown",
+        },
+        "capability_status": [{
+            "capability": "impact_analysis",
+            "available": True,
+            "state": "degraded",
+            "metadata": {"graph_index_ready": False},
+        }],
+        "context_quality": {"primary_anchor": "snapshot_exact_symbol"},
+    }
+
+    result = intelligence_router._apply_snapshot_graph_context(
+        payload,
+        workspace_id="repo-a",
+        symbol="BaseHandler",
+        symbol_row={
+            "file_path": "django/core/handlers/base.py",
+            "symbol_name": "BaseHandler",
+            "line_start": 21,
+        },
+        depth=2,
+    )
+
+    assert result["impact"]["graph_available"] is True
+    assert result["impact"]["direct_callers"] == ["WSGIHandler"]
+    capability = result["capability_status"][0]
+    assert capability["state"] == "ready"
+    assert capability["backend"] == "workspace_graph_index"
+    assert capability["metadata"]["graph_index_ready"] is True
+    assert result["context_quality"]["graph_evidence"] == (
+        "persisted_workspace_graph"
+    )
+
+
+def test_intelligence_context_skips_expensive_graph_fallback_when_not_ready(
+    monkeypatch,
+) -> None:
+    from api.v1.routers import graph as graph_router
+
+    monkeypatch.setattr(
+        graph_router,
+        "_persisted_graph_status",
+        lambda _workspace_id: {
+            "ready": False,
+            "current": False,
+            "files": 7000,
+            "definitions": 60000,
+        },
+    )
+    monkeypatch.setattr(
+        graph_router,
+        "_persisted_graph_impact",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("impact should not run when graph is not ready")
+        ),
+    )
+    payload = {
+        "impact": {},
+        "capability_status": [{
+            "capability": "impact_analysis",
+            "available": True,
+            "state": "degraded",
+            "metadata": {"graph_index_ready": False},
+        }],
+        "context_quality": {"primary_anchor": "snapshot_exact_symbol"},
+    }
+
+    result = intelligence_router._apply_snapshot_graph_context(
+        payload,
+        workspace_id="repo-a",
+        symbol="ReplicaManager",
+        symbol_row={
+            "file_path": "core/src/main/scala/kafka/server/ReplicaManager.scala",
+            "symbol_name": "ReplicaManager",
+            "line_start": 154,
+        },
+        depth=2,
+    )
+
+    impact = result["impact"]
+    assert impact["symbol_found"] is True
+    assert impact["impact_status"] == "unknown"
+    assert impact["graph_available"] is False
+    assert impact["fallback"]["reference_source"] == (
+        "not_scanned_in_context_fast_path"
+    )
+    assert result["context_quality"]["graph_evidence"] == (
+        "deterministic_fallback"
+    )
+
+
+def test_snapshot_fast_context_bounds_graph_evidence_to_token_budget() -> None:
+    payload = {
+        "impact": {
+            "direct_callers": [f"caller_{idx}" for idx in range(100)],
+            "direct_callees": [f"callee_{idx}" for idx in range(100)],
+            "references": [
+                {
+                    "path": f"pkg/module_{idx}.py",
+                    "line": idx + 1,
+                    "context": "target() " * 12,
+                }
+                for idx in range(100)
+            ],
+            "test_candidates": [
+                f"tests/test_module_{idx}.py" for idx in range(60)
+            ],
+            "inheritance": {
+                "edges": [
+                    {
+                        "child": f"Child{idx}",
+                        "parent": "Base",
+                        "path": f"pkg/child_{idx}.py",
+                    }
+                    for idx in range(60)
+                ]
+            },
+        },
+        "capability_status": [
+            {
+                "capability": "impact_analysis",
+                "available": True,
+                "state": "ready",
+                "backend": "workspace_graph_index",
+            }
+        ],
+        "token_estimate": 0,
+        "token_budget": 1200,
+    }
+
+    result = intelligence_router._finalize_snapshot_fast_context(
+        payload,
+        token_budget=1200,
+        elapsed_ms=17,
+    )
+
+    assert result["truncated"] is True
+    assert result["elapsed_ms"] == 17
+    assert result["token_estimate"] > 0
+    assert result["budget_respected"] is True
+    assert len(result["impact"]["direct_callers"]) <= 5
+    assert len(result["impact"]["references"]) <= 5
+    assert result["truncated_fields"]["impact.references"]["original"] == 100
 
 
 def test_intelligence_context_fast_path_uses_exact_index_before_snapshot_scan(
@@ -2365,7 +2968,7 @@ def test_intelligence_context_fast_path_uses_exact_index_before_snapshot_scan(
     monkeypatch.setattr(
         intelligence_router,
         "cloud_freshness_state",
-        lambda *, workspace_id, min_revision: {
+        lambda *, workspace_id, min_revision, **_kwargs: {
             "workspace_id": workspace_id,
             "accepted_revision": 11,
             "indexed_revision": 0,
@@ -2472,7 +3075,7 @@ def test_intelligence_context_include_memory_uses_composer(
     monkeypatch.setattr(
         intelligence_router,
         "cloud_freshness_state",
-        lambda *, workspace_id, min_revision: {
+        lambda *, workspace_id, min_revision, **_kwargs: {
             "workspace_id": workspace_id,
             "accepted_revision": 11,
             "indexed_revision": 0,
@@ -2523,19 +3126,23 @@ def test_graph_risk_unknown_when_snapshot_symbol_has_no_graph_evidence(
         encoding="utf-8",
         revision=11,
     )
+    SnapshotExactIndex(store=store).update_batch(
+        workspace_id="repo-a",
+        changed_files=[
+            {
+                "path": "django/core/handlers/base.py",
+                "hash": _sha(content),
+                "size": len(content),
+                "content": content,
+            }
+        ],
+        deleted_paths=[],
+        revision=11,
+    )
 
     class _Analyzer:
         async def assess_risk(self, **_kwargs):
-            return {
-                "symbol": "BaseHandler",
-                "risk": "low",
-                "risk_score": 2,
-                "reasons": ["No test coverage found"],
-                "direct_callers": 0,
-                "files_affected": 0,
-                "test_coverage": 0,
-                "suggested_checks": [],
-            }
+            raise AssertionError("snapshot graph fallback must not rescan workspace")
 
     monkeypatch.setitem(sys.modules, "api.v1.routers.search", search_router)
     monkeypatch.setattr(search_router, "CloudSnapshotStore", lambda: store)
@@ -2577,20 +3184,23 @@ def test_graph_impact_marks_snapshot_graph_unavailable(
         encoding="utf-8",
         revision=11,
     )
+    SnapshotExactIndex(store=store).update_batch(
+        workspace_id="repo-a",
+        changed_files=[
+            {
+                "path": "django/core/handlers/base.py",
+                "hash": _sha(content),
+                "size": len(content),
+                "content": content,
+            }
+        ],
+        deleted_paths=[],
+        revision=11,
+    )
 
     class _Analyzer:
         async def get_impact_radius(self, **_kwargs):
-            return {
-                "symbol": "BaseHandler",
-                "depth": 2,
-                "affected_symbols": [],
-                "dependent_symbols": [],
-                "affected_count": 0,
-                "dependent_count": 0,
-                "files_involved": [],
-                "files_count": 0,
-                "total_blast_radius": 1,
-            }
+            raise AssertionError("snapshot graph fallback must not rescan workspace")
 
     monkeypatch.setitem(sys.modules, "api.v1.routers.search", search_router)
     monkeypatch.setattr(search_router, "CloudSnapshotStore", lambda: store)
@@ -2614,6 +3224,554 @@ def test_graph_impact_marks_snapshot_graph_unavailable(
     assert result["impact_status"] == "unknown"
     assert result["graph_available"] is False
     assert result["symbol_found"] is True
+
+
+def test_graph_snapshot_fallback_skips_large_unindexed_text_scan(monkeypatch) -> None:
+    class _Exact:
+        @staticmethod
+        def status(*, workspace_id: str) -> dict[str, object]:
+            assert workspace_id == "repo-a"
+            return {"line_fts_available": False, "lines": 1_700_000}
+
+        @staticmethod
+        def search_text(**_kwargs):
+            raise AssertionError("large fallback must not scan exact lines table")
+
+    monkeypatch.setattr(graph_router, "_exact_index", lambda: _Exact())
+
+    fallback = graph_router._snapshot_reference_fallback(
+        workspace_id="repo-a",
+        symbol="ReplicaManager",
+        symbol_row={
+            "file_path": "core/src/main/scala/kafka/server/ReplicaManager.scala",
+            "line_start": 154,
+            "signature": "class ReplicaManager",
+            "hash": "sha256:test",
+            "revision": 17,
+        },
+    )
+
+    assert fallback["reference_source"] == "snapshot_exact_symbol"
+    assert fallback["references"] == [
+        {
+            "file": "core/src/main/scala/kafka/server/ReplicaManager.scala",
+            "line": 154,
+            "snippet": "class ReplicaManager",
+            "source": "snapshot_exact_symbol",
+            "confidence": "high",
+            "is_definition": True,
+            "hash": "sha256:test",
+            "revision": 17,
+        }
+    ]
+    assert "line FTS is unavailable" in fallback["fallback_warning"]
+
+
+def test_graph_related_tests_degrades_without_workspace_rescan(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    store = CloudSnapshotStore(root=tmp_path / "state" / "cloud-sync")
+    content = "class BaseHandler:\n    pass\n"
+    store.upsert(
+        workspace_id="repo-a",
+        path="django/core/handlers/base.py",
+        content=content,
+        hash_value=_sha(content),
+        size=len(content),
+        mtime_ms=123,
+        encoding="utf-8",
+        revision=11,
+    )
+    SnapshotExactIndex(store=store).update_batch(
+        workspace_id="repo-a",
+        changed_files=[
+            {
+                "path": "django/core/handlers/base.py",
+                "hash": _sha(content),
+                "size": len(content),
+                "content": content,
+            }
+        ],
+        deleted_paths=[],
+        revision=11,
+    )
+
+    class _Analyzer:
+        async def suggest_related_tests(self, **_kwargs):
+            raise AssertionError("snapshot graph fallback must not rescan workspace")
+
+    monkeypatch.setitem(sys.modules, "api.v1.routers.search", search_router)
+    monkeypatch.setattr(search_router, "CloudSnapshotStore", lambda: store)
+    monkeypatch.setattr(graph_router, "CloudSnapshotStore", lambda: store)
+    monkeypatch.setattr(graph_router, "_build", lambda: _Analyzer())
+
+    app = FastAPI()
+    app.include_router(graph_router.router)
+    client = TestClient(app)
+
+    response = client.get(
+        "/graph/related-tests",
+        headers={"X-Omnicode-Workspace": "repo-a"},
+        params={"symbol": "BaseHandler", "max_files": 200},
+    )
+
+    result = response.json()["result"]
+    assert response.status_code == 200
+    assert result["graph_available"] is False
+    assert result["symbol_found"] is True
+    assert result["confidence"] == "low"
+    assert result["fallback_reason"] == "graph_index_unavailable"
+
+
+def test_graph_impact_uses_current_persisted_graph(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    store = CloudSnapshotStore(root=tmp_path / "state" / "cloud-sync")
+    base_content = (
+        "def target():\n"
+        "    helper()\n"
+        "\n"
+        "def caller():\n"
+        "    target()\n"
+    )
+    store.upsert(
+        workspace_id="repo-a",
+        path="pkg/service.py",
+        content=base_content,
+        hash_value=_sha(base_content),
+        size=len(base_content),
+        mtime_ms=123,
+        encoding="utf-8",
+        revision=12,
+    )
+    graph = WorkspaceGraphIndex(store=store)
+    graph.update_batch(
+        workspace_id="repo-a",
+        changed_files=[
+            {
+                "path": "pkg/service.py",
+                "hash": _sha(base_content),
+                "content": base_content,
+            }
+        ],
+        deleted_paths=[],
+        revision=12,
+    )
+
+    class _Analyzer:
+        async def get_impact_radius(self, **_kwargs):
+            raise AssertionError("current persisted graph should avoid rescan")
+
+    monkeypatch.setitem(sys.modules, "api.v1.routers.search", search_router)
+    monkeypatch.setattr(search_router, "CloudSnapshotStore", lambda: store)
+    monkeypatch.setattr(graph_router, "CloudSnapshotStore", lambda: store)
+    monkeypatch.setattr(graph_router, "_build", lambda: _Analyzer())
+
+    app = FastAPI()
+    app.include_router(graph_router.router)
+    client = TestClient(app)
+
+    response = client.get(
+        "/graph/impact",
+        headers={"X-Omnicode-Workspace": "repo-a"},
+        params={"symbol": "target", "depth": 2, "max_files": 200},
+    )
+
+    result = response.json()["result"]
+    assert response.status_code == 200
+    assert result["graph_available"] is True
+    assert result["graph_status"] == "ready"
+    assert result["graph_source"] == "persisted_sqlite"
+    assert result["impact_status"] == "available"
+    assert "caller" in result["dependent_symbols"]
+    assert "helper" in result["affected_symbols"]
+    assert result["graph_index"]["graph_indexed_revision"] == 12
+
+
+def test_graph_impact_marks_unsupported_symbol_language_unavailable(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    store = CloudSnapshotStore(root=tmp_path / "state" / "cloud-sync")
+    content = "class ReplicaManager { def run() = helper() }\n"
+    test_content = "class ReplicaManagerTest { val manager = new ReplicaManager() }\n"
+    SnapshotExactIndex(store=store).update_batch(
+        workspace_id="repo-a",
+        changed_files=[
+            {
+                "path": "core/ReplicaManager.scala",
+                "hash": _sha(content),
+                "size": len(content),
+                "content": content,
+            },
+            {
+                "path": "core/src/test/scala/kafka/server/ReplicaManagerTest.scala",
+                "hash": _sha(test_content),
+                "size": len(test_content),
+                "content": test_content,
+            }
+        ],
+        deleted_paths=[],
+        revision=14,
+    )
+    store.upsert(
+        workspace_id="repo-a",
+        path="core/ReplicaManager.scala",
+        content=content,
+        hash_value=_sha(content),
+        size=len(content),
+        mtime_ms=123,
+        encoding="utf-8",
+        revision=14,
+    )
+    store.upsert(
+        workspace_id="repo-a",
+        path="core/src/test/scala/kafka/server/ReplicaManagerTest.scala",
+        content=test_content,
+        hash_value=_sha(test_content),
+        size=len(test_content),
+        mtime_ms=123,
+        encoding="utf-8",
+        revision=14,
+    )
+    WorkspaceGraphIndex(store=store).update_batch(
+        workspace_id="repo-a",
+        changed_files=[
+            {
+                "path": "core/ReplicaManager.scala",
+                "hash": _sha(content),
+                "content": content,
+            },
+            {
+                "path": "pkg/service.py",
+                "hash": _sha("def caller():\n    helper()\n"),
+                "content": "def caller():\n    helper()\n",
+            }
+        ],
+        deleted_paths=[],
+        revision=14,
+    )
+
+    monkeypatch.setattr(graph_router, "CloudSnapshotStore", lambda: store)
+
+    app = FastAPI()
+    app.include_router(graph_router.router)
+    client = TestClient(app)
+
+    response = client.get(
+        "/graph/impact",
+        headers={"X-Omnicode-Workspace": "repo-a"},
+        params={"symbol": "ReplicaManager", "depth": 2, "max_files": 200},
+    )
+
+    result = response.json()["result"]
+    assert response.status_code == 200
+    assert result["symbol_found"] is True
+    assert result["impact_status"] == "unknown"
+    assert result["confidence"] == "low"
+    assert result["graph_available"] is False
+    assert result["graph_status"] == "partial"
+    assert result["resolution_mode"] in {"symbol", "file_symbol_aggregate"}
+    assert result["fallback_reason"] in {
+        "graph_relation_evidence_incomplete",
+        "scala_lexical_graph_evidence",
+    }
+    assert "scala_lexical_fallback" in result["evidence_providers"]
+    assert result["fallback"]["reference_source"] in {
+        "snapshot_exact_symbol",
+        "snapshot_exact_text",
+    }
+    assert any(
+        row["file"] == "core/ReplicaManager.scala"
+        for row in result["fallback"]["references"]
+    )
+    assert (
+        "core/src/test/scala/kafka/server/ReplicaManagerTest.scala"
+        in result["fallback"]["test_candidates"]
+    )
+
+
+def test_graph_impact_degrades_scala_seed_even_with_cross_language_references(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    store = CloudSnapshotStore(root=tmp_path / "state" / "cloud-sync")
+    scala_content = "class ReplicaManager { def startup() = helper() }\n"
+    java_content = (
+        "class UsesReplica { void run() { ReplicaManager(); startup(); } }\n"
+    )
+    SnapshotExactIndex(store=store).update_batch(
+        workspace_id="repo-a",
+        changed_files=[
+            {
+                "path": "core/ReplicaManager.scala",
+                "hash": _sha(scala_content),
+                "size": len(scala_content),
+                "content": scala_content,
+            },
+            {
+                "path": "src/UsesReplica.java",
+                "hash": _sha(java_content),
+                "size": len(java_content),
+                "content": java_content,
+            },
+        ],
+        deleted_paths=[],
+        revision=15,
+    )
+    store.upsert(
+        workspace_id="repo-a",
+        path="core/ReplicaManager.scala",
+        content=scala_content,
+        hash_value=_sha(scala_content),
+        size=len(scala_content),
+        mtime_ms=123,
+        encoding="utf-8",
+        revision=15,
+    )
+    store.upsert(
+        workspace_id="repo-a",
+        path="src/UsesReplica.java",
+        content=java_content,
+        hash_value=_sha(java_content),
+        size=len(java_content),
+        mtime_ms=124,
+        encoding="utf-8",
+        revision=15,
+    )
+    WorkspaceGraphIndex(store=store).update_batch(
+        workspace_id="repo-a",
+        changed_files=[
+            {
+                "path": "core/ReplicaManager.scala",
+                "hash": _sha(scala_content),
+                "content": scala_content,
+            },
+            {
+                "path": "src/UsesReplica.java",
+                "hash": _sha(java_content),
+                "content": java_content,
+            },
+        ],
+        deleted_paths=[],
+        revision=15,
+    )
+
+    monkeypatch.setattr(graph_router, "CloudSnapshotStore", lambda: store)
+
+    app = FastAPI()
+    app.include_router(graph_router.router)
+    client = TestClient(app)
+
+    response = client.get(
+        "/graph/impact",
+        headers={"X-Omnicode-Workspace": "repo-a"},
+        params={"symbol": "ReplicaManager", "depth": 2, "max_files": 200},
+    )
+
+    result = response.json()["result"]
+    assert response.status_code == 200
+    assert result["symbol_found"] is True
+    assert result["impact_status"] == "unknown"
+    assert result["confidence"] == "low"
+    assert result["graph_available"] is False
+    assert result["graph_status"] == "partial"
+    assert result["fallback_reason"] == "scala_lexical_graph_evidence"
+    assert set(result["evidence_providers"]) == {
+        "scala_lexical_fallback",
+        "tree_sitter_ast",
+    }
+    assert result["fallback"]["reference_source"] in {
+        "snapshot_exact_symbol",
+        "snapshot_exact_text",
+    }
+
+
+def test_graph_impact_degrades_when_ready_graph_lacks_snapshot_symbol(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    store = CloudSnapshotStore(root=tmp_path / "state" / "cloud-sync")
+    scala_content = "class ReplicaManager { def run() = helper() }\n"
+    py_content = "def caller():\n    helper()\n"
+    store.upsert(
+        workspace_id="repo-a",
+        path="core/ReplicaManager.scala",
+        content=scala_content,
+        hash_value=_sha(scala_content),
+        size=len(scala_content),
+        mtime_ms=123,
+        encoding="utf-8",
+        revision=15,
+    )
+    SnapshotExactIndex(store=store).update_batch(
+        workspace_id="repo-a",
+        changed_files=[{
+            "path": "core/ReplicaManager.scala",
+            "hash": _sha(scala_content),
+            "size": len(scala_content),
+            "content": scala_content,
+        }],
+        deleted_paths=[],
+        revision=15,
+    )
+    graph = WorkspaceGraphIndex(store=store)
+    graph.update_batch(
+        workspace_id="repo-a",
+        changed_files=[{
+            "path": "pkg/service.py",
+            "hash": _sha(py_content),
+            "content": py_content,
+        }],
+        deleted_paths=[],
+        revision=15,
+    )
+    graph._set_coverage_complete(workspace_id="repo-a", revision=15)
+
+    monkeypatch.setattr(graph_router, "CloudSnapshotStore", lambda: store)
+
+    app = FastAPI()
+    app.include_router(graph_router.router)
+    client = TestClient(app)
+
+    response = client.get(
+        "/graph/impact",
+        headers={"X-Omnicode-Workspace": "repo-a"},
+        params={"symbol": "ReplicaManager", "depth": 2, "max_files": 200},
+    )
+
+    result = response.json()["result"]
+    assert response.status_code == 200
+    assert result["symbol_found"] is True
+    assert result["graph_available"] is False
+    assert result["graph_status"] == "partial"
+    assert result["fallback_reason"] == "graph_symbol_not_indexed"
+    assert result["fallback"]["reference_source"] in {
+        "snapshot_exact_symbol",
+        "snapshot_exact_text",
+    }
+    assert any(
+        row["file"] == "core/ReplicaManager.scala"
+        for row in result["fallback"]["references"]
+    )
+
+
+def test_graph_related_tests_uses_snapshot_reference_fallback_for_tests(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    store = CloudSnapshotStore(root=tmp_path / "state" / "cloud-sync")
+    content = "class ReplicaManager { def run() = helper() }\n"
+    test_content = "class ReplicaManagerTest { val manager = new ReplicaManager() }\n"
+    SnapshotExactIndex(store=store).update_batch(
+        workspace_id="repo-a",
+        changed_files=[
+            {
+                "path": "core/ReplicaManager.scala",
+                "hash": _sha(content),
+                "size": len(content),
+                "content": content,
+            },
+            {
+                "path": "core/src/test/scala/kafka/server/ReplicaManagerTest.scala",
+                "hash": _sha(test_content),
+                "size": len(test_content),
+                "content": test_content,
+            },
+        ],
+        deleted_paths=[],
+        revision=15,
+    )
+    for path, file_content in (
+        ("core/ReplicaManager.scala", content),
+        ("core/src/test/scala/kafka/server/ReplicaManagerTest.scala", test_content),
+    ):
+        store.upsert(
+            workspace_id="repo-a",
+            path=path,
+            content=file_content,
+            hash_value=_sha(file_content),
+            size=len(file_content),
+            mtime_ms=123,
+            encoding="utf-8",
+            revision=15,
+        )
+
+    monkeypatch.setattr(graph_router, "CloudSnapshotStore", lambda: store)
+
+    app = FastAPI()
+    app.include_router(graph_router.router)
+    client = TestClient(app)
+
+    response = client.get(
+        "/graph/related-tests",
+        headers={"X-Omnicode-Workspace": "repo-a"},
+        params={"symbol": "ReplicaManager", "max_files": 200},
+    )
+
+    result = response.json()["result"]
+    assert response.status_code == 200
+    assert result["graph_available"] is False
+    assert result["symbol_found"] is True
+    assert result["reference_source"] == "snapshot_exact_text"
+    assert result["test_files"] == [
+        "core/src/test/scala/kafka/server/ReplicaManagerTest.scala"
+    ]
+    assert result["suggested_commands"] == [
+        "pytest core/src/test/scala/kafka/server/ReplicaManagerTest.scala"
+    ]
+
+
+def test_graph_risk_uses_persisted_graph_evidence(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    store = CloudSnapshotStore(root=tmp_path / "state" / "cloud-sync")
+    content = (
+        "def target():\n"
+        "    helper()\n"
+        "\n"
+        "def caller():\n"
+        "    target()\n"
+    )
+    store.upsert(
+        workspace_id="repo-a",
+        path="pkg/service.py",
+        content=content,
+        hash_value=_sha(content),
+        size=len(content),
+        mtime_ms=123,
+        encoding="utf-8",
+        revision=13,
+    )
+    WorkspaceGraphIndex(store=store).update_batch(
+        workspace_id="repo-a",
+        changed_files=[
+            {
+                "path": "pkg/service.py",
+                "hash": _sha(content),
+                "content": content,
+            }
+        ],
+        deleted_paths=[],
+        revision=13,
+    )
+
+    monkeypatch.setitem(sys.modules, "api.v1.routers.search", search_router)
+    monkeypatch.setattr(search_router, "CloudSnapshotStore", lambda: store)
+    monkeypatch.setattr(graph_router, "CloudSnapshotStore", lambda: store)
+
+    app = FastAPI()
+    app.include_router(graph_router.router)
+    client = TestClient(app)
+
+    response = client.get(
+        "/graph/risk",
+        headers={"X-Omnicode-Workspace": "repo-a"},
+        params={"symbol": "target", "max_files": 200},
+    )
+
+    result = response.json()["result"]
+    assert response.status_code == 200
+    assert result["graph_available"] is True
+    assert result["graph_source"] == "persisted_sqlite"
+    assert result["direct_callers"] >= 1
+    assert result["risk"] in {"low", "medium", "high"}
 
 
 def test_symbol_search_isolates_exact_index_by_workspace(

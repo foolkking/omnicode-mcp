@@ -5,6 +5,9 @@ from omnicode_core.search.planner import (
     detect_search_mode,
     empty_reason_for_unavailable,
 )
+from omnicode_adapters.mcp_server.high_level_tools import (
+    _symbol_candidate_from_text_query,
+)
 
 
 def test_detect_search_mode_routes_code_declarations_to_text() -> None:
@@ -34,6 +37,25 @@ def test_text_plan_lists_deterministic_provider_chain() -> None:
         "cloud_snapshot_grep",
     ]
     assert plan.to_dict()["fallback_capabilities"]
+
+
+def test_declaration_text_queries_extract_symbol_fast_path_candidate() -> None:
+    assert _symbol_candidate_from_text_query("class BaseHandler:") == (
+        "BaseHandler",
+        "class",
+    )
+    assert _symbol_candidate_from_text_query("class ReplicaManager") == (
+        "ReplicaManager",
+        "class",
+    )
+    assert _symbol_candidate_from_text_query("def _detect_mode") == (
+        "_detect_mode",
+        "function",
+    )
+    assert _symbol_candidate_from_text_query("arbitrary middleware text") == (
+        None,
+        None,
+    )
 
 
 def test_symbol_plan_keeps_exact_symbol_contract() -> None:
