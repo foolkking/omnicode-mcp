@@ -33,6 +33,16 @@ def _compact_modes(modes: Iterable[str]) -> list[str]:
     return ordered
 
 
+_SEMANTIC_READY_COVERAGES = frozenset(
+    {
+        "semantic_full",
+        "selected_files",
+        "filtered",
+        "partial_after_exact_only",
+    }
+)
+
+
 def build_index_readiness_contract(
     *,
     workspace_id: str,
@@ -77,20 +87,25 @@ def build_index_readiness_contract(
         and not index_worker_busy
         and not last_index_error
         and not semantic_initial_exact_only
+        and semantic_coverage in _SEMANTIC_READY_COVERAGES
     )
 
-    if last_index_error:
-        reason = "index_error"
-    elif not snapshot_ready:
+    if not snapshot_ready:
         reason = "empty_workspace"
     elif not exact_ready:
         reason = "exact_index_catching_up"
     elif semantic_ready:
-        reason = "semantic_full"
+        reason = semantic_coverage
     elif semantic_initial_exact_only:
         reason = "exact_only_initial_sync"
+    elif last_index_error:
+        reason = "index_error"
     elif index_worker_busy or semantic_pending > 0:
         reason = "semantic_index_catching_up"
+    elif semantic_coverage == "filtered_empty":
+        reason = "semantic_filtered_empty"
+    elif semantic_coverage in {"deletes_only", "unchanged", "unknown"}:
+        reason = f"semantic_{semantic_coverage}"
     else:
         reason = "semantic_not_ready"
 
@@ -165,7 +180,7 @@ def build_index_readiness_contract(
             "ready": bool(graph_index_ready),
             "reason": None
             if graph_index_ready
-            else "graph index is not persisted yet; impact may use fallback analysis.",
+            else "persistent graph index is not ready; impact may use fallback analysis.",
         },
     }
 

@@ -5,7 +5,7 @@ import os
 import time
 from typing import Any, Dict, List, Optional
 
-from omnicode.ast_engine.chunker import ASTChunker, CHUNKER_VERSION
+from omnicode.ast_engine.chunker import CHUNKER_VERSION, ASTChunker
 from omnicode.ast_engine.parser import UnifiedASTParser
 from omnicode.search.hybrid_search import HybridSearchEngine
 from omnicode.search.models import SearchRequest
@@ -69,6 +69,25 @@ def _normalize_upsert_item(item: Any) -> tuple[str, str, Dict[str, Any]]:
         path, content = item
         metadata = {}
     return str(path), str(content), dict(metadata) if isinstance(metadata, dict) else {}
+
+
+def _semantic_chunk_limit(metadata: Dict[str, Any]) -> int:
+    try:
+        return int(metadata.get("semantic_max_chunks_per_file") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _limit_semantic_chunks(chunks: list[Any], metadata: Dict[str, Any]) -> list[Any]:
+    limit = _semantic_chunk_limit(metadata)
+    if limit <= 0 or len(chunks) <= limit:
+        return chunks
+    metadata["semantic_chunk_limit_applied"] = True
+    metadata["semantic_chunk_limit"] = limit
+    metadata["semantic_chunks_original"] = len(chunks)
+    metadata["semantic_chunks_dropped"] = len(chunks) - limit
+    return chunks[:limit]
+
 
 class LegacySearchResult:
     """
@@ -145,7 +164,13 @@ class SemanticSearchEngine:
     """
     Bridges the legacy SemanticSearchEngine to the new hybrid Tree-sitter + FAISS + SentenceTransformers search architecture.
     """
-    def __init__(self, working_dir: str, shard_id: Optional[str] = None):
+    def __init__(
+        self,
+        working_dir: str,
+        shard_id: Optional[str] = None,
+        *,
+        db_dir: Optional[str] = None,
+    ):
         self.working_dir = os.path.abspath(working_dir)
 
         # Sharding (Wave 2 W2-10). When ``shard_id`` is omitted the
@@ -164,7 +189,11 @@ class SemanticSearchEngine:
         # named shards are always created fresh.
         if self.shard_id == DEFAULT_SHARD_ID:
             auto_migrate_legacy(self.working_dir)
-        self.db_dir = resolve_shard_dir(self.working_dir, self.shard_id)
+        if db_dir:
+            self.db_dir = os.path.abspath(db_dir)
+            os.makedirs(self.db_dir, exist_ok=True)
+        else:
+            self.db_dir = resolve_shard_dir(self.working_dir, self.shard_id)
 
         # Instantiate Omnicode modules
         self.ast_parser = UnifiedASTParser()
@@ -187,6 +216,51 @@ class SemanticSearchEngine:
             "semantic_unavailable_reason": "embedding_model_not_loaded",
         }
 
+    def replace_semantic_index_from(
+        self,
+        staging: "SemanticSearchEngine",
+    ) -> Dict[str, Any]:
+        """Activate a fully-built staging semantic index."""
+
+        activation = self.vector_store.replace_from(staging.vector_store)
+        self.keyword_searcher = SqliteKeywordSearcher(self.vector_store)
+        self.hybrid_engine = HybridSearchEngine(
+            self.vector_store,
+            self.keyword_searcher,
+        )
+        self.refresh_stats()
+        return activation
+
+    def _embedding_backend_model_name(self) -> Optional[str]:
+        backend = self.embedding_model
+        if backend is None:
+            return None
+        for attr in ("model_name", "_model_name", "model", "_model"):
+            value = getattr(backend, attr, None)
+            if isinstance(value, str) and value:
+                return value
+        return None
+
+    def _ensure_embedding_backend(self) -> None:
+        """Refresh unavailable/stale embedding backend handles.
+
+        A backend may start before ``omnicode models pull`` has populated the
+        fixed cache directory.  Keep exact search available in that state, but
+        let semantic operations recover after the model appears without
+        requiring a process restart.
+        """
+        from omnicode_core.embeddings import get_default_backend
+        from omnicode_core.embeddings.models import embedding_model_config
+
+        model_name = embedding_model_config().model_name
+        cached_name = self._embedding_backend_model_name()
+        if (
+            self.embedding_model is None
+            or isinstance(self.embedding_model, UnavailableEmbeddingBackend)
+            or (cached_name is not None and cached_name != model_name)
+        ):
+            self.embedding_model = get_default_backend(model_name)
+
     def _semantic_runtime(self) -> Dict[str, Any]:
         from omnicode_core.embeddings.models import embedding_model_config
 
@@ -203,6 +277,7 @@ class SemanticSearchEngine:
         }
 
     def semantic_index_status(self) -> Dict[str, Any]:
+        self._ensure_embedding_backend()
         runtime = self._semantic_runtime()
         status = self.vector_store.semantic_metadata_status(
             embedding_model=runtime["embedding_model"],
@@ -226,6 +301,7 @@ class SemanticSearchEngine:
         workspace_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Validate the mounted vectors or reset them for an explicit rebuild."""
+        self._ensure_embedding_backend()
         runtime = self._semantic_runtime()
         dimension = runtime.get("embedding_dimension")
         if not self.semantic_available() or not dimension:
@@ -256,7 +332,12 @@ class SemanticSearchEngine:
             runtime["workspace_id"] = workspace_id
         return status
 
-    def _write_semantic_metadata(self, *, workspace_id: Optional[str] = None) -> Dict[str, Any]:
+    def _write_semantic_metadata(
+        self,
+        *,
+        workspace_id: Optional[str] = None,
+        indexed_revision: Optional[int] = None,
+    ) -> Dict[str, Any]:
         runtime = self._semantic_runtime()
         return self.vector_store.set_index_metadata(
             embedding_model=str(runtime["embedding_model"]),
@@ -266,6 +347,7 @@ class SemanticSearchEngine:
             chunker_version=str(runtime["chunker_version"]),
             normalization=str(runtime["normalization"]),
             workspace_id=workspace_id,
+            indexed_revision=indexed_revision,
         )
 
     async def initialize(self) -> None:
@@ -482,6 +564,7 @@ class SemanticSearchEngine:
         if workspace_id:
             index_metadata["workspace_id"] = workspace_id
 
+        self._ensure_embedding_backend()
         if not self.semantic_available():
             logger.warning(
                 "Semantic upsert skipped for %s: %s",
@@ -492,6 +575,7 @@ class SemanticSearchEngine:
                 self.refresh_stats()
             return 0
         self.prepare_semantic_index(workspace_id=workspace_id)
+        chunks = _limit_semantic_chunks(chunks, index_metadata)
 
         for chunk in chunks:
             emb = self.embedding_model.encode(chunk.content)
@@ -512,7 +596,10 @@ class SemanticSearchEngine:
                 metadata=metadata,
             )
         if chunks:
-            self._write_semantic_metadata(workspace_id=workspace_id)
+            self._write_semantic_metadata(
+                workspace_id=workspace_id,
+                indexed_revision=revision,
+            )
 
         # Refresh stats lazily — caller can request /index/stats afterwards.
         if refresh:
@@ -529,6 +616,7 @@ class SemanticSearchEngine:
         raw_files = list(files)
         if not raw_files:
             return 0
+        self._ensure_embedding_backend()
         if not self.semantic_available():
             logger.warning(
                 "Semantic bulk upsert skipped for %d files: %s",
@@ -548,6 +636,14 @@ class SemanticSearchEngine:
         batch_workspace_id = (
             next(iter(batch_workspace_ids)) if len(batch_workspace_ids) == 1 else None
         )
+        batch_revisions = [
+            int(metadata.get("snapshot_revision"))
+            for _path, _content, metadata in (
+                _normalize_upsert_item(item) for item in raw_files
+            )
+            if metadata.get("snapshot_revision") is not None
+        ]
+        batch_indexed_revision = max(batch_revisions) if batch_revisions else None
         self.prepare_semantic_index(workspace_id=batch_workspace_id)
 
         normalized_files = [
@@ -556,6 +652,11 @@ class SemanticSearchEngine:
                 _normalize_upsert_item(item) for item in raw_files
             )
         ]
+        upsert_stats = {
+            "files_seen": len(normalized_files),
+            "files_truncated_by_chunk_limit": 0,
+            "chunks_dropped_by_limit": 0,
+        }
         delete_paths: list[str] = []
         for file_path, _content, _metadata in normalized_files:
             delete_paths.append(file_path)
@@ -573,9 +674,18 @@ class SemanticSearchEngine:
         chunk_texts = []
         for file_path, content, index_metadata in normalized_files:
             language = os.path.splitext(file_path)[1].lstrip(".") or "python"
-            for chunk in self.chunker.chunk_file(content, file_path, language):
+            chunks = self.chunker.chunk_file(content, file_path, language)
+            original_chunk_count = len(chunks)
+            chunks = _limit_semantic_chunks(chunks, index_metadata)
+            if len(chunks) < original_chunk_count:
+                upsert_stats["files_truncated_by_chunk_limit"] += 1
+                upsert_stats["chunks_dropped_by_limit"] += (
+                    original_chunk_count - len(chunks)
+                )
+            for chunk in chunks:
                 chunk_texts.append(chunk.content)
                 chunk_rows.append((file_path, chunk, dict(index_metadata)))
+        self.last_upsert_stats = upsert_stats
 
         if not chunk_rows:
             if refresh:
@@ -607,7 +717,10 @@ class SemanticSearchEngine:
             for item in add_items:
                 await self.vector_store.add(**item)
         if add_items:
-            self._write_semantic_metadata(workspace_id=batch_workspace_id)
+            self._write_semantic_metadata(
+                workspace_id=batch_workspace_id,
+                indexed_revision=batch_indexed_revision,
+            )
 
         if refresh:
             self.refresh_stats()

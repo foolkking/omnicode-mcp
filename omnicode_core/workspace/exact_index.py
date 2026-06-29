@@ -22,7 +22,6 @@ from omnicode_core.workspace.snapshot_store import (
     normalize_snapshot_path,
 )
 
-
 _PY_SYMBOL_RE = re.compile(
     r"^(?P<indent>\s*)(?P<kind>class|def|async\s+def)\s+"
     r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\b"
@@ -77,6 +76,17 @@ class ExactTextRow:
     match_span: tuple[int, int]
     context_before: list[str]
     context_after: list[str]
+
+
+@dataclass(frozen=True)
+class ExactTokenOverlapRow:
+    path: str
+    line_no: int
+    line_text: str
+    hash: str
+    revision: int
+    matched_tokens: tuple[str, ...]
+    score: float
 
 
 def _norm_name(value: str) -> str:
@@ -173,6 +183,36 @@ class SnapshotExactIndex:
         self._ensure_schema(conn)
         return conn
 
+    def _connect_readonly(
+        self,
+        workspace_id: str,
+        *,
+        timeout_s: float = 0.1,
+    ) -> sqlite3.Connection:
+        path = self._db_path(workspace_id)
+        if not path.exists():
+            raise FileNotFoundError(str(path))
+        uri = path.resolve().as_uri() + "?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=max(timeout_s, 0.001))
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        return conn
+
+    def _connect_query(self, workspace_id: str) -> sqlite3.Connection:
+        """Open an existing exact index without mutating schema or WAL state.
+
+        Query endpoints are latency-sensitive and may open a large index for
+        the first time after process start. Running ``_ensure_schema`` for
+        every read needlessly writes metadata and can take seconds on a
+        multi-hundred-megabyte line index. The writer fallback preserves
+        compatibility with a missing or legacy database; normal indexed
+        workspaces stay strictly read-only here.
+        """
+        try:
+            return self._connect_readonly(workspace_id, timeout_s=1.0)
+        except (FileNotFoundError, sqlite3.OperationalError):
+            return self._connect(workspace_id)
+
     def clear_workspace(self, *, workspace_id: str) -> None:
         with self._workspace_lock(workspace_id):
             conn = self._connect(workspace_id)
@@ -182,6 +222,9 @@ class SnapshotExactIndex:
                 conn.execute("DELETE FROM lines")
                 self._drop_fts_rows(conn)
                 self._set_meta_int(conn, "exact_indexed_revision", 0)
+                self._set_meta_int(conn, "files_count", 0)
+                self._set_meta_int(conn, "symbols_count", 0)
+                self._set_meta_int(conn, "lines_count", 0)
                 conn.commit()
             finally:
                 conn.close()
@@ -298,6 +341,54 @@ class SnapshotExactIndex:
             (key, str(value)),
         )
 
+    def _refresh_count_meta(self, conn: sqlite3.Connection) -> None:
+        files = conn.execute("SELECT COUNT(*) AS n FROM files").fetchone()["n"]
+        symbols = conn.execute("SELECT COUNT(*) AS n FROM symbols").fetchone()["n"]
+        lines = conn.execute("SELECT COUNT(*) AS n FROM lines").fetchone()["n"]
+        self._set_meta_int(conn, "files_count", int(files or 0))
+        self._set_meta_int(conn, "symbols_count", int(symbols or 0))
+        self._set_meta_int(conn, "lines_count", int(lines or 0))
+
+    def _ensure_count_meta(self, conn: sqlite3.Connection) -> tuple[int, int, int]:
+        values = [
+            self._meta_text(conn, "files_count", ""),
+            self._meta_text(conn, "symbols_count", ""),
+            self._meta_text(conn, "lines_count", ""),
+        ]
+        if any(value == "" for value in values):
+            self._refresh_count_meta(conn)
+            values = [
+                self._meta_text(conn, "files_count", "0"),
+                self._meta_text(conn, "symbols_count", "0"),
+                self._meta_text(conn, "lines_count", "0"),
+            ]
+        return tuple(int(value or 0) for value in values)
+
+    @staticmethod
+    def _path_counts(
+        conn: sqlite3.Connection,
+        path: str,
+    ) -> tuple[int, int, int]:
+        file_count = 1 if conn.execute(
+            "SELECT 1 FROM files WHERE path=? LIMIT 1",
+            (path,),
+        ).fetchone() else 0
+        symbol_count = int(
+            conn.execute(
+                "SELECT COUNT(*) AS n FROM symbols WHERE path=?",
+                (path,),
+            ).fetchone()["n"]
+            or 0
+        )
+        line_count = int(
+            conn.execute(
+                "SELECT COUNT(*) AS n FROM lines WHERE path=?",
+                (path,),
+            ).fetchone()["n"]
+            or 0
+        )
+        return file_count, symbol_count, line_count
+
     def update_batch(
         self,
         *,
@@ -312,6 +403,7 @@ class SnapshotExactIndex:
         with self._workspace_lock(workspace_id):
             conn = self._connect(workspace_id)
             try:
+                files_count, symbols_count, lines_count = self._ensure_count_meta(conn)
                 fts_available = self._fts_available(conn)
                 if populate_fts is False:
                     fts_available = False
@@ -321,7 +413,11 @@ class SnapshotExactIndex:
                     )
                 for raw_path in deleted_paths:
                     path = normalize_snapshot_path(raw_path)
+                    old_files, old_symbols, old_lines = self._path_counts(conn, path)
                     self._delete_path(conn, path, fts_available=fts_available)
+                    files_count -= old_files
+                    symbols_count -= old_symbols
+                    lines_count -= old_lines
 
                 for item in changed_files:
                     path = normalize_snapshot_path(str(item["path"]))
@@ -331,7 +427,8 @@ class SnapshotExactIndex:
                         item.get("size")
                         or len(content.encode("utf-8", errors="replace"))
                     )
-                    self._upsert_file(
+                    old_files, old_symbols, old_lines = self._path_counts(conn, path)
+                    new_files, new_symbols, new_lines = self._upsert_file(
                         conn,
                         path=path,
                         content=content,
@@ -340,6 +437,9 @@ class SnapshotExactIndex:
                         revision=revision,
                         fts_available=fts_available,
                     )
+                    files_count += new_files - old_files
+                    symbols_count += new_symbols - old_symbols
+                    lines_count += new_lines - old_lines
 
                 current = self._meta_int(conn, "exact_indexed_revision")
                 self._set_meta_int(
@@ -347,6 +447,9 @@ class SnapshotExactIndex:
                     "exact_indexed_revision",
                     max(current, revision),
                 )
+                self._set_meta_int(conn, "files_count", max(files_count, 0))
+                self._set_meta_int(conn, "symbols_count", max(symbols_count, 0))
+                self._set_meta_int(conn, "lines_count", max(lines_count, 0))
                 conn.commit()
                 return self._meta_int(conn, "exact_indexed_revision")
             finally:
@@ -499,7 +602,7 @@ class SnapshotExactIndex:
         size: int,
         revision: int,
         fts_available: bool,
-    ) -> None:
+    ) -> tuple[int, int, int]:
         self._delete_path(conn, path, fts_available=fts_available)
         language = _guess_language(path)
         conn.execute(
@@ -556,14 +659,21 @@ class SnapshotExactIndex:
             ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
             symbol_rows,
         )
+        return 1, len(symbol_rows), len(line_rows)
 
     def status(self, *, workspace_id: str) -> dict[str, Any]:
         with self._workspace_lock(workspace_id):
             conn = self._connect(workspace_id)
             try:
-                files = conn.execute("SELECT COUNT(*) AS n FROM files").fetchone()["n"]
-                symbols = conn.execute("SELECT COUNT(*) AS n FROM symbols").fetchone()["n"]
-                lines = conn.execute("SELECT COUNT(*) AS n FROM lines").fetchone()["n"]
+                files = self._meta_text(conn, "files_count", "")
+                symbols = self._meta_text(conn, "symbols_count", "")
+                lines = self._meta_text(conn, "lines_count", "")
+                if files == "" or symbols == "" or lines == "":
+                    self._refresh_count_meta(conn)
+                    files = self._meta_text(conn, "files_count", "0")
+                    symbols = self._meta_text(conn, "symbols_count", "0")
+                    lines = self._meta_text(conn, "lines_count", "0")
+                    conn.commit()
                 return {
                     "workspace_id": workspace_id,
                     "schema_version": self._meta_int(conn, "schema_version"),
@@ -575,7 +685,12 @@ class SnapshotExactIndex:
                     "files": int(files or 0),
                     "symbols": int(symbols or 0),
                     "lines": int(lines or 0),
-                    "line_fts_available": self._fts_available(conn),
+                    "line_fts_available": self._meta_int(
+                        conn,
+                        "line_fts_available",
+                    ) == 1,
+                    "line_fts_mode": _line_fts_mode(),
+                    "line_fts_auto_line_limit": _AUTO_FTS_LINE_LIMIT,
                     "line_fts_reason": self._meta_text(
                         conn,
                         "line_fts_reason",
@@ -584,6 +699,87 @@ class SnapshotExactIndex:
                 }
             finally:
                 conn.close()
+
+    def try_status(
+        self,
+        *,
+        workspace_id: str,
+        lock_timeout_ms: int = 75,
+    ) -> dict[str, Any]:
+        """Return exact-index status without mutating schema or waiting on writers."""
+        lock = self._workspace_lock(workspace_id)
+        acquired = lock.acquire(timeout=max(lock_timeout_ms, 0) / 1000.0)
+        if not acquired:
+            return {
+                "workspace_id": workspace_id,
+                "exact_indexed_revision": 0,
+                "files": 0,
+                "symbols": 0,
+                "lines": 0,
+                "line_fts_available": False,
+                "busy": True,
+                "last_error": "exact_index_busy",
+            }
+        try:
+            conn = self._connect_readonly(
+                workspace_id,
+                timeout_s=max(lock_timeout_ms, 1) / 1000.0,
+            )
+            try:
+                files = self._meta_text(conn, "files_count", "")
+                symbols = self._meta_text(conn, "symbols_count", "")
+                lines = self._meta_text(conn, "lines_count", "")
+                if files == "" or symbols == "" or lines == "":
+                    files = str(
+                        conn.execute("SELECT COUNT(*) AS n FROM files").fetchone()["n"]
+                    )
+                    symbols = str(
+                        conn.execute("SELECT COUNT(*) AS n FROM symbols").fetchone()["n"]
+                    )
+                    lines = str(
+                        conn.execute("SELECT COUNT(*) AS n FROM lines").fetchone()["n"]
+                    )
+                return {
+                    "workspace_id": workspace_id,
+                    "schema_version": self._meta_int(conn, "schema_version"),
+                    "index_kind": self._meta_text(conn, "index_kind", _INDEX_KIND),
+                    "exact_indexed_revision": self._meta_int(
+                        conn,
+                        "exact_indexed_revision",
+                    ),
+                    "files": int(files or 0),
+                    "symbols": int(symbols or 0),
+                    "lines": int(lines or 0),
+                    "line_fts_available": self._meta_int(
+                        conn,
+                        "line_fts_available",
+                    ) == 1,
+                    "line_fts_mode": _line_fts_mode(),
+                    "line_fts_auto_line_limit": _AUTO_FTS_LINE_LIMIT,
+                    "line_fts_reason": self._meta_text(
+                        conn,
+                        "line_fts_reason",
+                        "unknown",
+                    ),
+                    "busy": False,
+                }
+            finally:
+                conn.close()
+        except (FileNotFoundError, sqlite3.OperationalError) as exc:
+            message = str(exc).lower()
+            busy = "locked" in message or "busy" in message
+            return {
+                "workspace_id": workspace_id,
+                "exact_indexed_revision": 0,
+                "files": 0,
+                "symbols": 0,
+                "lines": 0,
+                "line_fts_available": False,
+                "busy": busy,
+                "last_error": "exact_index_busy" if busy else str(exc),
+            }
+        finally:
+            lock.release()
 
     def search_symbols(
         self,
@@ -607,7 +803,7 @@ class SnapshotExactIndex:
             else None
         )
         with self._workspace_lock(workspace_id):
-            conn = self._connect(workspace_id)
+            conn = self._connect_query(workspace_id)
             try:
                 rows: list[ExactSymbolRow] = []
                 seen: set[tuple[str, str, int]] = set()
@@ -693,9 +889,13 @@ class SnapshotExactIndex:
             else None
         )
         with self._workspace_lock(workspace_id):
-            conn = self._connect(workspace_id)
+            conn = self._connect_query(workspace_id)
             try:
-                table = "line_fts" if self._fts_available(conn) and not use_regex else "lines"
+                fts_available = bool(
+                    _line_fts_should_try()
+                    and self._meta_int(conn, "line_fts_available") == 1
+                )
+                table = "line_fts" if fts_available and not use_regex else "lines"
                 sql = (
                     f"SELECT path, line_no, line_text, hash, revision FROM {table} "
                     "WHERE line_text LIKE ? LIMIT ?"
@@ -742,6 +942,77 @@ class SnapshotExactIndex:
                     )
                 out.sort(key=_text_row_rank)
                 return out[:max_results]
+            finally:
+                conn.close()
+
+    def search_token_overlap(
+        self,
+        *,
+        workspace_id: str,
+        tokens: list[str],
+        file_pattern: Optional[str] = None,
+        max_results: int = 50,
+        min_tokens: int = 2,
+        limit_rows: int = 5000,
+    ) -> list[ExactTokenOverlapRow]:
+        clean_tokens = [
+            token.strip().lower()
+            for token in tokens
+            if token and token.strip()
+        ]
+        if max_results <= 0 or not clean_tokens:
+            return []
+        patterns = (
+            [p.strip() for p in file_pattern.split(",") if p.strip()]
+            if file_pattern
+            else None
+        )
+        with self._workspace_lock(workspace_id):
+            conn = self._connect_query(workspace_id)
+            try:
+                clauses = " OR ".join("LOWER(line_text) LIKE ?" for _ in clean_tokens)
+                params: list[Any] = [f"%{token}%" for token in clean_tokens]
+                params.append(max(limit_rows, max_results * 20))
+                sql = (
+                    "SELECT path, line_no, line_text, hash, revision FROM lines "
+                    f"WHERE {clauses} LIMIT ?"
+                )
+                scored: list[ExactTokenOverlapRow] = []
+                for raw in conn.execute(sql, tuple(params)):
+                    path = str(raw["path"])
+                    if not _patterns_match(path, patterns):
+                        continue
+                    line_text = str(raw["line_text"])
+                    lower = line_text.lower()
+                    matched = tuple(
+                        token for token in clean_tokens if token in lower
+                    )
+                    if len(matched) < min_tokens:
+                        continue
+                    score = float(len(matched))
+                    stripped = line_text.lstrip()
+                    if stripped.startswith(("class ", "def ", "async def ")):
+                        score += 1.5
+                    scored.append(
+                        ExactTokenOverlapRow(
+                            path=path,
+                            line_no=int(raw["line_no"]),
+                            line_text=line_text,
+                            hash=str(raw["hash"]),
+                            revision=int(raw["revision"]),
+                            matched_tokens=matched,
+                            score=score,
+                        )
+                    )
+                scored.sort(
+                    key=lambda row: (
+                        -row.score,
+                        1 if row.path.startswith(("tests/", "docs/")) else 0,
+                        row.path,
+                        row.line_no,
+                    )
+                )
+                return scored[:max_results]
             finally:
                 conn.close()
 
