@@ -25,6 +25,7 @@ For a self-contained clean-room run, prefer:
 from __future__ import annotations
 
 import os
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,7 +33,6 @@ from typing import Any
 
 import pytest
 import requests
-
 
 pytestmark = pytest.mark.large_repo
 
@@ -138,6 +138,7 @@ def test_kafka_snapshot_status_is_observable(bench: BenchConfig) -> None:
     status, elapsed_ms = _sync_status(bench)
 
     assert elapsed_ms < 1000
+    assert not (bench.repo / ".data").exists()
     assert status["ok"] is True
     assert status["snapshot_store"]["files"] >= 7000
     assert status["snapshot_ready"] is True
@@ -216,13 +217,14 @@ def test_kafka_semantic_not_ready_returns_exact_fallback(
 
     result = body["result"]
     first = result["results"][0]
-    assert status_code == 409
+    assert status_code == 200
     assert elapsed_ms < 5000
-    assert body["success"] is False
-    assert result["ok"] is False
-    assert result["error_code"] == "SEMANTIC_INDEX_NOT_READY"
+    assert body["success"] is True
     assert result["fallback_used"] is True
     assert result["capabilities_missing"] == ["search.semantic"]
+    assert result["semantic_index_ready"] is False
+    assert result["semantic_index_stale_reason"] == "exact_only_initial_sync"
+    assert result["snapshot_exact_boost"] is True
     assert first["file_path"] == KAFKA_FILE
     assert first["symbol_name"] == KAFKA_SYMBOL
     assert first["line_start"] == 154
@@ -260,3 +262,101 @@ def test_kafka_context_uses_exact_snapshot_anchor(bench: BenchConfig) -> None:
     assert first["symbol"] == KAFKA_SYMBOL
     assert first["start_line"] == 154
     assert result["context_quality"]["primary_anchor"] == "snapshot_exact_symbol"
+
+
+def test_kafka_strict_freshness_blocks_stale_analysis(
+    bench: BenchConfig,
+) -> None:
+    status, _elapsed = _sync_status(bench)
+    required = max(
+        int(status["accepted_revision"]),
+        int(status["indexed_revision"]),
+    ) + 1
+
+    search, search_ms, search_code = _request_json(
+        "POST",
+        f"{bench.backend_url}/search/symbols",
+        headers=_workspace_headers(bench, min_revision=required),
+        params={"query": KAFKA_SYMBOL, "fuzzy": "false", "max_results": 3},
+        timeout=5,
+    )
+    context, context_ms, context_code = _request_json(
+        "POST",
+        f"{bench.backend_url}/intelligence/context",
+        headers={
+            **_workspace_headers(bench, min_revision=required),
+            "Content-Type": "application/json",
+        },
+        json={
+            "file_path": KAFKA_FILE,
+            "symbol": KAFKA_SYMBOL,
+            "query": KAFKA_SYMBOL,
+            "token_budget": 2000,
+            "include_memory": False,
+        },
+        timeout=5,
+    )
+    impact, impact_ms, impact_code = _request_json(
+        "GET",
+        f"{bench.backend_url}/graph/impact",
+        headers=_workspace_headers(bench, min_revision=required),
+        params={"symbol": KAFKA_SYMBOL, "depth": 2, "max_files": 200},
+        timeout=5,
+    )
+
+    for payload, elapsed_ms, status_code in (
+        (search, search_ms, search_code),
+        (context, context_ms, context_code),
+        (impact, impact_ms, impact_code),
+    ):
+        assert status_code in {200, 409}
+        assert elapsed_ms < 1000
+        assert payload["ok"] is False
+        assert payload["success"] is False
+        assert payload["stale"] is True
+        assert payload["error"] == "Cloud index is stale"
+
+
+def test_kafka_status_stays_responsive_during_snapshot_text_search(
+    bench: BenchConfig,
+) -> None:
+    search_result: dict[str, Any] = {}
+
+    def _run_search() -> None:
+        try:
+            body, elapsed_ms, status_code = _request_json(
+                "POST",
+                f"{bench.backend_url}/search/text",
+                headers=_workspace_headers(bench),
+                params={
+                    "query": KAFKA_TEXT,
+                    "file_pattern": "*.scala",
+                    "case_sensitive": "true",
+                    "max_results": 3,
+                    "context_lines": 1,
+                },
+                timeout=15,
+            )
+            search_result["body"] = body
+            search_result["elapsed_ms"] = elapsed_ms
+            search_result["status_code"] = status_code
+        except Exception as exc:  # pragma: no cover - reported below
+            search_result["error"] = repr(exc)
+
+    thread = threading.Thread(target=_run_search, daemon=True)
+    thread.start()
+    time.sleep(0.1)
+
+    samples: list[float] = []
+    for _idx in range(5):
+        status, elapsed_ms = _sync_status(bench)
+        assert status["ok"] is True
+        samples.append(elapsed_ms)
+        time.sleep(0.2)
+
+    thread.join(timeout=20)
+    assert not thread.is_alive()
+    assert "error" not in search_result, search_result.get("error")
+    assert search_result["status_code"] == 200
+    assert search_result["body"]["success"] is True
+    assert max(samples) < 1000

@@ -704,14 +704,78 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--cloud-down-at", type=int, default=2)
     parser.add_argument("--reset-state", action="store_true")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--compact-json",
+        action="store_true",
+        help=(
+            "Print a compact release-gate summary instead of every edit step. "
+            "The soak behavior is unchanged."
+        ),
+    )
     return parser.parse_args(argv)
+
+
+def _compact_payload(result: SoakResult) -> dict[str, Any]:
+    steps = result.steps
+    failed = [step for step in steps if not step.ok]
+    final = next((step for step in reversed(steps) if step.name == "final_status"), None)
+    cloud_down = next(
+        (step for step in steps if step.name == "cloud_down_pending_flush"),
+        None,
+    )
+    edit_steps = [step for step in steps if step.name.startswith("edit_sync_search_")]
+    rollback_steps = [step for step in steps if step.name.startswith("rollback_sync_")]
+    search_failures = [
+        step.name
+        for step in edit_steps
+        if not step.details.get("search_found")
+    ]
+    rollback_failures = [
+        step.name
+        for step in rollback_steps
+        if not step.details.get("marker_absent_after_rollback")
+    ]
+    final_details = final.details if final else {}
+    cloud_details = cloud_down.details if cloud_down else {}
+    return {
+        "ok": result.ok,
+        "steps_total": len(steps),
+        "failed_steps": [
+            {
+                "name": step.name,
+                "elapsed_ms": step.elapsed_ms,
+                "details": step.details,
+            }
+            for step in failed
+        ],
+        "edit_iterations": len(edit_steps),
+        "rollback_iterations": len(rollback_steps),
+        "search_failures": search_failures,
+        "rollback_failures": rollback_failures,
+        "cloud_down_pending_flush": {
+            "present": cloud_down is not None,
+            "ok": bool(cloud_down and cloud_down.ok),
+            "pending_after_failure": cloud_details.get("pending_after_failure"),
+            "pending_after_flush": cloud_details.get("pending_after_flush"),
+            "search_found_after_flush": cloud_details.get("search_found_after_flush"),
+        },
+        "final_status": final_details,
+        "backend_logs": next(
+            (
+                step.details
+                for step in reversed(steps)
+                if step.name == "backend_logs"
+            ),
+            {},
+        ),
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(list(argv or sys.argv[1:]))
     result = run_soak(args)
-    payload = result.to_dict()
-    if args.json:
+    payload = _compact_payload(result) if args.compact_json else result.to_dict()
+    if args.json or args.compact_json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
