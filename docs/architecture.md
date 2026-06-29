@@ -212,7 +212,11 @@ local text fallback, not a separate database service:
 
 `SnapshotExactIndex` is used for cloud snapshot indexes and local workspace
 exact indexes. The schema records `schema_version`, `index_kind`,
-`line_fts_available`, `line_fts_reason`, and `exact_indexed_revision`.
+`line_fts_available`, `line_fts_reason`, `line_fts_mode`,
+`line_fts_auto_line_limit`, and `exact_indexed_revision`. In `auto` mode,
+large workspaces can disable FTS after
+`OMNICODE_EXACT_LINE_FTS_MAX_LINES` lines, default `50000`, while exact text
+search remains available through snapshot/grep fallback.
 
 The query planner in `omnicode_core/search/planner.py` classifies queries
 into intents such as `exact_symbol`, `exact_text`, `regex_text`,
@@ -252,6 +256,16 @@ three converging entry points
 The composer (`omnicode_core/intelligence/composer.py`) runs available
 capabilities inside a token budget and reports per-capability errors or
 missing capabilities without pretending degraded sections are complete.
+Snapshot fast-path context uses the same persisted graph as `omni_impact`,
+trims graph/reference evidence to the requested token budget, and reports a
+non-zero `token_estimate`, `truncated_fields`, and `budget_respected`.
+
+JDT LS and Metals are managed through the LSP bridge. JVM source/build files
+are materialized into a state-directory shadow workspace before the server is
+started, so language-server metadata never pollutes the authoritative checkout.
+`omni_status` distinguishes installed-but-not-started (`partial`) from missing
+(`unavailable`), and `discover_tools` recommends
+`omni_index(scope="lsp")` only for the former.
 
 ---
 

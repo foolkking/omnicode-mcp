@@ -1,6 +1,6 @@
 # Project State
 
-Last updated: 2026-06-15
+Last updated: 2026-06-29
 
 ## 1. Project Snapshot
 
@@ -11,9 +11,9 @@ Last updated: 2026-06-15
 | Runtime / version | Python >= 3.11 |
 | Package manager | `pip install -e .`; optional extras in `pyproject.toml` |
 | Main entry points | `omnicode` CLI, `omnicode serve`, `omnicode mcp`, FastAPI routers under `api/v1/routers/`, MCP high-level tools under `omnicode_adapters/mcp_server/high_level_tools.py` |
-| Test command | `python -m pytest tests -q` |
+| Test command | `python -m pytest tests/unit -q`; `python -m pytest tests/integration -q`; large-repo gates via `scripts/benchmark_large_repo_hybrid.py` |
 | Lint command | `ruff check omnicode omnicode_core omnicode_adapters api core tests` |
-| Docs status | Existing docs updated in place; `docs/index.md` is the navigation entry point |
+| Docs status | Main repo docs updated in place; this file is the current AI-readable state anchor |
 
 ## 2. Current Purpose
 
@@ -62,13 +62,13 @@ Last updated: 2026-06-15
 
 | Command | Purpose | Status |
 |---|---|---|
-| `python -m pytest tests -q -m "not large_repo" --basetemp=<workspace-temp> -p no:cacheprovider` | Full non-large suite | Verified after embedding cache-completeness fix: 1155 passed, 16 skipped, 17 deselected |
-| `python -m pytest tests/integration -q` | Integration route regressions | Verified in r60 sweep: 37 passed |
+| `E:\anaconda\envs\omnicode-env\python.exe -m pytest tests/unit -q` | Full unit suite | Verified r86: 1254 passed, 16 skipped |
+| `E:\anaconda\envs\omnicode-env\python.exe -m pytest tests/integration -q` | Integration and MCP stdio route regressions | Verified r86: 41 passed, 1 skipped |
 | `python -m pytest tests/unit/test_sharding.py -q --basetemp=<workspace-temp> -p no:cacheprovider` | Sharding default/state-dir behavior | Verified after test-isolation fix: 14 passed |
 | `python -m pytest tests/integration/test_route_regressions.py::test_symbol_search_finds_chunker_metadata_match -q --basetemp=<workspace-temp> -p no:cacheprovider` | `/search/index` route regression with workspace-local state dir | Verified after test-isolation fix: 1 passed |
 | `ruff check api/v1/routers/search.py omnicode_adapters/mcp_server/high_level_tools.py --select F,E9` | Targeted syntax/unused-import check | Verified in r60 sweep |
-| `python scripts/benchmark_large_repo_hybrid.py --repo C:/omnicode-sim/benchmark-repos/django --state-dir .tmp_benchmarks/state-django-r60-final --cloud-workspace .tmp_benchmarks/cloud-django-r60-final --workspace-id django-r60-final --port 6870 --reset-state --symbol BaseHandler --expected-file django/core/handlers/base.py --text-query "class BaseHandler:" --text-file-pattern "*.py" --min-files 6000 --json` | Django clean-room hybrid benchmark | Verified after final test-isolation fix: 6994 files, 45754 symbols, exact symbol 20ms, exact text 265ms, context 195ms |
-| `python scripts/benchmark_large_repo_hybrid.py --repo C:/omnicode-sim/benchmark-repos/kafka --state-dir .tmp_benchmarks/state-kafka-r60-final --cloud-workspace .tmp_benchmarks/cloud-kafka-r60-final --workspace-id kafka-r60-final --port 6871 --reset-state --symbol ReplicaManager --expected-file core/src/main/scala/kafka/server/ReplicaManager.scala --text-query "class ReplicaManager" --text-file-pattern "*.scala" --min-files 7000 --json` | Kafka clean-room hybrid benchmark | Verified after final test-isolation fix: 7272 files, 16501 symbols, exact symbol 24ms, exact text 504ms, context 409ms |
+| `E:\anaconda\envs\omnicode-env\python.exe scripts/benchmark_large_repo_hybrid.py --repo C:/omnicode-sim/benchmark-repos/django --workspace-id django-r86-clean --state-dir C:/omnicode-sim/eval-results/r86-clean/state-django --cloud-workspace C:/omnicode-sim/eval-results/r86-clean/cloud-django --log-dir C:/omnicode-sim/eval-results/r86-clean/logs-django --port 6850 --reset-state --min-files 6500 --symbol BaseHandler --expected-file django/core/handlers/base.py --text-query "class BaseHandler:" --text-file-pattern "*.py" --json` | Django clean-room hybrid benchmark | Verified r86: 6994 files, 45754 symbols, exact symbol 36ms, exact text 252ms, context 28ms, graph impact 310ms, strict semantic degraded fallback 42ms |
+| `E:\anaconda\envs\omnicode-env\python.exe scripts/benchmark_large_repo_hybrid.py --repo C:/omnicode-sim/benchmark-repos/kafka --workspace-id kafka-r86-clean --state-dir C:/omnicode-sim/eval-results/r86-clean/state-kafka --cloud-workspace C:/omnicode-sim/eval-results/r86-clean/cloud-kafka --log-dir C:/omnicode-sim/eval-results/r86-clean/logs-kafka --port 6851 --reset-state --min-files 7000 --symbol ReplicaManager --expected-file core/src/main/scala/kafka/server/ReplicaManager.scala --text-query "class ReplicaManager" --text-file-pattern "*.scala" --json` | Kafka clean-room hybrid benchmark | Verified r86: 7272 files, 16501 symbols, exact symbol 568ms, exact text 237ms, context 51ms, Scala graph/impact degraded honestly with `symbol_found=true`, strict semantic degraded fallback 32ms |
 | `python scripts/soak_hybrid_durability.py --root .tmp_soak/hybrid-r60-short --duration-s 30 --max-iterations 6 --sleep-s 0 --rollback-every 2 --cloud-down-at 2 --reset-state --json` | Short hybrid durability soak | Verified: 6 edit/sync/search cycles, 3 rollback cycles, 1 cloud-down pending flush, final pending=0 and exact indexed revision caught up |
 | `python scripts/soak_hybrid_durability.py --root .tmp_soak/hybrid-r60-duration-check --duration-s 60 --max-iterations 0 --sleep-s 1 --rollback-every 3 --cloud-down-at 2 --reset-state --json` | Duration-bound hybrid durability smoke | Verified after soak semantics fix: `ended_by=duration`, target 60s, elapsed 66.656s, 39 edit/sync/search cycles, 13 rollback cycles, pending=0, accepted/exact indexed revision=54 |
 | `python scripts/soak_hybrid_durability.py --root .tmp_soak/hybrid-r60-readonly-fix --duration-s 120 --max-iterations 0 --sleep-s 1 --rollback-every 3 --cloud-down-at 2 --reset-state --json` | Readonly mirror repeated-update soak | Verified after Windows readonly mirror replacement fix: 83 edit/sync/search cycles, accepted/exact indexed revision=112, pending=0 |
@@ -78,11 +78,11 @@ Last updated: 2026-06-15
 | `python -m pytest tests/unit/test_omni_read_contract.py tests/unit/test_omni_search_source_confidence.py tests/unit/test_intelligence_composer.py -q` | Local-first read/search confidence/context composer gate | Verified in sandbox with workspace-local temp dirs: 65 passed |
 | `python -m pytest tests/unit/test_exact_index.py tests/unit/test_sync_router.py tests/unit/test_snapshot_read_search_routes.py tests/unit/test_patch_manager_conflict.py tests/unit/test_omni_status.py tests/unit/test_hybrid_analysis_freshness.py -q` | Safety/sync/freshness/exact-index regression gate | Verified after latest continuation: 94 passed |
 | `python -m pytest tests/unit/test_omni_status.py tests/unit/test_handler_version_stamps.py tests/unit/test_omni_index_tool.py tests/unit/test_mcp_cloud_bridge.py -q` | MCP registration/status/index/cloud-bridge contract gate | Verified after latest continuation: 36 passed |
-| `ruff check api core memory_system omnicode omnicode_adapters omnicode_core scripts tests --select F,E9` | Full-tree syntax/undefined/unused smoke | Verified after cleaning legacy test unused imports/variables |
+| `E:\anaconda\envs\omnicode-env\python.exe -m ruff check omnicode_adapters/mcp_server/high_level_tools.py omnicode_core api tests --select F,E9` | Syntax/undefined/unused smoke | Verified r86: all checks passed |
 | `omnicode models list --json` | Show supported embedding models | Verified: four supported models and local/cloud defaults returned |
 | `omnicode models status --model <model> --cache-dir <dir> --json` | Inspect embedding cache and local-files-only state | Verified for all four supported models with empty cache; returns structured `EMBEDDING_MODEL_NOT_FOUND` |
 | `omnicode models pull --model <model> --cache-dir <dir>` | Pre-download embedding model into a fixed cache | Real pull/load verified for all four supported models in fixed cache `E:\omnicode-model-cache-r60` |
-| `omnicode mcp --transport stdio ...` | MCP stdio tool surface and safe-edit smoke | Verified in r60 smoke: 14 tools listed, `omni_status` r60, patch apply/rollback new-file unlink passed; hybrid cloud-down stdio smoke verified local preview/validate/apply/read/rollback and post-rollback `File not found` |
+| `omnicode mcp --transport stdio ...` | MCP stdio tool surface and safe-edit smoke | Verified r86 via SDK stdio: 14 tools listed; Django local and Kafka hybrid live gates passed; cloud-down hybrid read/patch local-authority behavior passed |
 
 ## 6. Current Architecture Summary
 
@@ -115,9 +115,9 @@ Last updated: 2026-06-15
 | Impact/context non-misleading degradation | Done | Missing graph/semantic should produce degraded/partial results, not false precision |
 | Language capability matrix | Done | Scala diagnostics/validate should be unsupported or not_performed, not fake passed |
 | Dynamic discover_tools | Done | Recommends default tools based on current capability states |
-| Codex app MCP mount | Partial | Stdio MCP smoke passed, including hybrid cloud-down local-authority safe-edit; current Codex tool discovery did not expose `mcp__omnicode`, so target-client mounting still needs environment-level verification |
+| Codex app MCP mount | Partial | SDK stdio and live MCP gates passed. If the deployment target is a specific Codex/Kiro/Cursor MCP mount, that client still needs its own transport smoke after restart. |
 | Four embedding model pull/load | Done | Real pull/load/status verified for all-MiniLM, BGE small, e5 small, and mpnet base in `E:\omnicode-model-cache-r60`; cache size about 762 MB |
-| Large-repo live revalidation after final fixture fix | Done | Django and Kafka clean-room gates passed with exact-first fallback and no semantic stale false-success |
+| Large-repo live revalidation after final capability-aware refactor | Done | r86 Django and Kafka clean-room gates passed with exact-first fallback and no semantic stale false-success |
 | Short hybrid durability soak | Done | `scripts/soak_hybrid_durability.py` passed short, duration-bound 60s, and readonly-mirror 120s runs with edit/sync/search, rollback, cloud-down pending preservation, restart, and pending drain |
 | Long-running soak | Done | 30-minute duration-bound run passed after readonly mirror replacement fix: 1316 edit/sync/search cycles, 263 rollback cycles, 1 cloud-down pending flush, pending=0 |
 
@@ -125,11 +125,11 @@ Last updated: 2026-06-15
 
 | Issue | Impact | Current fix / next step |
 |---|---|---|
-| Large dirty worktree | Blocks merge confidence | Review diff, ensure no debug leftovers, stage intentionally |
+| Large dirty worktree | Requires merge discipline | Diff is broad by design across capability registry, exact index, embedding, MCP tools, sync/search, docs, and tests. Stage in coherent groups. |
 | `docs/` and README historically stale | Can mislead future AI/client setup | Keep `docs/index.md` and this file current; avoid raw conversation logs |
-| Codex-mounted MCP not visible in this session | Cannot claim target-client integration from SDK smoke alone | Restart target MCP client and run live `mcp__omnicode` smoke |
+| Target-client MCP mount still environment-specific | SDK stdio proves server contract, but each editor's MCP transport can fail independently | Restart the target client and run `omni_status`, `omni_search`, `omni_read`, `omni_patch preview` as a separate deployment smoke |
 | Embedding models may not be cached | Semantic search unavailable with `local_files_only=true` | Fixed cache `E:\omnicode-model-cache-r60` currently contains all four supported models; status rejects incomplete/partial model caches and returns structured missing-model errors |
-| Semantic/graph are optional | AI may over-trust them if descriptions drift | Keep capability registry and docs explicit: exact/read/patch are default baseline |
+| Semantic/graph are optional | AI may over-trust them if descriptions drift | Capability registry and status now mark semantic unavailable/degraded unless vector metadata/runtime prove readiness; graph may be unavailable for Scala and should degrade honestly |
 | Windows temp dirs with restricted ACLs may remain | Cosmetic cleanup issue | Clean with owner/admin permissions only if needed |
 
 ## 9. Documentation Map
@@ -148,9 +148,9 @@ Last updated: 2026-06-15
 
 ## 10. Next Best Tasks for an AI Agent
 
-1. Verify actual target MCP client mounting, not only SDK stdio smoke.
-2. Review and stage the large r60 diff in coherent groups.
-3. Keep documentation synchronized with any final gate results.
+1. Verify actual target MCP client mounting in the target editor, not only SDK stdio smoke.
+2. Review and stage the large r86 diff in coherent groups.
+3. Keep documentation synchronized with any future gate results.
 
 ## 11. Do Not Assume
 

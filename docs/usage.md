@@ -280,6 +280,11 @@ Search results expose the provider chain:
 
 Important contract:
 
+- In `auto` FTS mode, large workspaces can disable `line_fts` after
+  `OMNICODE_EXACT_LINE_FTS_MAX_LINES` lines, default `50000`. Status exposes
+  `line_fts_reason=disabled_for_large_workspace`,
+  `line_fts_mode`, and `line_fts_auto_line_limit`; exact text search then uses
+  snapshot/grep fallback.
 - `BaseHandler`-style identifiers should resolve as exact symbol search.
 - `class BaseHandler:`-style queries should resolve as exact text search.
 - If the index is missing and no fallback can run, tools return
@@ -310,6 +315,9 @@ The service supports these environment variables:
 | `OMNICODE_EMBEDDING_REVISION` | Optional Hugging Face revision |
 | `OMNICODE_EMBEDDING_DEVICE` | `cpu`, `cuda`, or another sentence-transformers device |
 | `OMNICODE_EMBEDDING_PRELOAD` | Preload model at startup when enabled |
+| `OMNICODE_EMBEDDING_BATCH_SIZE` | Embedding encode batch size; default `64`; progress bars are disabled for service logs |
+| `OMNICODE_SEMANTIC_FILE_BATCH_SIZE` | Files per persistent semantic job batch; default `10` |
+| `OMNICODE_SEMANTIC_BATCH_MAX_BYTES` | Maximum source bytes per semantic job batch; default `2097152` |
 
 `omni_status()` reports:
 
@@ -325,6 +333,34 @@ Semantic vector indexes record the embedding model, revision, dimension,
 backend, chunker version, normalization, workspace id, and creation time.
 If the model or dimension changes, semantic search is marked stale or
 invalid. Exact symbol/text search remains available.
+
+### Java and Scala workspace diagnostics
+
+Workspace diagnostics are capability-gated. Inspect and bootstrap them through
+MCP instead of assuming a language server is active:
+
+```text
+omni_index(action="status", scope="lsp", format="json")
+omni_index(action="bootstrap", scope="lsp", background=False, format="json")
+```
+
+Java uses JDT LS and may auto-discover the Red Hat Java VS Code extension.
+Scala uses Metals. Both run against a shadow workspace stored under
+`OMNICODE_STATE_DIR`; they must not create `.project`, `.settings`, `.metals`,
+or `.bloop` in the real checkout.
+
+Useful deployment overrides:
+
+| Env var | Purpose |
+|---|---|
+| `OMNICODE_JDTLS_COMMAND` | Pin the JDT LS command |
+| `OMNICODE_METALS_COMMAND` | Pin the Metals command |
+| `OMNICODE_JDTLS_JAVA_HOME` / `OMNICODE_METALS_JAVA_HOME` | Select the JDK per language server |
+| `OMNICODE_JDTLS_DISABLED` / `OMNICODE_METALS_DISABLED` | Explicitly disable one server and exercise deterministic fallback |
+| `OMNICODE_LSP_DIAGNOSTICS_TIMEOUT` | Bound target diagnostics latency |
+| `OMNICODE_LSP_WORKSPACE_SETTLE_SECONDS` | Workspace import settle window |
+| `OMNICODE_SYNC_STATUS_CACHE_TTL_SECONDS` | Sync-status cache TTL; default `10`; revision changes invalidate immediately |
+| `OMNICODE_SYNC_STATUS_PROBE_TIMEOUT_SECONDS` | Per-provider status probe bound; default `0.2`; timeouts return structured degraded status instead of blocking health/control traffic |
 
 ---
 

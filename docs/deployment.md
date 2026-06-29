@@ -209,8 +209,8 @@ mode = "smart"
 agent = "auto"
 debounce_ms = 1200
 max_file_bytes = 1000000
-batch_max_files = 25
-batch_max_bytes = 250000
+batch_max_files = 500
+batch_max_bytes = 8000000
 
 [capabilities]
 llm_mode = "off"
