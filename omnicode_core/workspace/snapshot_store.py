@@ -82,6 +82,23 @@ def _expected_digest(raw: str) -> str:
     return value.lower()
 
 
+def _replace_with_retry(tmp: Path, target: Path, *, attempts: int = 5) -> None:
+    """Atomically replace a file, tolerating short Windows file-handle races."""
+
+    last_error: PermissionError | None = None
+    for attempt in range(attempts):
+        try:
+            os.replace(tmp, target)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            if attempt == attempts - 1:
+                break
+            time.sleep(0.02 * (attempt + 1))
+    if last_error is not None:
+        raise last_error
+
+
 def _utc_now() -> str:
     from datetime import datetime, timezone
 
@@ -417,10 +434,10 @@ class CloudSnapshotStore:
                 index["semantic_initial_exact_only"] = True
                 index["semantic_index_coverage"] = "exact_only_initial_sync"
             elif index.get("semantic_initial_exact_only"):
-                if coverage == "semantic_full":
+                if coverage in {"semantic_full", "selected_files", "filtered"}:
                     index["semantic_initial_exact_only"] = False
-                    index["semantic_index_coverage"] = "semantic_full"
-                else:
+                    index["semantic_index_coverage"] = coverage
+                elif coverage not in {"unchanged", "deletes_only", "filtered_empty"}:
                     index["semantic_index_coverage"] = "partial_after_exact_only"
             elif coverage not in {"unchanged", "deletes_only"}:
                 index["semantic_index_coverage"] = coverage
@@ -691,7 +708,7 @@ class CloudSnapshotStore:
             encoding="utf-8",
             newline="\n",
         )
-        os.replace(tmp, path)
+        _replace_with_retry(tmp, path)
         self._save_status_summary(workspace_id, index)
 
     def _status_from_index(self, workspace_id: str, index: dict[str, Any]) -> dict[str, Any]:
@@ -729,7 +746,7 @@ class CloudSnapshotStore:
             encoding="utf-8",
             newline="\n",
         )
-        os.replace(tmp, path)
+        _replace_with_retry(tmp, path)
 
     def _load_status_summary(self, workspace_id: str) -> Optional[dict[str, Any]]:
         path = self._status_path(workspace_id)
