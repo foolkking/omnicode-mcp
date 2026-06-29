@@ -152,8 +152,8 @@ def test_mark_indexed_persists_semantic_coverage(tmp_path: Path) -> None:
         == 4
     )
     status = CloudSnapshotStore(root=tmp_path).status("repo-a")
-    assert status["semantic_index_coverage"] == "partial_after_exact_only"
-    assert status["semantic_initial_exact_only"] is True
+    assert status["semantic_index_coverage"] == "selected_files"
+    assert status["semantic_initial_exact_only"] is False
 
     assert (
         store.mark_indexed(
@@ -165,6 +165,36 @@ def test_mark_indexed_persists_semantic_coverage(tmp_path: Path) -> None:
     )
     status = CloudSnapshotStore(root=tmp_path).status("repo-a")
     assert status["semantic_index_coverage"] == "semantic_full"
+    assert status["semantic_initial_exact_only"] is False
+
+
+def test_mark_indexed_promotes_filtered_after_exact_only(tmp_path: Path) -> None:
+    store = CloudSnapshotStore(root=tmp_path)
+    content = "x = 1\n"
+    store.upsert(
+        workspace_id="repo-a",
+        path="src/app.py",
+        content=content,
+        hash_value=_sha(content),
+        size=len(content),
+        mtime_ms=123,
+        encoding="utf-8",
+        revision=4,
+    )
+
+    store.mark_indexed(
+        workspace_id="repo-a",
+        revision=4,
+        semantic_coverage="exact_only_initial_sync",
+    )
+    store.mark_indexed(
+        workspace_id="repo-a",
+        revision=4,
+        semantic_coverage="filtered",
+    )
+
+    status = CloudSnapshotStore(root=tmp_path).status("repo-a")
+    assert status["semantic_index_coverage"] == "filtered"
     assert status["semantic_initial_exact_only"] is False
 
 
@@ -313,7 +343,23 @@ def test_upsert_materializes_readonly_mirror_and_delete_removes_it(
     assert mirror.read_text(encoding="utf-8") == content
     assert mirror.stat().st_mode & stat.S_IWRITE == 0
 
-    store.delete(workspace_id="repo-a", path="src/app.py", revision=3)
+    updated = "x = 2\n"
+    updated_record = store.upsert(
+        workspace_id="repo-a",
+        path="src/app.py",
+        content=updated,
+        hash_value=_sha(updated),
+        size=len(updated),
+        mtime_ms=124,
+        encoding="utf-8",
+        revision=3,
+    )
+
+    assert updated_record.mirror_path == "mirror/src/app.py"
+    assert mirror.read_text(encoding="utf-8") == updated
+    assert mirror.stat().st_mode & stat.S_IWRITE == 0
+
+    store.delete(workspace_id="repo-a", path="src/app.py", revision=4)
 
     assert not mirror.exists()
     assert store.status("repo-a")["file_count"] == 0

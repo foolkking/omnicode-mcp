@@ -28,14 +28,22 @@ Usage:
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import shlex
 import shutil
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from omnicode_core.lsp.shadow import LSPShadowWorkspace
+
 logger = logging.getLogger(__name__)
+
+_BRIDGES: Dict[str, "LSPBridge"] = {}
 
 
 class LSPTimeout(TimeoutError):
@@ -213,9 +221,28 @@ class LSPBridge:
     on first request for a given language.
     """
 
-    def __init__(self, working_dir: str):
+    def __init__(self, working_dir: str, state_dir: Optional[str] = None):
         self.working_dir = os.path.abspath(working_dir)
+        workspace_key = hashlib.sha1(
+            self.working_dir.lower().encode("utf-8", "replace")
+        ).hexdigest()[:16]
+        base_state = Path(
+            state_dir
+            or os.environ.get("OMNICODE_STATE_DIR")
+            or (Path.home() / ".omnicode")
+        ).resolve()
+        self.state_dir = base_state / "lsp" / workspace_key
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self._jvm_shadow = LSPShadowWorkspace(
+            self.working_dir,
+            self.state_dir / "jvm-shadow",
+        )
+        # Compatibility aliases for existing tests/plugins that inspected the
+        # Scala-specific attribute before Java joined the same safe workspace.
+        self._scala_shadow = self._jvm_shadow
+        self._java_shadow = self._jvm_shadow
         self._servers: Dict[str, "_LSPConnection"] = {}
+        self._binary_cache: Dict[str, tuple[float, Optional[str]]] = {}
         self._msg_id = 0
 
     def _detect_language(self, file_path: str) -> Optional[str]:
@@ -236,8 +263,25 @@ class LSPBridge:
              into a conda env even when the env isn't activated.
           3. On Windows we also try ``cmd + ".cmd"`` / ``".exe"``.
         """
+        cached = self._binary_cache.get(cmd)
+        now = time.monotonic()
+        if cached and now - cached[0] <= 5.0:
+            return cached[1]
+        if cmd.lower() in {"java", "java.exe"}:
+            java_home = (
+                os.environ.get("OMNICODE_JDTLS_JAVA_HOME")
+                or os.environ.get("OMNICODE_JVM_JAVA_HOME")
+                or os.environ.get("JAVA_HOME")
+            )
+            if java_home:
+                candidate = Path(java_home) / "bin" / "java.exe"
+                if candidate.is_file():
+                    resolved = str(candidate.resolve())
+                    self._binary_cache[cmd] = (now, resolved)
+                    return resolved
         found = shutil.which(cmd)
         if found:
+            self._binary_cache[cmd] = (now, found)
             return found
         # Conda / venv fallback: <prefix>/Scripts (Windows) or <prefix>/bin.
         import sys
@@ -252,7 +296,9 @@ class LSPBridge:
             for c in candidates:
                 full = c + ext
                 if os.path.isfile(full):
+                    self._binary_cache[cmd] = (now, full)
                     return full
+        self._binary_cache[cmd] = (now, None)
         return None
 
     def _is_available(self, language: str) -> bool:
@@ -260,8 +306,223 @@ class LSPBridge:
         info = LSP_SERVERS.get(language)
         if not info:
             return False
-        cmd = info["command"][0]
+        if self._language_server_disabled(language):
+            return False
+        cmd = self._configured_server_command(language)[0]
         return self._resolve_lsp_binary(cmd) is not None
+
+    @staticmethod
+    def _language_server_disabled(language: str) -> bool:
+        env_names = [f"OMNICODE_LSP_{language.upper()}_DISABLED"]
+        if language == "java":
+            env_names.append("OMNICODE_JDTLS_DISABLED")
+        elif language == "scala":
+            env_names.append("OMNICODE_METALS_DISABLED")
+        return any(
+            os.environ.get(name, "").strip().lower()
+            in {"1", "true", "yes", "on"}
+            for name in env_names
+        )
+
+    def _configured_server_command(self, language: str) -> List[str]:
+        info = LSP_SERVERS[language]
+        env_names = [
+            f"OMNICODE_LSP_{language.upper()}_COMMAND",
+        ]
+        if language == "java":
+            env_names.insert(0, "OMNICODE_JDTLS_COMMAND")
+        elif language == "scala":
+            env_names.insert(0, "OMNICODE_METALS_COMMAND")
+        for env_name in env_names:
+            raw = os.environ.get(env_name, "").strip()
+            if not raw:
+                continue
+            if raw.startswith("["):
+                try:
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, list) and parsed:
+                        return [str(item) for item in parsed]
+                except Exception:
+                    pass
+            parts = [
+                item.strip().strip('"')
+                for item in shlex.split(raw, posix=False)
+                if item.strip()
+            ]
+            if parts:
+                return parts
+
+        toolchain_bin = self.state_dir.parent.parent / "toolchains" / "bin"
+        names = [info["command"][0]]
+        for suffix in (".cmd", ".bat", ".exe", ""):
+            candidate = toolchain_bin / f"{names[0]}{suffix}"
+            if candidate.is_file():
+                return [str(candidate), *info["command"][1:]]
+        if language == "java":
+            extension_roots = [
+                Path.home() / ".vscode" / "extensions",
+                Path.home() / ".kiro" / "extensions",
+                Path.home() / ".cursor" / "extensions",
+            ]
+            candidates: list[Path] = []
+            for root in extension_roots:
+                if not root.is_dir():
+                    continue
+                candidates.extend(
+                    root.glob("redhat.java-*/server/bin/jdtls")
+                )
+            if candidates:
+                selected = sorted(
+                    candidates,
+                    key=lambda path: path.as_posix().lower(),
+                    reverse=True,
+                )[0]
+                server_root = selected.parent.parent
+                launchers = sorted(
+                    (server_root / "plugins").glob(
+                        "org.eclipse.equinox.launcher_*.jar"
+                    )
+                )
+                config_dir = server_root / "config_win"
+                if launchers and config_dir.is_dir():
+                    return [
+                        "java",
+                        "-Declipse.application=org.eclipse.jdt.ls.core.id1",
+                        "-Dosgi.bundles.defaultStartLevel=4",
+                        "-Declipse.product=org.eclipse.jdt.ls.core.product",
+                        "-Dosgi.checkConfiguration=true",
+                        (
+                            "-Dosgi.sharedConfiguration.area="
+                            f"{config_dir}"
+                        ),
+                        "-Dosgi.sharedConfiguration.area.readOnly=true",
+                        "-Dosgi.configuration.cascaded=true",
+                        "-Xms1G",
+                        "--add-modules=ALL-SYSTEM",
+                        "--add-opens",
+                        "java.base/java.util=ALL-UNNAMED",
+                        "--add-opens",
+                        "java.base/java.lang=ALL-UNNAMED",
+                        "-jar",
+                        str(launchers[-1]),
+                    ]
+        return list(info["command"])
+
+    def _start_policy(self, language: str) -> tuple[bool, str]:
+        if self._language_server_disabled(language):
+            return False, f"{language}_lsp_disabled"
+        if not self._is_available(language):
+            return False, f"{language}_lsp_unavailable"
+        if language in {"java", "scala"}:
+            shadow_disabled = (
+                os.environ.get(
+                    "OMNICODE_LSP_SHADOW_WORKSPACE",
+                    "true",
+                ).strip().lower()
+                in {"0", "false", "no", "off"}
+            )
+            if shadow_disabled:
+                return False, f"{language}_shadow_workspace_disabled"
+        return True, "ready"
+
+    def _server_working_dir(self, language: str) -> str:
+        if language in {"java", "scala"}:
+            return str(self._jvm_shadow.workspace_root)
+        return self.working_dir
+
+    def _sync_language_workspace(
+        self,
+        language: str,
+        file_path: Optional[str] = None,
+    ) -> dict[str, Any]:
+        if language not in {"java", "scala"}:
+            return {"ready": True, "workspace_root": self.working_dir}
+        if file_path:
+            self._jvm_shadow.sync_file(file_path)
+            status = self._jvm_shadow.status()
+            if not status.get("ready"):
+                status = self._jvm_shadow.sync_full()
+            return status
+        return self._jvm_shadow.sync_full()
+
+    def _server_command(self, language: str) -> List[str]:
+        resolved_cmd = self._configured_server_command(language)
+        resolved_first = self._resolve_lsp_binary(resolved_cmd[0]) or resolved_cmd[0]
+        resolved_cmd[0] = resolved_first
+        if language == "java":
+            data_dir = self.state_dir / "jdtls-data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            if "-data" not in resolved_cmd:
+                resolved_cmd.extend(["-data", str(data_dir)])
+        return resolved_cmd
+
+    def _server_environment(self, language: str) -> Dict[str, str]:
+        env: Dict[str, str] = {}
+        java_home = (
+            os.environ.get(f"OMNICODE_{language.upper()}_JAVA_HOME")
+            or (
+                os.environ.get("OMNICODE_JDTLS_JAVA_HOME")
+                if language == "java"
+                else os.environ.get("OMNICODE_METALS_JAVA_HOME")
+                if language == "scala"
+                else None
+            )
+            or os.environ.get("OMNICODE_JVM_JAVA_HOME")
+        )
+        if java_home and language in {"java", "scala"}:
+            resolved = str(Path(java_home).expanduser().resolve())
+            env["JAVA_HOME"] = resolved
+            env["PATH"] = os.pathsep.join([
+                str(Path(resolved) / "bin"),
+                os.environ.get("PATH", ""),
+            ])
+        return env
+
+    def _unavailable_error(self, language: str) -> Dict[str, Any]:
+        allowed, reason = self._start_policy(language)
+        hint = LSP_SERVERS[language]["install_hint"]
+        return {
+            "error": (
+                f"LSP server not available for {language}: {reason}. "
+                f"Install/configure: {hint}"
+            ),
+            "error_code": reason,
+            "start_allowed": allowed,
+        }
+
+    def status_snapshot(
+        self,
+        languages: Optional[set[str]] = None,
+    ) -> Dict[str, Any]:
+        status: Dict[str, Any] = {}
+        for lang, info in LSP_SERVERS.items():
+            if languages is not None and lang not in languages:
+                continue
+            installed = self._is_available(lang)
+            start_allowed, reason = self._start_policy(lang)
+            conn = self._servers.get(lang)
+            running = bool(conn and conn.is_alive())
+            initialized = bool(conn and conn.initialized)
+            status[lang] = {
+                "available": installed,
+                "start_allowed": start_allowed,
+                "running": running,
+                "initialized": initialized,
+                "command": self._configured_server_command(lang)[0],
+                "reason": (
+                    "ready"
+                    if initialized
+                    else "initializing"
+                    if running
+                    else reason
+                ),
+                "state_dir": str(self.state_dir / lang),
+            }
+            if lang in {"java", "scala"}:
+                status[lang]["shadow_workspace"] = (
+                    self._jvm_shadow.status()
+                )
+        return status
 
     async def _get_server(self, language: str) -> Optional["_LSPConnection"]:
         """Get or start a language server for the given language."""
@@ -272,19 +533,33 @@ class LSPBridge:
             # Dead server — remove and restart
             del self._servers[language]
 
-        if not self._is_available(language):
+        start_allowed, _reason = self._start_policy(language)
+        if not start_allowed:
             return None
 
-        info = LSP_SERVERS[language]
-        # Replace the bare binary name with the resolved absolute path
-        # so the subprocess works whether or not the env Scripts dir is
-        # currently on PATH.
-        resolved_cmd = list(info["command"])
-        resolved_first = self._resolve_lsp_binary(resolved_cmd[0]) or resolved_cmd[0]
-        resolved_cmd[0] = resolved_first
+        resolved_cmd = self._server_command(language)
         try:
-            conn = _LSPConnection(resolved_cmd, self.working_dir)
+            self._sync_language_workspace(language)
+            conn = _LSPConnection(
+                resolved_cmd,
+                self._server_working_dir(language),
+                state_dir=str(self.state_dir / language),
+                env_overrides=self._server_environment(language),
+            )
             await conn.start()
+            if language in {"java", "scala"}:
+                try:
+                    settle_seconds = float(
+                        os.environ.get(
+                            "OMNICODE_LSP_WORKSPACE_SETTLE_SECONDS",
+                            "3",
+                        )
+                    )
+                except ValueError:
+                    settle_seconds = 3.0
+                if settle_seconds > 0:
+                    await asyncio.sleep(min(settle_seconds, 30.0))
+            conn.initialized = True
             self._servers[language] = conn
             return conn
         except Exception as e:
@@ -294,6 +569,54 @@ class LSPBridge:
     # -------------------------------------------------------------------------
     # Public API
     # -------------------------------------------------------------------------
+
+    async def bootstrap(
+        self,
+        languages: Optional[set[str]] = None,
+    ) -> Dict[str, Any]:
+        """Materialize state-dir workspaces and start selected servers."""
+
+        selected = languages or {"java", "scala"}
+        results: Dict[str, Any] = {}
+        for language in sorted(selected):
+            if language not in LSP_SERVERS:
+                results[language] = {
+                    "ready": False,
+                    "error_code": "unsupported_language",
+                }
+                continue
+            start_allowed, reason = self._start_policy(language)
+            if not start_allowed:
+                results[language] = {
+                    "ready": False,
+                    "error_code": reason,
+                    "status": self.status_snapshot({language}).get(language),
+                }
+                continue
+            try:
+                shadow = (
+                    self._sync_language_workspace(language)
+                    if language in {"java", "scala"}
+                    else None
+                )
+                server = await self._get_server(language)
+                results[language] = {
+                    "ready": bool(server and server.is_alive()),
+                    "status": self.status_snapshot({language}).get(language),
+                    "shadow_workspace": shadow,
+                }
+            except Exception as exc:
+                results[language] = {
+                    "ready": False,
+                    "error_code": "lsp_bootstrap_failed",
+                    "error": f"{exc.__class__.__name__}: {exc}",
+                }
+        return {
+            "ready": bool(results)
+            and all(bool(item.get("ready")) for item in results.values()),
+            "languages": results,
+            "state_dir": str(self.state_dir),
+        }
 
     async def goto_definition(
         self, file_path: str, line: int, col: int
@@ -308,10 +631,10 @@ class LSPBridge:
 
         server = await self._get_server(language)
         if not server:
-            hint = LSP_SERVERS[language]["install_hint"]
-            return {"error": f"LSP server not available for {language}. Install: {hint}"}
+            return self._unavailable_error(language)
 
-        uri = self._file_uri(file_path)
+        await self._ensure_open(server, file_path, language)
+        uri = self._file_uri(file_path, root=server.working_dir)
         result = await server.request("textDocument/definition", {
             "textDocument": {"uri": uri},
             "position": {"line": line, "character": col},
@@ -327,7 +650,8 @@ class LSPBridge:
         ``references`` and ``hover`` requests resolve nothing for files
         the user hasn't visited interactively.
         """
-        uri = self._file_uri(file_path)
+        self._sync_language_workspace(language, file_path)
+        uri = self._file_uri(file_path, root=server.working_dir)
         if uri in getattr(server, "_opened_uris", set()):
             return
         full_path = os.path.join(self.working_dir, file_path)
@@ -360,12 +684,11 @@ class LSPBridge:
 
         server = await self._get_server(language)
         if not server:
-            hint = LSP_SERVERS[language]["install_hint"]
-            return {"error": f"LSP server not available for {language}. Install: {hint}"}
+            return self._unavailable_error(language)
 
         await self._ensure_open(server, file_path, language)
 
-        uri = self._file_uri(file_path)
+        uri = self._file_uri(file_path, root=server.working_dir)
         result = await server.request("textDocument/references", {
             "textDocument": {"uri": uri},
             "position": {"line": line, "character": col},
@@ -373,6 +696,86 @@ class LSPBridge:
         })
 
         return self._parse_locations(result)
+
+    async def call_hierarchy(
+        self,
+        file_path: str,
+        line: int,
+        col: int,
+    ) -> Dict[str, Any]:
+        """Return normalized incoming/outgoing call hierarchy for a symbol."""
+
+        language = self._detect_language(file_path)
+        if not language:
+            return {"error": f"Unsupported language for {file_path}"}
+        server = await self._get_server(language)
+        if not server:
+            return self._unavailable_error(language)
+        await self._ensure_open(server, file_path, language)
+        uri = self._file_uri(file_path, root=server.working_dir)
+        prepared = await server.request(
+            "textDocument/prepareCallHierarchy",
+            {
+                "textDocument": {"uri": uri},
+                "position": {"line": line, "character": col},
+            },
+        )
+        items = prepared if isinstance(prepared, list) else (
+            [prepared] if isinstance(prepared, dict) else []
+        )
+        if not items:
+            return {
+                "incoming": [],
+                "outgoing": [],
+                "prepared": False,
+            }
+        item = items[0]
+        incoming_raw, outgoing_raw = await asyncio.gather(
+            server.request("callHierarchy/incomingCalls", {"item": item}),
+            server.request("callHierarchy/outgoingCalls", {"item": item}),
+        )
+
+        def _normalize(rows: Any, key: str) -> List[Dict[str, Any]]:
+            normalized: List[Dict[str, Any]] = []
+            for row in rows or []:
+                if not isinstance(row, dict):
+                    continue
+                target = row.get(key)
+                if not isinstance(target, dict):
+                    continue
+                target_uri = str(target.get("uri") or "")
+                selection = (
+                    target.get("selectionRange")
+                    if isinstance(target.get("selectionRange"), dict)
+                    else target.get("range")
+                    if isinstance(target.get("range"), dict)
+                    else {}
+                )
+                start = (
+                    selection.get("start")
+                    if isinstance(selection, dict)
+                    and isinstance(selection.get("start"), dict)
+                    else {}
+                )
+                normalized.append({
+                    "name": str(target.get("name") or ""),
+                    "kind": target.get("kind"),
+                    "file": self._uri_to_path(target_uri),
+                    "line": int(start.get("line") or 0),
+                    "col": int(start.get("character") or 0),
+                    "detail": str(target.get("detail") or ""),
+                })
+            return normalized
+
+        return {
+            "incoming": _normalize(incoming_raw, "from"),
+            "outgoing": _normalize(outgoing_raw, "to"),
+            "prepared": True,
+            "item": {
+                "name": str(item.get("name") or ""),
+                "detail": str(item.get("detail") or ""),
+            },
+        }
 
     async def hover(self, file_path: str, line: int, col: int) -> Dict[str, Any]:
         """Get hover information (type, documentation) at a position."""
@@ -382,10 +785,10 @@ class LSPBridge:
 
         server = await self._get_server(language)
         if not server:
-            hint = LSP_SERVERS[language]["install_hint"]
-            return {"error": f"LSP server not available for {language}. Install: {hint}"}
+            return self._unavailable_error(language)
 
-        uri = self._file_uri(file_path)
+        await self._ensure_open(server, file_path, language)
+        uri = self._file_uri(file_path, root=server.working_dir)
         result = await server.request("textDocument/hover", {
             "textDocument": {"uri": uri},
             "position": {"line": line, "character": col},
@@ -431,10 +834,10 @@ class LSPBridge:
 
         server = await self._get_server(language)
         if not server:
-            hint = LSP_SERVERS[language]["install_hint"]
-            return {"error": f"LSP server not available for {language}. Install: {hint}"}
+            return self._unavailable_error(language)
 
-        uri = self._file_uri(file_path)
+        await self._ensure_open(server, file_path, language)
+        uri = self._file_uri(file_path, root=server.working_dir)
         result = await server.request(
             "textDocument/rename",
             {
@@ -461,10 +864,7 @@ class LSPBridge:
             # percent-decode just enough to get a usable path. We don't
             # try to re-encode for cross-platform symlinks; this is
             # best-effort and the REST router validates afterwards.
-            from urllib.parse import unquote, urlparse
-
-            parsed = urlparse(target_uri)
-            path = unquote(parsed.path)
+            path = self._uri_to_path(target_uri)
             if path.startswith("/") and len(path) > 3 and path[2] == ":":
                 # ``/c:/Users/...`` on Windows — drop leading slash.
                 path = path[1:]
@@ -512,10 +912,10 @@ class LSPBridge:
 
         server = await self._get_server(language)
         if not server:
-            hint = LSP_SERVERS[language]["install_hint"]
-            return {"error": f"LSP server not available for {language}. Install: {hint}"}
+            return self._unavailable_error(language)
 
-        uri = self._file_uri(file_path)
+        await self._ensure_open(server, file_path, language)
+        uri = self._file_uri(file_path, root=server.working_dir)
         result = await server.request("textDocument/documentSymbol", {
             "textDocument": {"uri": uri},
         })
@@ -536,7 +936,13 @@ class LSPBridge:
 
         return {"symbols": all_symbols, "total": len(all_symbols)}
 
-    async def get_diagnostics(self, file_path: str) -> Dict[str, Any]:
+    async def get_diagnostics(
+        self,
+        file_path: str,
+        *,
+        content: Optional[str] = None,
+        restore_after: bool = False,
+    ) -> Dict[str, Any]:
         """Get diagnostics for a file.
 
         Note: Most LSP servers push diagnostics asynchronously via
@@ -549,46 +955,108 @@ class LSPBridge:
 
         server = await self._get_server(language)
         if not server:
-            hint = LSP_SERVERS[language]["install_hint"]
-            return {"error": f"LSP server not available for {language}. Install: {hint}"}
+            return self._unavailable_error(language)
 
-        uri = self._file_uri(file_path)
+        self._sync_language_workspace(language, file_path)
+        uri = self._file_uri(file_path, root=server.working_dir)
 
-        # Open the document to trigger diagnostics
+        # Open/update the document to trigger diagnostics. Callers such as
+        # patch validation may provide an in-memory overlay so candidate
+        # content is checked without touching the authoritative workspace.
         full_path = os.path.join(self.working_dir, file_path)
+        disk_text: Optional[str] = None
         try:
             with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
-                text = f.read()
+                disk_text = f.read()
         except Exception as e:
-            return {"error": f"Cannot read file: {e}"}
+            if content is None:
+                return {"error": f"Cannot read file: {e}"}
+        text = content if content is not None else (disk_text or "")
 
-        await server.notify("textDocument/didOpen", {
-            "textDocument": {
-                "uri": uri,
-                "languageId": language,
-                "version": 1,
-                "text": text,
-            },
-        })
+        version = server.next_document_version(uri)
+        server.clear_diagnostics(uri)
+        if server.is_document_open(uri):
+            await server.notify("textDocument/didChange", {
+                "textDocument": {"uri": uri, "version": version},
+                "contentChanges": [{"text": text}],
+            })
+        else:
+            await server.notify("textDocument/didOpen", {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": language,
+                    "version": version,
+                    "text": text,
+                },
+            })
+            server.mark_document_open(uri)
 
-        # Wait for diagnostics (servers push them asynchronously)
-        await asyncio.sleep(2.0)
-        diags = server.get_diagnostics(uri)
+        if language == "java":
+            try:
+                await server.request(
+                    "workspace/executeCommand",
+                    {
+                        "command": "java.project.refreshDiagnostics",
+                        "arguments": [uri],
+                    },
+                    timeout=5.0,
+                )
+            except Exception:
+                pass
 
-        return {"diagnostics": diags, "file": file_path, "count": len(diags)}
+        # Wait for diagnostics (servers push them asynchronously). JVM
+        # servers finish build import after initialize, so use a bounded poll
+        # instead of a fixed two-second sleep.
+        try:
+            diagnostics_timeout = float(
+                os.environ.get(
+                    "OMNICODE_LSP_DIAGNOSTICS_TIMEOUT",
+                    "8" if language in {"java", "scala"} else "2",
+                )
+            )
+        except ValueError:
+            diagnostics_timeout = 8.0 if language in {"java", "scala"} else 2.0
+        deadline = time.monotonic() + max(diagnostics_timeout, 0.0)
+        diags: List[Dict[str, Any]] = []
+        while True:
+            diags = list(server.get_diagnostics(uri))
+            if diags or time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(0.25)
+
+        if (
+            restore_after
+            and content is not None
+            and disk_text is not None
+            and disk_text != content
+        ):
+            restore_version = server.next_document_version(uri)
+            await server.notify("textDocument/didChange", {
+                "textDocument": {
+                    "uri": uri,
+                    "version": restore_version,
+                },
+                "contentChanges": [{"text": disk_text}],
+            })
+
+        return {
+            "diagnostics": diags,
+            "file": file_path,
+            "count": len(diags),
+            "overlay": content is not None,
+            "restored": bool(
+                restore_after
+                and content is not None
+                and disk_text is not None
+                and disk_text != content
+            ),
+        }
 
     async def get_status(self) -> Dict[str, Any]:
         """Get status of all LSP servers."""
-        status = {}
+        status = self.status_snapshot()
         for lang, info in LSP_SERVERS.items():
-            available = self._is_available(lang)
-            running = lang in self._servers and self._servers[lang].is_alive()
-            status[lang] = {
-                "available": available,
-                "running": running,
-                "command": info["command"][0],
-                "install_hint": info["install_hint"],
-            }
+            status[lang]["install_hint"] = info["install_hint"]
         return status
 
     async def shutdown(self):
@@ -604,12 +1072,17 @@ class LSPBridge:
     # Helpers
     # -------------------------------------------------------------------------
 
-    def _file_uri(self, file_path: str) -> str:
+    def _file_uri(
+        self,
+        file_path: str,
+        *,
+        root: Optional[str] = None,
+    ) -> str:
         """Convert a relative file path to a file:// URI."""
         if os.path.isabs(file_path):
             abs_path = file_path
         else:
-            abs_path = os.path.join(self.working_dir, file_path)
+            abs_path = os.path.join(root or self.working_dir, file_path)
         # Windows: file:///C:/path/to/file
         abs_path = abs_path.replace("\\", "/")
         if not abs_path.startswith("/"):
@@ -708,65 +1181,162 @@ class LSPBridge:
             if len(path) > 2 and path[0] == "/" and path[2] == ":":
                 path = path[1:]
             path = path.replace("/", os.sep)
-            # Make relative to working dir
-            try:
-                return os.path.relpath(path, self.working_dir)
-            except ValueError:
-                return path
+            for root in (
+                self.working_dir,
+                str(self._jvm_shadow.workspace_root),
+            ):
+                try:
+                    relative = os.path.relpath(path, root)
+                except ValueError:
+                    continue
+                if (
+                    relative != ".."
+                    and not relative.startswith(f"..{os.sep}")
+                ):
+                    return relative
+            return path
         return uri
+
+
+def get_lsp_bridge(
+    working_dir: str,
+    *,
+    state_dir: Optional[str] = None,
+) -> LSPBridge:
+    """Return the process-local bridge for one authoritative workspace."""
+
+    resolved_state_dir = os.path.abspath(
+        state_dir
+        or os.environ.get("OMNICODE_STATE_DIR")
+        or str(Path.home() / ".omnicode")
+    ).lower()
+    key = f"{os.path.abspath(working_dir).lower()}::{resolved_state_dir}"
+    bridge = _BRIDGES.get(key)
+    if bridge is None:
+        bridge = LSPBridge(working_dir, state_dir=state_dir)
+        _BRIDGES[key] = bridge
+    return bridge
+
+
+def lsp_runtime_status(
+    working_dir: str,
+    *,
+    languages: Optional[set[str]] = None,
+) -> Dict[str, Any]:
+    """Return a non-starting runtime snapshot for capability reporting."""
+
+    return get_lsp_bridge(working_dir).status_snapshot(languages=languages)
 
 
 class _LSPConnection:
     """Low-level JSON-RPC connection to a language server subprocess."""
 
-    def __init__(self, command: List[str], working_dir: str):
+    def __init__(
+        self,
+        command: List[str],
+        working_dir: str,
+        *,
+        state_dir: Optional[str] = None,
+        env_overrides: Optional[Dict[str, str]] = None,
+    ):
         self.command = command
         self.working_dir = working_dir
+        default_state = (
+            Path(os.environ.get("OMNICODE_STATE_DIR") or (Path.home() / ".omnicode"))
+            / "lsp"
+            / "connections"
+        )
+        self.state_dir = os.path.abspath(
+            state_dir or str(default_state)
+        )
+        self.env_overrides = dict(env_overrides or {})
         self.process: Optional[asyncio.subprocess.Process] = None
         self._msg_id = 0
         self._pending: Dict[int, asyncio.Future] = {}
         self._diagnostics: Dict[str, List[Dict]] = {}
+        self._opened_uris: set[str] = set()
+        self._document_versions: Dict[str, int] = {}
         self._reader_task: Optional[asyncio.Task] = None
+        self._stderr_task: Optional[asyncio.Task] = None
+        self._stderr_tail: List[str] = []
+        self.initialized = False
+
+    def is_document_open(self, uri: str) -> bool:
+        return uri in self._opened_uris
+
+    def mark_document_open(self, uri: str) -> None:
+        self._opened_uris.add(uri)
+
+    def next_document_version(self, uri: str) -> int:
+        version = int(self._document_versions.get(uri, 0)) + 1
+        self._document_versions[uri] = version
+        return version
+
+    def clear_diagnostics(self, uri: str) -> None:
+        self._diagnostics.pop(uri, None)
 
     async def start(self):
         """Start the language server subprocess."""
+        os.makedirs(self.state_dir, exist_ok=True)
+        child_env = os.environ.copy()
+        child_env.setdefault("XDG_CACHE_HOME", os.path.join(self.state_dir, "cache"))
+        child_env.setdefault("COURSIER_CACHE", os.path.join(self.state_dir, "coursier"))
+        child_env.setdefault("BLOOP_HOME", os.path.join(self.state_dir, "bloop"))
+        child_env.setdefault("METALS_LOG_DIR", os.path.join(self.state_dir, "logs"))
+        child_env.update(self.env_overrides)
         self.process = await asyncio.create_subprocess_exec(
             *self.command,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=self.working_dir,
+            env=child_env,
         )
         self._reader_task = asyncio.create_task(self._read_loop())
+        self._stderr_task = asyncio.create_task(self._drain_stderr())
 
         # Initialize.  Pyright (and most modern servers) require both
         # ``rootUri`` AND ``workspaceFolders``; some refuse to index the
         # workspace if only the legacy ``rootUri`` is provided.
         wd_posix = self.working_dir.replace(os.sep, "/")
         root_uri = f"file:///{wd_posix.lstrip('/')}"
-        await self.request("initialize", {
-            "processId": os.getpid(),
-            "rootUri": root_uri,
-            "rootPath": self.working_dir,
-            "workspaceFolders": [
-                {"uri": root_uri, "name": os.path.basename(self.working_dir) or "workspace"},
-            ],
-            "capabilities": {
-                "textDocument": {
-                    "definition": {"dynamicRegistration": False},
-                    "references": {"dynamicRegistration": False},
-                    "hover": {"contentFormat": ["markdown", "plaintext"]},
-                    "documentSymbol": {"dynamicRegistration": False},
-                    "publishDiagnostics": {"relatedInformation": True},
+        try:
+            await self.request("initialize", {
+                "processId": os.getpid(),
+                "rootUri": root_uri,
+                "rootPath": self.working_dir,
+                "workspaceFolders": [
+                    {
+                        "uri": root_uri,
+                        "name": os.path.basename(self.working_dir)
+                        or "workspace",
+                    },
+                ],
+                "capabilities": {
+                    "textDocument": {
+                        "definition": {"dynamicRegistration": False},
+                        "references": {"dynamicRegistration": False},
+                        "hover": {
+                            "contentFormat": ["markdown", "plaintext"]
+                        },
+                        "documentSymbol": {
+                            "dynamicRegistration": False
+                        },
+                        "publishDiagnostics": {
+                            "relatedInformation": True
+                        },
+                    },
+                    "workspace": {
+                        "symbol": {"dynamicRegistration": False},
+                        "workspaceFolders": True,
+                        "configuration": True,
+                    },
                 },
-                "workspace": {
-                    "symbol": {"dynamicRegistration": False},
-                    "workspaceFolders": True,
-                    "configuration": True,
-                },
-            },
-        })
-        await self.notify("initialized", {})
+            })
+            await self.notify("initialized", {})
+        except Exception:
+            await self._force_stop()
+            raise
 
     def is_alive(self) -> bool:
         return self.process is not None and self.process.returncode is None
@@ -829,15 +1399,67 @@ class _LSPConnection:
     async def shutdown(self):
         """Gracefully shutdown the server."""
         try:
-            await self.request("shutdown", {})
+            await self.request("shutdown", {}, timeout=5.0)
             await self.notify("exit", {})
         except Exception:
             pass
-        if self.process:
-            self.process.kill()
-            await self.process.wait()
-        if self._reader_task:
-            self._reader_task.cancel()
+        await self._force_stop(wait_for_exit=True)
+
+    async def _force_stop(self, *, wait_for_exit: bool = False) -> None:
+        process = self.process
+        if process and process.returncode is None:
+            if wait_for_exit:
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5.0)
+                except Exception:
+                    pass
+        if process and process.returncode is None:
+            try:
+                process.terminate()
+                await asyncio.wait_for(process.wait(), timeout=5.0)
+            except Exception:
+                try:
+                    process.kill()
+                    await asyncio.wait_for(process.wait(), timeout=5.0)
+                except Exception:
+                    pass
+        tasks = [
+            task
+            for task in (self._reader_task, self._stderr_task)
+            if task is not None
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if process and process.stdin:
+            try:
+                process.stdin.close()
+                await process.stdin.wait_closed()
+            except Exception:
+                pass
+        self.process = None
+
+    async def _drain_stderr(self) -> None:
+        """Drain server stderr so JVM/native servers cannot block on logs."""
+
+        if not self.process or not self.process.stderr:
+            return
+        try:
+            while self.process.returncode is None:
+                line = await self.process.stderr.readline()
+                if not line:
+                    return
+                text = line.decode("utf-8", "replace").rstrip()
+                if not text:
+                    continue
+                self._stderr_tail.append(text)
+                del self._stderr_tail[:-100]
+                logger.debug("LSP stderr: %s", text)
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.debug("LSP stderr drain stopped: %s", exc)
 
     async def _send(self, message: Dict):
         """Send a JSON-RPC message."""
@@ -889,8 +1511,43 @@ class _LSPConnection:
                         else:
                             future.set_result(message.get("result"))
                 elif "method" in message:
+                    if "id" in message:
+                        method = str(message.get("method") or "")
+                        params = message.get("params") or {}
+                        if method == "workspace/configuration":
+                            items = (
+                                params.get("items")
+                                if isinstance(params, dict)
+                                else []
+                            )
+                            result = [{} for _item in (items or [])]
+                        elif method == "workspace/workspaceFolders":
+                            wd_posix = self.working_dir.replace(os.sep, "/")
+                            uri = f"file:///{wd_posix.lstrip('/')}"
+                            result = [{
+                                "uri": uri,
+                                "name": os.path.basename(self.working_dir)
+                                or "workspace",
+                            }]
+                        elif method == "workspace/applyEdit":
+                            result = {
+                                "applied": False,
+                                "failureReason": (
+                                    "OmniCode applies edits through "
+                                    "PatchManager only"
+                                ),
+                            }
+                        else:
+                            # Registration, progress creation and optional UI
+                            # requests are acknowledged without side effects.
+                            result = None
+                        await self._send({
+                            "jsonrpc": "2.0",
+                            "id": message["id"],
+                            "result": result,
+                        })
                     # Notification
-                    if message["method"] == "textDocument/publishDiagnostics":
+                    elif message["method"] == "textDocument/publishDiagnostics":
                         params = message.get("params", {})
                         uri = params.get("uri", "")
                         diags = []

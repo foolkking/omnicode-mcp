@@ -164,6 +164,119 @@ def test_omni_diagnostics_hybrid_uses_local_workspace_first(
     assert "lsp:local_mcp_lsp_unavailable" in payload["tools_skipped"]
 
 
+def test_omni_diagnostics_scala_unsupported_preflights_without_backend(
+    tmp_path, monkeypatch,
+) -> None:
+    workspace = tmp_path / "repo"
+    target = workspace / "core" / "src" / "main" / "scala" / "App.scala"
+    target.parent.mkdir(parents=True)
+    target.write_text("object App { def broken( = 1 }\n", encoding="utf-8")
+
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(workspace))
+
+    tools = _build_tools({
+        "/diagnostics": {
+            "ok": True,
+            "diagnostics": [{"message": "backend should not run"}],
+            "counts": {"total": 1},
+        }
+    })
+    raw = _run(tools["omni_diagnostics"](
+        file="core/src/main/scala/App.scala",
+        format="json",
+    ))
+    payload = json.loads(raw)
+
+    assert payload["ok"] is True
+    assert payload["diagnostics_status"] == "unsupported"
+    assert payload["language"] == "scala"
+    assert payload["tools_run"] == []
+    assert payload["tools_skipped"] == ["metals_unavailable"]
+    assert payload["capability_preflight"]["execution_policy"]["mode"] == "block"
+    assert "/diagnostics" not in tools["__captured__"]
+
+
+def test_omni_diagnostics_java_tree_sitter_syntax_without_backend(
+    tmp_path, monkeypatch,
+) -> None:
+    workspace = tmp_path / "repo"
+    target = workspace / "src" / "main" / "java" / "App.java"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "class App { void broken() { int value = ; } }\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("OMNICODE_JDTLS_DISABLED", "true")
+
+    tools = _build_tools({
+        "/guard/check": {
+            "issues": [{"message": "backend should not run"}],
+        },
+        "/lsp/diagnostics/src/main/java/App.java": {
+            "diagnostics": [{"message": "backend should not run"}],
+        },
+    })
+    raw = _run(tools["omni_diagnostics"](
+        file="src/main/java/App.java",
+        severity="all",
+        format="json",
+    ))
+    payload = json.loads(raw)
+
+    assert payload["ok"] is True
+    assert payload["language"] == "java"
+    assert payload["diagnostics_status"] == "target_errors"
+    assert payload["source"] == "tree_sitter_java"
+    assert payload["tools_run"] == ["tree_sitter_java"]
+    assert "java_semantic_diagnostics_not_performed" in payload["tools_skipped"]
+    assert payload["counts"]["error"] >= 1
+    assert payload["diagnostics"][0]["rule"] == "java-syntax"
+    assert "/guard/check" not in tools["__captured__"]
+    assert "/lsp/diagnostics/src/main/java/App.java" not in tools["__captured__"]
+
+
+def test_omni_diagnostics_java_javac_environment_incomplete(
+    tmp_path, monkeypatch,
+) -> None:
+    workspace = tmp_path / "repo"
+    target = workspace / "src" / "main" / "java" / "App.java"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "import missing.Dependency;\nclass App { Dependency dep; }\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("OMNICODE_JDTLS_DISABLED", "true")
+
+    tools = _build_tools({
+        "/guard/check": {
+            "issues": [{"message": "backend should not run"}],
+        },
+        "/lsp/diagnostics/src/main/java/App.java": {
+            "diagnostics": [{"message": "backend should not run"}],
+        },
+    })
+    raw = _run(tools["omni_diagnostics"](
+        file="src/main/java/App.java",
+        severity="all",
+        format="json",
+    ))
+    payload = json.loads(raw)
+
+    assert payload["ok"] is True
+    assert payload["language"] == "java"
+    assert payload["diagnostics_status"] == "environment_incomplete"
+    assert payload["source"] == "tree_sitter_java+javac"
+    assert payload["tools_run"] == ["tree_sitter_java", "javac"]
+    assert "java_environment_incomplete" in payload["warnings"]
+    assert payload["counts"]["error"] >= 1
+    assert "/guard/check" not in tools["__captured__"]
+    assert "/lsp/diagnostics/src/main/java/App.java" not in tools["__captured__"]
+
+
 def test_omni_read_symbol_hybrid_uses_local_ast(
     tmp_path, monkeypatch,
 ) -> None:
@@ -198,6 +311,94 @@ def test_omni_read_symbol_hybrid_uses_local_ast(
     assert payload["local_authority"] is True
     assert "class BaseHandler" in payload["content"]
     assert "class Other" not in payload["content"]
+
+
+@pytest.mark.parametrize(
+    "mode,kwargs",
+    [
+        ("full", {}),
+        ("range", {"start_line": 1, "end_line": 2}),
+        ("outline", {}),
+    ],
+)
+def test_omni_read_hybrid_cloud_down_stays_local(
+    tmp_path,
+    monkeypatch,
+    mode: str,
+    kwargs: Dict[str, Any],
+) -> None:
+    workspace = tmp_path / "repo"
+    target = workspace / "tests" / "tmp_cloudsim_cloud_down.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "def local_only():\n"
+        "    return 'cloud-down-read'\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("OMNICODE_EXECUTOR_MODE", "hybrid")
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ID", "repo-a")
+    monkeypatch.setenv("OMNICODE_REMOTE", "http://127.0.0.1:6799")
+
+    tools = _build_tools({
+        "/sync/status": {
+            "error": "Cannot connect to FastAPI server - server may be down",
+            "error_type": "ConnectionError",
+        },
+        "/read": {
+            "success": False,
+            "error": "cloud read should not be called",
+        },
+    })
+    raw = _run(tools["omni_read"](
+        file="tests/tmp_cloudsim_cloud_down.py",
+        mode=mode,
+        format="json",
+        **kwargs,
+    ))
+    payload = json.loads(raw)
+
+    assert payload["ok"] is True
+    assert payload["source"] in {"local_file", "local_ast"}
+    assert payload["local_first"] is True
+    assert payload["local_authority"] is True
+    assert "local_only" in json.dumps(payload, ensure_ascii=False)
+    assert "/read" not in tools["__captured__"]
+
+
+def test_omni_read_hybrid_missing_local_file_does_not_fallback_to_cloud(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "repo"
+    (workspace / "tests").mkdir(parents=True)
+
+    monkeypatch.setenv("OMNICODE_EXECUTOR_MODE", "hybrid")
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ID", "repo-a")
+    monkeypatch.setenv("OMNICODE_REMOTE", "http://127.0.0.1:6799")
+
+    tools = _build_tools({
+        "/sync/status": {
+            "error": "Cannot connect to FastAPI server - server may be down",
+            "error_type": "ConnectionError",
+        },
+        "/read": {
+            "success": False,
+            "error": "cloud read should not be called",
+        },
+    })
+    raw = _run(tools["omni_read"](
+        file="tests/tmp_cloudsim_missing_after_rollback.py",
+        mode="full",
+        format="json",
+    ))
+    payload = json.loads(raw)
+
+    assert payload["ok"] is False
+    assert "File not found" in payload["error"]
+    assert "/read" not in tools["__captured__"]
 
 
 def test_omni_context_hybrid_diagnostics_uses_local_workspace(
@@ -237,6 +438,7 @@ def test_omni_context_hybrid_diagnostics_uses_local_workspace(
     manifest.mark_changed(target)
     manifest.data["last_accepted_revision"] = manifest.local_revision
     manifest.data["last_indexed_revision"] = manifest.local_revision
+    manifest.data["pending"] = []
     manifest.save()
 
     tools = _build_tools({
@@ -278,6 +480,64 @@ def test_read_diagnostics_empty_returns_canonical_envelope() -> None:
     # Sources is the requested set; should include "guard" and/or "lsp".
     assert set(payload["sources"]) <= {"guard", "lsp"}
     assert payload["truncated"] is False
+
+
+def test_diagnostics_separates_project_findings_from_target() -> None:
+    tools = _build_tools(_diag_routes([
+        {
+            "tool": "ruff",
+            "severity": "error",
+            "line": 4,
+            "code": "F821",
+            "message": "Undefined name `missing`",
+            "file_path": "x.py",
+        },
+        {
+            "tool": "mypy",
+            "severity": "error",
+            "line": 9,
+            "code": "attr-defined",
+            "message": "Unrelated project error",
+            "file_path": "package/other.py",
+        },
+    ]))
+
+    payload = json.loads(_run(tools["omni_diagnostics"](
+        file="x.py", format="json",
+    )))
+
+    assert payload["diagnostics_status"] == "target_errors"
+    assert payload["counts"] == {
+        "error": 1, "warning": 0, "info": 0, "total": 1,
+    }
+    assert payload["diagnostics"][0]["file"] == "x.py"
+    assert payload["project_diagnostics_count"] == 1
+    assert payload["project_counts"]["error"] == 1
+    assert payload["project_diagnostics_sample"][0]["file"] == "package/other.py"
+
+
+def test_diagnostics_marks_project_mypy_environment_incomplete() -> None:
+    tools = _build_tools(_diag_routes([
+        {
+            "tool": "mypy",
+            "severity": "error",
+            "line": 1,
+            "code": "import-not-found",
+            "message": "Cannot find implementation or library stub",
+            "file_path": "package/other.py",
+        },
+    ]))
+
+    payload = json.loads(_run(tools["omni_diagnostics"](
+        file="x.py", format="json",
+    )))
+
+    assert payload["diagnostics"] == []
+    assert payload["counts"]["total"] == 0
+    assert payload["diagnostics_status"] == "environment_incomplete"
+    assert payload["project_diagnostics_count"] == 1
+    assert payload["environment"]["reason"] == "mypy_environment_incomplete"
+    assert "diagnostics_environment_incomplete" in payload["warnings"]
 
 
 # ---------------------------------------------------------------------------

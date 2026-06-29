@@ -33,7 +33,6 @@ from omnicode_adapters.mcp_server.high_level_tools import (
     _HANDLER_VERSION,
     register_high_level_tools,
 )
-from omnicode_core.skills import get_skill_loader
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +139,16 @@ def test_skill_safe_refactor_includes_memory_advisory(safe_refactor) -> None:
     assert "omni_memory" in safe_refactor["tools_used"]
 
 
+def test_skill_recipes_begin_with_live_capability_status(all_recipes) -> None:
+    for recipe in all_recipes:
+        first = recipe["steps"][0]
+        assert first["id"] == "capability_status", recipe["name"]
+        assert first["tool"] == "omni_status", recipe["name"]
+        assert "omni_status" in recipe["tools_used"], recipe["name"]
+        blob = json.dumps(recipe, ensure_ascii=False).lower()
+        assert "capabilit" in blob, recipe["name"]
+
+
 # ---------------------------------------------------------------------------
 # 2. patch.v2 path guard / validate gate / force=True notes
 # ---------------------------------------------------------------------------
@@ -222,7 +231,6 @@ def test_skill_test_coverage_has_no_test_fallback(test_coverage) -> None:
 
 def test_skill_test_coverage_does_not_default_to_full_pytest(test_coverage) -> None:
     """Full pytest sweep should NOT be the only / first recommendation."""
-    blob = json.dumps(test_coverage, ensure_ascii=False).lower()
     # success_criteria / safety_notes must explicitly de-prioritise the
     # full sweep.
     sc = " ".join(test_coverage.get("success_criteria") or []).lower()

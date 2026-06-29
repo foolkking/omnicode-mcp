@@ -12,6 +12,8 @@
 - [Install](#install)
 - [Run the server](#run-the-server)
 - [Connect an AI editor](#connect-an-ai-editor)
+- [Deterministic index and search](#deterministic-index-and-search)
+- [Embedding model cache](#embedding-model-cache)
 - [Configuration](#configuration)
   - [Where settings come from](#where-settings-come-from)
   - [TOML reference](#toml-reference)
@@ -64,17 +66,27 @@ cp .env.example .env
 # Edit, or skip and rely on omnicode.toml + the Web Console.
 ```
 
-By default HuggingFace runs offline (`TRANSFORMERS_OFFLINE=1`,
-`HF_HUB_OFFLINE=1`) so a network-restricted machine doesn't fail at
-startup. To prime the embedding model cache once:
+By default, semantic embeddings are optional. Exact read/search/patch
+continue to work when no embedding model is cached. To make semantic
+features available, pre-download the model into a fixed cache before
+starting the service:
 
 ```bash
-HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 \
-  python -c "from sentence_transformers import SentenceTransformer; \
-             SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
+omnicode models pull \
+  --model sentence-transformers/all-MiniLM-L6-v2 \
+  --cache-dir <MODEL_CACHE>
 ```
 
-The Docker image already does this in the build step.
+Then start with:
+
+```bash
+export OMNICODE_EMBEDDING_CACHE_DIR=<MODEL_CACHE>
+export OMNICODE_EMBEDDING_LOCAL_FILES_ONLY=true
+```
+
+If the model is missing and `local_files_only=true`, the service reports
+`EMBEDDING_MODEL_NOT_FOUND` in `omni_status` instead of downloading during
+startup.
 
 ---
 
@@ -134,7 +146,12 @@ cloud backend can fail closed if the wrong project is active.
 | Command | Purpose |
 |---|---|
 | `omnicode init` | Write `.data/` skeleton |
-| `omnicode index [--force]` | Incremental / full rebuild |
+| `omnicode index [--force]` | Legacy incremental / full rebuild |
+| `omnicode index --scope workspace` | Build deterministic files/lines/symbols exact index |
+| `omnicode index --scope semantic` | Build optional FAISS semantic index when embeddings are ready |
+| `omnicode models list` | List supported embedding models |
+| `omnicode models pull --model <id> --cache-dir <dir>` | Pre-download an embedding model |
+| `omnicode models status` | Inspect model cache, dimension, and local-files-only status |
 | `omnicode status` | Hits `/health` on the running server |
 | `omnicode doctor` | Python / deps / LSP / model / port check |
 | `omnicode rotate-master-key` | Rotate Fernet key for `providers.db` |
@@ -142,6 +159,7 @@ cloud backend can fail closed if the wrong project is active.
 | `omnicode serve [--headless\|--console] [--mode local\|cloud\|hybrid] [--host] [--port] [--reload]` | All-in-one server |
 | `omnicode dev` | `serve --console --reload` |
 | `omnicode mcp [--transport stdio\|sse\|streamable-http] [--backend-url URL] [--workspace-id ID] [--executor remote\|hybrid]` | MCP server / local-to-cloud bridge |
+| `python scripts/soak_hybrid_durability.py --duration-s 60 --max-iterations 6 --sleep-s 0 --json` | Short hybrid edit/sync/pending durability smoke |
 
 Helper scripts in `scripts/` (`run.bat`/`.sh`, `run-dev.bat`/`.sh`,
 `test.bat`/`.sh`, `lint.bat`/`.sh`) wrap the above for convenience.
@@ -207,11 +225,142 @@ All accept the same shape via their MCP config UIs. Use the same
 `command` + `args`. Continue's MCP integration also accepts SSE if
 you'd rather run `mcp_server.py --transport sse --port 6790`.
 
-By default 8 core tools are registered (`omni_search`,
-`omni_read`, `omni_impact`, `omni_diagnostics`, `omni_context`,
-`omni_memory`, `omni_patch`, `discover_tools`). Set
-`OMNICODE_MCP_TOOLS=all` if you also need the legacy 16
-fine-grained tools.
+The high-level MCP surface includes deterministic tools such as
+`omni_status`, `discover_tools`, `omni_index`, `omni_search`,
+`omni_read`, `omni_diagnostics`, `omni_context`, `omni_impact`,
+`omni_memory`, and `omni_patch`, plus deprecated compatibility aliases.
+Use `discover_tools()` or `omni_status()` first: tools whose underlying
+capability is unavailable are marked disabled or degraded rather than
+silently recommended.
+
+Deprecated aliases (`omni_analyze`, `omni_edit`, `omni_intelligence`)
+are kept for compatibility, but new workflows should prefer the
+canonical tools.
+
+---
+
+## Deterministic index and search
+
+r60 treats deterministic search as the baseline and semantic search as
+optional.
+
+| Layer | Purpose | Default behavior |
+|---|---|---|
+| SQLite files table | workspace manifest, hashes, language, revision | Required for exact index status |
+| SQLite symbols table | class/function/object definitions | Required for exact symbol search |
+| SQLite lines table | line-level text records | Required for deterministic text fallback |
+| SQLite FTS5 `line_fts` | fast exact line search | Auto-detected; disabled safely if unavailable |
+| ripgrep fallback | reliable text search when FTS is missing or empty | Used when `rg` is available |
+| Python grep fallback | last-resort text search | Used when `rg` is unavailable |
+| FAISS vector index | semantic search | Optional; not a default readiness gate |
+
+Build or inspect the deterministic workspace index from MCP:
+
+```text
+omni_index(action="status", format="json")
+omni_index(action="bootstrap", scope="workspace", background=False, format="json")
+```
+
+Equivalent CLI:
+
+```bash
+omnicode index --scope workspace
+```
+
+Search results expose the provider chain:
+
+```json
+{
+  "provider_chain": ["exact_line_fts", "ripgrep_fallback"],
+  "fallback_used": true,
+  "line_fts_available": false,
+  "empty_reason": "true_empty"
+}
+```
+
+Important contract:
+
+- In `auto` FTS mode, large workspaces can disable `line_fts` after
+  `OMNICODE_EXACT_LINE_FTS_MAX_LINES` lines, default `50000`. Status exposes
+  `line_fts_reason=disabled_for_large_workspace`,
+  `line_fts_mode`, and `line_fts_auto_line_limit`; exact text search then uses
+  snapshot/grep fallback.
+- `BaseHandler`-style identifiers should resolve as exact symbol search.
+- `class BaseHandler:`-style queries should resolve as exact text search.
+- If the index is missing and no fallback can run, tools return
+  `INDEX_NOT_READY` or `TEXT_SEARCH_UNAVAILABLE` with `next_actions`.
+- `ok=true` with `results=[]` means a real search ran and found nothing;
+  it must not mean "provider was unavailable."
+
+---
+
+## Embedding model cache
+
+Supported local embedding models:
+
+| Model | Typical use |
+|---|---|
+| `sentence-transformers/all-MiniLM-L6-v2` | Recommended local default; small and fast |
+| `BAAI/bge-small-en-v1.5` | Recommended cloud/hybrid default |
+| `intfloat/e5-small-v2` | Alternative small E5 embedding model |
+| `sentence-transformers/all-mpnet-base-v2` | Larger local model; higher memory cost |
+
+The service supports these environment variables:
+
+| Env var | Purpose |
+|---|---|
+| `OMNICODE_EMBEDDING_MODEL` / `EMBEDDING_MODEL` | Selected embedding model |
+| `OMNICODE_EMBEDDING_CACHE_DIR` | Fixed model cache directory |
+| `OMNICODE_EMBEDDING_LOCAL_FILES_ONLY` | Do not download during service startup |
+| `OMNICODE_EMBEDDING_REVISION` | Optional Hugging Face revision |
+| `OMNICODE_EMBEDDING_DEVICE` | `cpu`, `cuda`, or another sentence-transformers device |
+| `OMNICODE_EMBEDDING_PRELOAD` | Preload model at startup when enabled |
+| `OMNICODE_EMBEDDING_BATCH_SIZE` | Embedding encode batch size; default `64`; progress bars are disabled for service logs |
+| `OMNICODE_SEMANTIC_FILE_BATCH_SIZE` | Files per persistent semantic job batch; default `10` |
+| `OMNICODE_SEMANTIC_BATCH_MAX_BYTES` | Maximum source bytes per semantic job batch; default `2097152` |
+
+`omni_status()` reports:
+
+- model id
+- dimension
+- cache directory
+- whether local-files-only is active
+- whether the model is cached and loaded
+- whether download is required
+- semantic index readiness and stale reason
+
+Semantic vector indexes record the embedding model, revision, dimension,
+backend, chunker version, normalization, workspace id, and creation time.
+If the model or dimension changes, semantic search is marked stale or
+invalid. Exact symbol/text search remains available.
+
+### Java and Scala workspace diagnostics
+
+Workspace diagnostics are capability-gated. Inspect and bootstrap them through
+MCP instead of assuming a language server is active:
+
+```text
+omni_index(action="status", scope="lsp", format="json")
+omni_index(action="bootstrap", scope="lsp", background=False, format="json")
+```
+
+Java uses JDT LS and may auto-discover the Red Hat Java VS Code extension.
+Scala uses Metals. Both run against a shadow workspace stored under
+`OMNICODE_STATE_DIR`; they must not create `.project`, `.settings`, `.metals`,
+or `.bloop` in the real checkout.
+
+Useful deployment overrides:
+
+| Env var | Purpose |
+|---|---|
+| `OMNICODE_JDTLS_COMMAND` | Pin the JDT LS command |
+| `OMNICODE_METALS_COMMAND` | Pin the Metals command |
+| `OMNICODE_JDTLS_JAVA_HOME` / `OMNICODE_METALS_JAVA_HOME` | Select the JDK per language server |
+| `OMNICODE_JDTLS_DISABLED` / `OMNICODE_METALS_DISABLED` | Explicitly disable one server and exercise deterministic fallback |
+| `OMNICODE_LSP_DIAGNOSTICS_TIMEOUT` | Bound target diagnostics latency |
+| `OMNICODE_LSP_WORKSPACE_SETTLE_SECONDS` | Workspace import settle window |
+| `OMNICODE_SYNC_STATUS_CACHE_TTL_SECONDS` | Sync-status cache TTL; default `10`; revision changes invalidate immediately |
+| `OMNICODE_SYNC_STATUS_PROBE_TIMEOUT_SECONDS` | Per-provider status probe bound; default `0.2`; timeouts return structured degraded status instead of blocking health/control traffic |
 
 ---
 

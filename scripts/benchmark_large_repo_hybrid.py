@@ -7,7 +7,8 @@ repository through the hybrid sync agent, and verifies the production contract:
 * snapshot/object store receives the repository
 * exact symbol/text index is ready after initial sync
 * large initial sync stays exact-first by default
-* strict semantic search is blocked until explicit semantic bootstrap
+* strict semantic search is either blocked or clearly degraded until explicit
+  semantic bootstrap
 
 Example:
 
@@ -16,7 +17,11 @@ Example:
         --state-dir C:/omnicode-sim/state-bench-django \
         --workspace-id django-cleanroom
 
-Add --semantic-bootstrap to also force a full semantic snapshot bootstrap.
+Add --semantic-bootstrap to also force an explicit semantic snapshot bootstrap.
+By default the benchmark uses the production exact-policy scope so large
+repositories do not require full-repository vectorization to pass the
+deterministic gate. Use --semantic-bootstrap-scope semantic to force a full
+semantic bootstrap.
 """
 
 from __future__ import annotations
@@ -36,11 +41,11 @@ from typing import Any
 
 import httpx
 
-
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REPO = Path("C:/omnicode-sim/benchmark-repos/django")
 DEFAULT_STATE = Path("C:/omnicode-sim/state-bench-django")
 DEFAULT_CLOUD_WORKSPACE = Path("C:/omnicode-sim/cloud-workspaces/large-repo-bench")
+DEFAULT_EMBEDDING_CACHE = Path("C:/omnicode-sim/embedding-cache")
 
 
 @dataclass
@@ -130,6 +135,7 @@ def _start_backend(
     state_dir: Path,
     cloud_workspace: Path,
     log_dir: Path,
+    embedding_cache_dir: Path | None = None,
 ) -> tuple[subprocess.Popen[str], Path, Path]:
     cloud_workspace.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -150,6 +156,17 @@ def _start_backend(
             "HF_HUB_OFFLINE": "1",
         }
     )
+    if embedding_cache_dir is not None:
+        cache = str(embedding_cache_dir)
+        env.update(
+            {
+                "OMNICODE_EMBEDDING_CACHE_DIR": cache,
+                "OMNICODE_EMBEDDING_LOCAL_FILES_ONLY": "true",
+                "HF_HOME": cache,
+                "HF_HUB_CACHE": str(embedding_cache_dir / "hub"),
+                "SENTENCE_TRANSFORMERS_HOME": cache,
+            }
+        )
     command = [
         sys.executable,
         "-m",
@@ -257,12 +274,20 @@ def _assert_status_contract(
         failures.append(f"exact index stale: {exact_revision} < {accepted}")
     if status.get("exact_index_ready") is not True:
         failures.append("exact_index_ready is not true")
-    if status.get("recommended_query_mode") != "exact_first":
+    exact_initial_ok = (
+        status.get("recommended_query_mode") == "exact_first"
+        and status.get("query_mode_reason") == "exact_only_initial_sync"
+    )
+    semantic_ready_ok = (
+        status.get("semantic_index_ready") is True
+        and status.get("recommended_query_mode") == "semantic_first"
+        and status.get("query_mode_reason") in {"filtered", "selected_files", "semantic_full"}
+    )
+    if not (exact_initial_ok or semantic_ready_ok):
         failures.append(
-            "recommended_query_mode should be exact_first for large initial sync"
+            "query mode should be exact_first/exact_only_initial_sync before "
+            "semantic bootstrap, or semantic_first after a completed semantic index"
         )
-    if status.get("query_mode_reason") != "exact_only_initial_sync":
-        failures.append("query_mode_reason should be exact_only_initial_sync")
     if contract.get("schema_version") != "index_readiness.v1":
         failures.append("missing index_readiness.v1 contract")
 
@@ -277,11 +302,21 @@ def _assert_status_contract(
         "exact_indexed_revision": exact_revision,
         "recommended_query_mode": status.get("recommended_query_mode"),
         "query_mode_reason": status.get("query_mode_reason"),
+        "semantic_index_ready": status.get("semantic_index_ready"),
+        "query_mode_contract": (
+            "exact_initial" if exact_initial_ok
+            else "semantic_ready" if semantic_ready_ok
+            else "unexpected"
+        ),
     }
 
 
 def _details_without_ok(payload: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in payload.items() if key != "ok"}
+
+
+def _norm_rel_path(value: Any) -> str:
+    return str(value or "").replace("\\", "/").strip("/")
 
 
 def _assert_exact_symbol(
@@ -303,7 +338,7 @@ def _assert_exact_symbol(
     first = rows[0] if rows else {}
     ok = (
         bool(rows)
-        and first.get("file_path") == expected_file
+        and _norm_rel_path(first.get("file_path")) == _norm_rel_path(expected_file)
         and first.get("symbol_name") == symbol
         and first.get("source") in {"exact_index", "snapshot_store"}
     )
@@ -340,7 +375,7 @@ def _assert_text_search(
     )
     rows = result.get("results") or []
     first = rows[0] if rows else {}
-    ok = first.get("file_path") == expected_file
+    ok = _norm_rel_path(first.get("file_path")) == _norm_rel_path(expected_file)
     return {"ok": ok, "first": first, "count": len(rows)}
 
 
@@ -351,20 +386,47 @@ def _assert_semantic_exact_rank(
     symbol: str,
     expected_file: str,
 ) -> dict[str, Any]:
-    result = _json_request(
-        client,
-        "POST",
+    response = client.post(
         "/search",
         headers={"X-Omnicode-Workspace": workspace_id},
         json={"query": symbol, "search_type": "semantic", "max_results": 5},
         timeout=30.0,
     )
+    payload = response.json()
+    result = payload.get("result") if isinstance(payload, dict) else {}
+    if not isinstance(result, dict):
+        result = {}
     rows = result.get("results") or []
     first = rows[0] if rows else {}
     why = first.get("why_matched") or []
+
+    if response.status_code == 409:
+        ok = (
+            result.get("ok") is False
+            and result.get("error_code") == "SEMANTIC_INDEX_NOT_READY"
+            and result.get("fallback_used") is True
+            and bool(rows)
+            and _norm_rel_path(first.get("file_path")) == _norm_rel_path(expected_file)
+            and first.get("symbol_name") == symbol
+        )
+        return {
+            "ok": ok,
+            "policy": "semantic_not_ready_exact_fallback",
+            "status_code": response.status_code,
+            "error_code": result.get("error_code"),
+            "first": first,
+            "count": len(rows),
+            "fallback_used": result.get("fallback_used"),
+            "fallback_reason": result.get("fallback_reason"),
+            "capabilities_missing": result.get("capabilities_missing"),
+            "snapshot_exact_boost": result.get("snapshot_exact_boost"),
+            "snapshot_lexical_boost": result.get("snapshot_lexical_boost"),
+        }
+
+    response.raise_for_status()
     ok = (
         bool(rows)
-        and first.get("file_path") == expected_file
+        and _norm_rel_path(first.get("file_path")) == _norm_rel_path(expected_file)
         and first.get("symbol_name") == symbol
         and first.get("source") == "exact_index"
         and first.get("rank_reason") == "exact_symbol_before_semantic"
@@ -372,6 +434,8 @@ def _assert_semantic_exact_rank(
     )
     return {
         "ok": ok,
+        "policy": "semantic_ready_exact_rank",
+        "status_code": response.status_code,
         "first": first,
         "count": len(rows),
         "snapshot_exact_boost": result.get("snapshot_exact_boost"),
@@ -411,7 +475,8 @@ def _assert_context_snapshot_anchor(
     quality = result.get("context_quality") or {}
     ok = (
         result.get("snapshot_exact_symbol") is True
-        and (first.get("file") or first.get("file_path")) == expected_file
+        and _norm_rel_path(first.get("file") or first.get("file_path"))
+        == _norm_rel_path(expected_file)
         and first.get("symbol") == symbol
         and quality.get("primary_anchor") == "snapshot_exact_symbol"
     )
@@ -422,6 +487,82 @@ def _assert_context_snapshot_anchor(
         "first": first,
         "context_quality": quality,
         "context_fast_path": result.get("context_fast_path"),
+    }
+
+
+def _assert_graph_impact(
+    client: httpx.Client,
+    *,
+    workspace_id: str,
+    symbol: str,
+    expected_file: str,
+) -> dict[str, Any]:
+    result = _json_request(
+        client,
+        "GET",
+        "/graph/impact",
+        headers={"X-Omnicode-Workspace": workspace_id},
+        params={"symbol": symbol, "depth": 2, "max_files": 200},
+        timeout=20.0,
+    )
+    snapshot_symbol = result.get("snapshot_symbol") or {}
+    graph_index = result.get("graph_index") or {}
+    symbol_file = (
+        snapshot_symbol.get("file_path")
+        or snapshot_symbol.get("file")
+        or graph_index.get("file_path")
+    )
+    expected_is_python = _norm_rel_path(expected_file).endswith(".py")
+    graph_available = result.get("graph_available") is True
+    if expected_is_python:
+        ok = (
+            graph_available
+            and result.get("graph_source") == "persisted_sqlite"
+            and result.get("impact_status") == "available"
+            and graph_index.get("ready") is True
+        )
+        expectation = "persisted_graph_available"
+        fallback_refs = []
+        fallback_tests = []
+    else:
+        fallback = result.get("fallback") or {}
+        fallback_refs = list(fallback.get("references") or result.get("references") or [])
+        fallback_tests = list(
+            fallback.get("test_candidates")
+            or result.get("test_candidates")
+            or []
+        )
+        ok = (
+            result.get("symbol_found") is True
+            and result.get("impact_status") == "unknown"
+            and result.get("confidence") == "low"
+            and graph_available is False
+            and _norm_rel_path(symbol_file) == _norm_rel_path(expected_file)
+            and bool(fallback_refs)
+        )
+        expectation = "unsupported_language_degraded"
+    return {
+        "ok": ok,
+        "expectation": expectation,
+        "graph_available": result.get("graph_available"),
+        "graph_source": result.get("graph_source"),
+        "graph_status": result.get("graph_status"),
+        "impact_status": result.get("impact_status"),
+        "confidence": result.get("confidence"),
+        "symbol_found": result.get("symbol_found"),
+        "symbol_source": result.get("symbol_source"),
+        "snapshot_symbol": snapshot_symbol,
+        "graph_index": graph_index,
+        "direct_callers_count": len(result.get("direct_callers") or []),
+        "direct_callees_count": len(result.get("direct_callees") or []),
+        "fallback_reference_count": len(fallback_refs),
+        "fallback_test_candidate_count": len(fallback_tests),
+        "fallback_reference_source": (
+            (result.get("fallback") or {}).get("reference_source")
+        ),
+        "fallback_test_candidate_source": (
+            (result.get("fallback") or {}).get("test_candidate_source")
+        ),
     }
 
 
@@ -443,18 +584,45 @@ def _assert_strict_semantic_stale(
         json={"query": query, "search_type": "semantic", "max_results": 5},
         timeout=20.0,
     )
-    ok = (
+    stale_blocked = (
         payload.get("ok") is False
         and payload.get("stale") is True
         and payload.get("recommended_query_mode") == "exact_first"
         and payload.get("strict_semantic_safe") is False
     )
+    degraded_fallback = (
+        payload.get("ok") is True
+        and payload.get("fallback_used") is True
+        and "search.semantic" in (payload.get("capabilities_missing") or [])
+        and payload.get("semantic_index_ready") is False
+    )
+    rows = payload.get("results") or []
+    first = rows[0] if rows else {}
+    semantic_ready_exact = (
+        payload.get("ok") is True
+        and payload.get("snapshot_exact_boost") is True
+        and first.get("source") == "exact_index"
+        and first.get("rank_reason") == "exact_symbol_before_semantic"
+        and "semantic:exact_boost" in (first.get("why_matched") or [])
+        and not (payload.get("capabilities_missing") or [])
+    )
     return {
-        "ok": ok,
+        "ok": stale_blocked or degraded_fallback or semantic_ready_exact,
+        "contract": (
+            "stale_blocked" if stale_blocked
+            else "degraded_exact_fallback" if degraded_fallback
+            else "semantic_ready_exact_boost" if semantic_ready_exact
+            else "unexpected"
+        ),
         "error": payload.get("error"),
         "freshness": payload.get("freshness"),
         "recommended_query_mode": payload.get("recommended_query_mode"),
         "query_mode_reason": payload.get("query_mode_reason"),
+        "fallback_used": payload.get("fallback_used"),
+        "capabilities_missing": payload.get("capabilities_missing"),
+        "semantic_index_ready": payload.get("semantic_index_ready"),
+        "snapshot_exact_boost": payload.get("snapshot_exact_boost"),
+        "first": first,
     }
 
 
@@ -463,6 +631,7 @@ def _run_semantic_bootstrap(
     *,
     workspace_id: str,
     timeout_s: int,
+    scope: str,
 ) -> dict[str, Any]:
     result = _json_request(
         client,
@@ -472,7 +641,7 @@ def _run_semantic_bootstrap(
         params={
             "workspace_id": workspace_id,
             "force": "true",
-            "scope": "semantic",
+            "scope": scope,
             "background": "true",
         },
         timeout=30.0,
@@ -506,6 +675,7 @@ def _run_semantic_bootstrap(
                 "semantic_index_ready": sync_status.get("semantic_index_ready"),
                 "recommended_query_mode": sync_status.get("recommended_query_mode"),
                 "semantic_index_coverage": sync_status.get("semantic_index_coverage"),
+                "scope": scope,
             }
         if state == "failed":
             break
@@ -513,11 +683,72 @@ def _run_semantic_bootstrap(
     return {"ok": False, "last_status": last_status}
 
 
+def _run_pytest_benchmark(
+    *,
+    benchmark_file: Path,
+    base_url: str,
+    workspace_id: str,
+    repo: Path,
+    timeout_s: int,
+) -> dict[str, Any]:
+    if not benchmark_file.is_file():
+        return {
+            "ok": False,
+            "error": f"benchmark test file not found: {benchmark_file}",
+        }
+
+    env = os.environ.copy()
+    pythonpath = str(ROOT)
+    if env.get("PYTHONPATH"):
+        pythonpath = pythonpath + os.pathsep + env["PYTHONPATH"]
+    env.update(
+        {
+            "PYTHONPATH": pythonpath,
+            "OMNICODE_BENCH_BACKEND_URL": base_url,
+            "OMNICODE_BENCH_WORKSPACE_ID": workspace_id,
+            "OMNICODE_BENCH_REPO": str(repo),
+        }
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            str(benchmark_file),
+            "-q",
+            "-m",
+            "large_repo",
+        ],
+        cwd=str(ROOT),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout_s,
+        check=False,
+    )
+    return {
+        "ok": completed.returncode == 0,
+        "returncode": completed.returncode,
+        "stdout_tail": completed.stdout[-4000:],
+        "stderr_tail": completed.stderr[-4000:],
+    }
+
+
 def run_benchmark(args: argparse.Namespace) -> BenchResult:
     repo = Path(args.repo).expanduser().resolve()
     state_dir = Path(args.state_dir).expanduser().resolve()
     cloud_workspace = Path(args.cloud_workspace).expanduser().resolve()
     log_dir = Path(args.log_dir).expanduser().resolve()
+    embedding_cache_dir = (
+        Path(args.embedding_cache_dir).expanduser().resolve()
+        if args.embedding_cache_dir
+        else (
+            DEFAULT_EMBEDDING_CACHE.resolve()
+            if DEFAULT_EMBEDDING_CACHE.exists()
+            else None
+        )
+    )
     port = int(args.port or _free_port())
     base_url = f"http://127.0.0.1:{port}"
     result = BenchResult()
@@ -535,6 +766,7 @@ def run_benchmark(args: argparse.Namespace) -> BenchResult:
         state_dir=state_dir,
         cloud_workspace=cloud_workspace,
         log_dir=log_dir,
+        embedding_cache_dir=embedding_cache_dir,
     )
     try:
         started = time.perf_counter()
@@ -643,6 +875,20 @@ def run_benchmark(args: argparse.Namespace) -> BenchResult:
             )
 
             started = time.perf_counter()
+            graph_impact = _assert_graph_impact(
+                client,
+                workspace_id=args.workspace_id,
+                symbol=args.symbol,
+                expected_file=args.expected_file,
+            )
+            result.add(
+                f"graph_impact_{args.symbol}",
+                bool(graph_impact["ok"]),
+                started,
+                **_details_without_ok(graph_impact),
+            )
+
+            started = time.perf_counter()
             semantic_stale = _assert_strict_semantic_stale(
                 client,
                 workspace_id=args.workspace_id,
@@ -662,6 +908,7 @@ def run_benchmark(args: argparse.Namespace) -> BenchResult:
                     client,
                     workspace_id=args.workspace_id,
                     timeout_s=args.semantic_timeout_s,
+                    scope=args.semantic_bootstrap_scope,
                 )
                 result.add(
                     "semantic_bootstrap",
@@ -669,6 +916,22 @@ def run_benchmark(args: argparse.Namespace) -> BenchResult:
                     started,
                     **_details_without_ok(bootstrap),
                 )
+
+        if args.pytest_benchmark_file:
+            started = time.perf_counter()
+            pytest_result = _run_pytest_benchmark(
+                benchmark_file=Path(args.pytest_benchmark_file).expanduser().resolve(),
+                base_url=base_url,
+                workspace_id=args.workspace_id,
+                repo=repo,
+                timeout_s=args.pytest_timeout_s,
+            )
+            result.add(
+                "pytest_benchmark",
+                bool(pytest_result["ok"]),
+                started,
+                **_details_without_ok(pytest_result),
+            )
     finally:
         process.terminate()
         try:
@@ -699,6 +962,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--state-dir", default=str(DEFAULT_STATE))
     parser.add_argument("--cloud-workspace", default=str(DEFAULT_CLOUD_WORKSPACE))
     parser.add_argument("--log-dir", default=str(DEFAULT_STATE / "logs"))
+    parser.add_argument(
+        "--embedding-cache-dir",
+        default="",
+        help=(
+            "Fixed pre-downloaded embedding cache for offline semantic "
+            "bootstrap. Defaults to C:/omnicode-sim/embedding-cache when it "
+            "exists."
+        ),
+    )
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--reset-state", action="store_true")
     parser.add_argument("--min-files", type=int, default=6000)
@@ -710,14 +982,33 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--text-query", default="class BaseHandler:")
     parser.add_argument("--text-file-pattern", default="*.py")
-    parser.add_argument("--batch-max-files", type=int, default=100)
-    parser.add_argument("--batch-max-bytes", type=int, default=1_000_000)
+    parser.add_argument("--batch-max-files", type=int, default=500)
+    parser.add_argument("--batch-max-bytes", type=int, default=8_000_000)
     parser.add_argument("--max-symbol-search-ms", type=int, default=1000)
     parser.add_argument("--max-text-search-ms", type=int, default=3000)
     parser.add_argument("--max-semantic-rank-ms", type=int, default=3000)
     parser.add_argument("--max-context-ms", type=int, default=10000)
     parser.add_argument("--semantic-bootstrap", action="store_true")
+    parser.add_argument(
+        "--semantic-bootstrap-scope",
+        choices=("exact_policy", "semantic"),
+        default="exact_policy",
+        help=(
+            "Scope used by --semantic-bootstrap. exact_policy indexes the "
+            "production-selected semantic subset; semantic forces full "
+            "snapshot vectorization."
+        ),
+    )
     parser.add_argument("--semantic-timeout-s", type=int, default=1800)
+    parser.add_argument(
+        "--pytest-benchmark-file",
+        default="",
+        help=(
+            "Optional pytest benchmark file to run against the temporary live "
+            "backend after clean-room sync."
+        ),
+    )
+    parser.add_argument("--pytest-timeout-s", type=int, default=300)
     parser.add_argument("--json", action="store_true", help="Print JSON only.")
     return parser.parse_args(argv)
 

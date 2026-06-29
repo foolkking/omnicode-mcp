@@ -17,11 +17,19 @@ methods are conveniences for callers that want the split behaviour.
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
 import urllib.request
-from typing import List, Optional, Sequence
+from typing import Any, List, Optional, Sequence
+
+from omnicode_core.embeddings.models import (
+    EmbeddingModelConfig,
+    apply_embedding_cache_env,
+    embedding_model_config,
+    embedding_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -71,18 +79,101 @@ class EmbeddingBackend:
         return self.encode(list(texts))
 
 
+class UnavailableEmbeddingBackend(EmbeddingBackend):
+    """Placeholder backend when the configured model cannot be loaded.
+
+    Exact search/read/patch must remain available even when semantic embeddings
+    are offline or not pre-downloaded. This backend lets the service start and
+    pushes a structured error to the semantic call site instead of crashing the
+    FastAPI lifespan.
+    """
+
+    name = "embedding-unavailable"
+
+    def __init__(
+        self,
+        model_name: str,
+        *,
+        error: BaseException | str,
+        dimension: Optional[int] = None,
+    ) -> None:
+        self.model_name = model_name
+        self.error = error
+        self.dimension = dimension
+
+    def encode(self, text: str | Sequence[str]):
+        status = embedding_status(
+            self.model_name,
+            loaded=False,
+            dimension=self.dimension,
+            error=self.error,
+        )
+        code = status.get("error_code") or "EMBEDDING_UNAVAILABLE"
+        msg = status.get("error") or str(self.error)
+        raise RuntimeError(f"{code}: {msg}")
+
+    def status(self) -> dict:
+        return embedding_status(
+            self.model_name,
+            loaded=False,
+            dimension=self.dimension,
+            error=self.error,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Local (offline) backend
 # ---------------------------------------------------------------------------
 class LocalSentenceTransformerBackend(EmbeddingBackend):
     name = "local-sentence-transformers"
 
-    def __init__(self, model_name: str) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        *,
+        cache_dir: Optional[str] = None,
+        local_files_only: Optional[bool] = None,
+        revision: Optional[str] = None,
+        device: Optional[str] = None,
+    ) -> None:
         _configure_torch_threads()
         from sentence_transformers import SentenceTransformer
 
         self._model_name = model_name
-        self._model = SentenceTransformer(model_name)
+        self.cache_dir = cache_dir
+        self.local_files_only = bool(local_files_only)
+        self.revision = revision
+        self.device = device
+        try:
+            self.batch_size = max(
+                1,
+                int(os.environ.get("OMNICODE_EMBEDDING_BATCH_SIZE", "64")),
+            )
+        except (TypeError, ValueError):
+            self.batch_size = 64
+        apply_embedding_cache_env(cache_dir)
+        kwargs = {}
+        if cache_dir:
+            kwargs["cache_folder"] = cache_dir
+        if local_files_only is not None:
+            kwargs["local_files_only"] = bool(local_files_only)
+        if revision:
+            kwargs["revision"] = revision
+        if device:
+            kwargs["device"] = device
+        try:
+            accepted = set(inspect.signature(SentenceTransformer).parameters)
+            kwargs = {k: v for k, v in kwargs.items() if k in accepted}
+        except Exception:
+            pass
+        try:
+            self._model = SentenceTransformer(model_name, **kwargs)
+        except TypeError:
+            fallback = {
+                k: v for k, v in kwargs.items()
+                if k in {"cache_folder", "device"}
+            }
+            self._model = SentenceTransformer(model_name, **fallback)
         try:
             # sentence-transformers ≥3.0 renamed the method; fall back for
             # older versions so the package floor stays at the existing pin.
@@ -95,7 +186,40 @@ class LocalSentenceTransformerBackend(EmbeddingBackend):
         logger.info("✅ Local embedding backend ready: %s (dim=%s)", model_name, self.dimension)
 
     def encode(self, text):
-        return self._model.encode(text)
+        return self._model.encode(
+            text,
+            batch_size=self.batch_size,
+            show_progress_bar=False,
+        )
+
+    def status(self) -> dict:
+        env_overrides = {
+            "OMNICODE_EMBEDDING_CACHE_DIR": self.cache_dir or "",
+            "OMNICODE_EMBEDDING_LOCAL_FILES_ONLY": (
+                "true" if self.local_files_only else "false"
+            ),
+        }
+        previous: dict[str, Optional[str]] = {}
+        for key, value in env_overrides.items():
+            previous[key] = os.environ.get(key)
+            if value:
+                os.environ[key] = value
+            else:
+                os.environ.pop(key, None)
+        try:
+            status = embedding_status(
+                self._model_name,
+                loaded=True,
+                dimension=self.dimension,
+            )
+            status["batch_size"] = self.batch_size
+            return status
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +323,38 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default)
 
 
+def _build_local_backend(model_name: str, config: Any) -> EmbeddingBackend:
+    """Instantiate local backend with backward-compatible monkeypatch support."""
+    preflight = embedding_status(model_name)
+    if config.local_files_only and not preflight.get("cached"):
+        return UnavailableEmbeddingBackend(
+            model_name,
+            error=preflight.get("error") or "embedding model is not present in cache",
+            dimension=preflight.get("dimension") or preflight.get("expected_dimension"),
+        )
+    try:
+        return LocalSentenceTransformerBackend(
+            model_name,
+            cache_dir=config.cache_dir,
+            local_files_only=config.local_files_only,
+            revision=config.revision,
+            device=config.device,
+        )
+    except TypeError:
+        # Older tests/plugins monkeypatch LocalSentenceTransformerBackend with
+        # a single-argument callable. Keep that compatibility while the real
+        # implementation receives the deployment/cache/offline controls above.
+        return LocalSentenceTransformerBackend(model_name)
+    except Exception as exc:
+        logger.warning("Local embedding backend unavailable: %s", exc)
+        status = embedding_status(model_name, error=exc)
+        return UnavailableEmbeddingBackend(
+            model_name,
+            error=exc,
+            dimension=status.get("dimension") or status.get("expected_dimension"),
+        )
+
+
 def resolve_backend(model_name: str) -> EmbeddingBackend:
     """Build the backend based on env vars + the configured model name.
 
@@ -210,6 +366,8 @@ def resolve_backend(model_name: str) -> EmbeddingBackend:
     * ``OMNICODE_EMBEDDING_BACKEND=hybrid`` → ``HybridBackend(local, remote)``.
     * anything else (including unset) → ``LocalSentenceTransformerBackend``.
     """
+    config = embedding_model_config(model_name)
+    model_name = config.model_name
     backend = _env("OMNICODE_EMBEDDING_BACKEND", "local").lower().strip()
     if backend == "remote":
         return RemoteOpenAIBackend(
@@ -218,7 +376,7 @@ def resolve_backend(model_name: str) -> EmbeddingBackend:
             model=model_name,
         )
     if backend == "hybrid":
-        local = LocalSentenceTransformerBackend(model_name)
+        local = _build_local_backend(model_name, config)
         try:
             remote = RemoteOpenAIBackend(
                 url=_env("OMNICODE_EMBEDDING_REMOTE_URL"),
@@ -233,17 +391,60 @@ def resolve_backend(model_name: str) -> EmbeddingBackend:
                 exc,
             )
             return local
-    return LocalSentenceTransformerBackend(model_name)
+    return _build_local_backend(model_name, config)
 
 
 _DEFAULT: Optional[EmbeddingBackend] = None
+_DEFAULT_KEY: Optional[tuple[Any, ...]] = None
+
+
+def _backend_model_name(backend: EmbeddingBackend) -> Optional[str]:
+    """Best-effort configured model name for cache invalidation."""
+    for attr in ("model_name", "_model_name", "model", "_model"):
+        value = getattr(backend, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _backend_cache_key(model_name: str, config: EmbeddingModelConfig) -> tuple[Any, ...]:
+    """Return the process cache key for a configured embedding runtime."""
+
+    backend = _env("OMNICODE_EMBEDDING_BACKEND", "local").lower().strip()
+    return (
+        backend,
+        config.model_name,
+        config.cache_dir,
+        bool(config.local_files_only),
+        config.revision,
+        config.device,
+        _env("OMNICODE_EMBEDDING_REMOTE_URL"),
+        _env("OMNICODE_EMBEDDING_REMOTE_MODEL", model_name),
+    )
 
 
 def get_default_backend(model_name: str) -> EmbeddingBackend:
-    """Return a process-wide cached backend (lazy)."""
-    global _DEFAULT
-    if _DEFAULT is None:
+    """Return a process-wide cached backend (lazy).
+
+    An unavailable backend is intentionally not sticky.  Cloud deployments often
+    start before ``omnicode models pull`` finishes; once the fixed cache dir is
+    populated, the next semantic operation should be able to recover without a
+    process restart.  We also refresh when the requested model changes so a
+    384-dim index can never silently reuse a 768-dim model runtime.
+    """
+    global _DEFAULT, _DEFAULT_KEY
+    config = embedding_model_config(model_name)
+    model_name = config.model_name
+    cache_key = _backend_cache_key(model_name, config)
+    cached_model = _backend_model_name(_DEFAULT) if _DEFAULT is not None else None
+    if (
+        _DEFAULT is None
+        or isinstance(_DEFAULT, UnavailableEmbeddingBackend)
+        or _DEFAULT_KEY != cache_key
+        or (cached_model is not None and cached_model != model_name)
+    ):
         _DEFAULT = resolve_backend(model_name)
+        _DEFAULT_KEY = cache_key
     return _DEFAULT
 
 
@@ -252,6 +453,7 @@ __all__ = [
     "LocalSentenceTransformerBackend",
     "RemoteOpenAIBackend",
     "HybridBackend",
+    "UnavailableEmbeddingBackend",
     "resolve_backend",
     "get_default_backend",
 ]

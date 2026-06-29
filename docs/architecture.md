@@ -11,6 +11,8 @@
 
 - [Project identity](#project-identity)
 - [Three deployment modes](#three-deployment-modes)
+- [Capability-aware r60 contract](#capability-aware-r60-contract)
+- [Deterministic index and search](#deterministic-index-and-search)
 - [The eight capabilities](#the-eight-capabilities)
 - [Module map](#module-map)
 - [Persistence layout](#persistence-layout)
@@ -156,10 +158,87 @@ when no backend URL is configured.
 
 ---
 
+## Capability-aware r60 contract
+
+r60 changes the contract from "all tools are equally ready" to "tools report
+the capability state they actually have." The goal is reliable AI editor
+behavior when semantic, graph, cloud, or language validators are unavailable.
+
+The shared capability registry lives in
+`omnicode_core/capabilities/registry.py`. `omni_status`, `discover_tools`,
+and tool preflight checks use the same state model:
+
+| State | Meaning |
+|---|---|
+| `ready` | Safe for default AI editor use |
+| `partial` | Useful, but incomplete or warning-bearing |
+| `degraded` | Fallback path is active; confidence is lower |
+| `unavailable` | Capability is not currently usable |
+| `unsupported` | Capability is not implemented for this language/environment |
+
+Core rules:
+
+- `omni_read(full/range/outline)` and `omni_patch` are local-authority
+  operations in hybrid mode and must not fail just because cloud is down.
+- `omni_search`, `omni_context`, and `omni_impact` expose freshness,
+  provider, fallback, and missing-capability metadata.
+- Semantic search is optional. If the embedding model or vector metadata is
+  not ready, semantic providers are disabled or degraded; exact providers
+  still run.
+- Graph impact is optional. If a symbol is found but graph is unavailable,
+  `omni_impact` returns unknown risk, low confidence, and fallback
+  references/test candidates instead of reporting `symbol not found`.
+- Scala and unknown-language diagnostics/validation return `unsupported` or
+  `not_performed`, not a fake "passed" result.
+
+`discover_tools()` is therefore a strategy router, not just a static list.
+It recommends workflows based on current capabilities and keeps deprecated
+aliases in a compatibility section.
+
+---
+
+## Deterministic index and search
+
+The deterministic index is the production baseline. It uses SQLite plus
+local text fallback, not a separate database service:
+
+| Layer | Storage / provider | Purpose |
+|---|---|---|
+| L0 files | SQLite `files` | workspace-relative paths, hashes, language, revision |
+| L1 lines | SQLite `lines` and optional FTS5 `line_fts` | exact line text search |
+| L2 symbols | SQLite `symbols` | class/function/object definitions |
+| Text fallback | `rg`, then Python grep | reliable exact text search when FTS is unavailable or empty |
+| Semantic | FAISS vector store | optional semantic search after embedding metadata validation |
+
+`SnapshotExactIndex` is used for cloud snapshot indexes and local workspace
+exact indexes. The schema records `schema_version`, `index_kind`,
+`line_fts_available`, `line_fts_reason`, `line_fts_mode`,
+`line_fts_auto_line_limit`, and `exact_indexed_revision`. In `auto` mode,
+large workspaces can disable FTS after
+`OMNICODE_EXACT_LINE_FTS_MAX_LINES` lines, default `50000`, while exact text
+search remains available through snapshot/grep fallback.
+
+The query planner in `omnicode_core/search/planner.py` classifies queries
+into intents such as `exact_symbol`, `exact_text`, `regex_text`,
+`file_path`, `semantic`, `references`, and `hybrid`. Search responses include
+the query plan, provider chain, capabilities used/missing, fallback state,
+warnings, and `empty_reason`.
+
+This distinction matters:
+
+- `ok=true, results=[]` means the selected provider really searched and
+  found no matches.
+- `INDEX_NOT_READY`, `TEXT_SEARCH_UNAVAILABLE`, or semantic stale/invalid
+  means the provider was not usable and the caller should bootstrap or
+  choose another workflow.
+
+---
+
 ## The eight capabilities
 
 The "Codebase Intelligence Layer" promise is exactly eight things,
-all shipped, all reachable through three converging entry points
+implemented behind the capability-aware contract, all reachable through
+three converging entry points
 (`GET /capabilities`, `POST /intelligence/context`, MCP tool
 `omni_context`):
 
@@ -174,9 +253,19 @@ all shipped, all reachable through three converging entry points
 | 7 | Debug console | `templates/` + WebSocket logs | search debug, edit sessions, impact viewer, advisory drawer, code graph viewer (SVG → 2D canvas → WebGL2 tiers) |
 | 8 | Optional LLM enhancement | `omnicode/llm/router.py` | LiteLLM-backed multi-provider routing; opt-in via `pip install omnicode-mcp[llm]` |
 
-The composer (`omnicode_core/intelligence/composer.py`) runs all
-eight in parallel inside a token budget and reports per-capability
-errors without failing the call.
+The composer (`omnicode_core/intelligence/composer.py`) runs available
+capabilities inside a token budget and reports per-capability errors or
+missing capabilities without pretending degraded sections are complete.
+Snapshot fast-path context uses the same persisted graph as `omni_impact`,
+trims graph/reference evidence to the requested token budget, and reports a
+non-zero `token_estimate`, `truncated_fields`, and `budget_respected`.
+
+JDT LS and Metals are managed through the LSP bridge. JVM source/build files
+are materialized into a state-directory shadow workspace before the server is
+started, so language-server metadata never pollutes the authoritative checkout.
+`omni_status` distinguishes installed-but-not-started (`partial`) from missing
+(`unavailable`), and `discover_tools` recommends
+`omni_index(scope="lsp")` only for the former.
 
 ---
 
@@ -272,6 +361,19 @@ analyser — none of which warrant a rewrite right now.
 
 ---
 
+### r60 module additions
+
+| Path | Purpose |
+|---|---|
+| `omnicode_core/capabilities/registry.py` | Shared capability state for `omni_status`, `discover_tools`, and tool preflight |
+| `omnicode_core/workspace/exact_index.py` | SQLite files/lines/symbols/FTS exact index and revision metadata |
+| `omnicode_core/search/planner.py` | Query intent and provider-chain planning |
+| `omnicode_core/search/text_grep.py` | ripgrep and Python grep exact-text fallback |
+| `omnicode_core/embeddings/models.py` | Supported embedding models, cache directory, local-files-only status, pull helpers |
+| `omnicode_adapters/cli/commands/models_cmd.py` | `omnicode models list/pull/status` CLI |
+
+---
+
 ## Persistence layout
 
 ```
@@ -306,14 +408,16 @@ shard.
 ### Tests
 
 ```bash
-python -m pytest tests -q               # ~30 s, 433 passed, 12 skipped
+python -m pytest tests -q               # r60 sweep: 1117 passed, 16 skipped
 python -m pytest tests/integration/test_route_regressions.py -q
+python -m pytest tests/benchmarks/test_django_large_repo_hybrid.py -q -m large_repo
+python -m pytest tests/benchmarks/test_kafka_large_repo_hybrid.py -q -m large_repo
 ```
 
-The 12 skipped tests are LSP binary probes (jdtls / omnisharp etc.)
-that auto-skip when the language server isn't installed locally.
-Unit tests under `tests/unit/` (40+ files), integration under
-`tests/integration/`.
+Some tests are optional probes or large-repo benchmarks and may skip when
+local prerequisites are missing. Unit tests live under `tests/unit/`,
+integration tests under `tests/integration/`, and production-scale gates
+under `tests/benchmarks/`.
 
 ### Lint
 

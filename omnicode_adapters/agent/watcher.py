@@ -260,26 +260,46 @@ def run_agent(
     initial_sync: bool = True,
     excludes: Iterable[str] = (),
     debounce_ms: int = 800,
+    batch_max_files: Optional[int] = None,
+    batch_max_bytes: Optional[int] = None,
 ) -> None:
     """End-to-end agent entry point used by the CLI."""
     ws = Path(workspace).expanduser().resolve()
     if not ws.is_dir():
         raise NotADirectoryError(ws)
 
+    default_batch_files = _positive_int_from_env(
+        "OMNICODE_SYNC_BATCH_MAX_FILES",
+        500,
+    )
+    default_batch_bytes = _positive_int_from_env(
+        "OMNICODE_SYNC_BATCH_MAX_BYTES",
+        8_000_000,
+    )
+    effective_batch_files = (
+        max(1, int(batch_max_files))
+        if batch_max_files is not None
+        else _positive_int_from_env(
+            "OMNICODE_AGENT_BATCH_MAX_FILES",
+            default_batch_files,
+        )
+    )
+    effective_batch_bytes = (
+        max(1, int(batch_max_bytes))
+        if batch_max_bytes is not None
+        else _positive_int_from_env(
+            "OMNICODE_AGENT_BATCH_MAX_BYTES",
+            default_batch_bytes,
+        )
+    )
     client = AgentClient(
         remote=remote,
         token=token,
         workspace=ws,
         workspace_id=workspace_id,
         excludes=tuple(excludes),
-        batch_max_files=_positive_int_from_env(
-            "OMNICODE_AGENT_BATCH_MAX_FILES",
-            100,
-        ),
-        batch_max_bytes=_positive_int_from_env(
-            "OMNICODE_AGENT_BATCH_MAX_BYTES",
-            1_000_000,
-        ),
+        batch_max_files=effective_batch_files,
+        batch_max_bytes=effective_batch_bytes,
     )
     if not client.health():
         print(

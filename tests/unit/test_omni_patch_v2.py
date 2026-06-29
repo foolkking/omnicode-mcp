@@ -124,6 +124,196 @@ def test_patch_rejects_path_traversal_preview() -> None:
     assert payload["contract_version"] == _CONTRACT_VERSIONS["omni_patch"]
 
 
+def test_patch_validate_scala_unsupported_preflights_without_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "repo"
+    target = workspace / "core" / "src" / "main" / "scala" / "App.scala"
+    target.parent.mkdir(parents=True)
+    target.write_text("object App {}\n", encoding="utf-8")
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(workspace))
+
+    tools = _build_tools({
+        "/patch/validate": {
+            "ok": True,
+            "validation_passed": True,
+            "message": "backend should not run",
+            "checks": [],
+            "counts": {"error": 0, "warning": 0, "info": 0, "total": 0},
+            "tools_run": ["backend"],
+            "tools_skipped": [],
+            "source": "backend",
+        }
+    })
+    raw = _run(tools["omni_patch"](
+        action="validate",
+        file="core/src/main/scala/App.scala",
+        content="object App { def broken( = 1 }\n",
+        format="json",
+    ))
+    payload = json.loads(raw)
+
+    assert payload["ok"] is True
+    assert payload["validation_passed"] is None
+    assert payload["validation"]["status"] == "not_performed"
+    assert payload["validation"]["reason"] == "metals_unavailable"
+    assert payload["tools_run"] == []
+    assert payload["tools_skipped"] == ["metals_unavailable"]
+    assert payload["capability_preflight"]["required"] == ["patch.safe_edit"]
+    assert "diagnostics.scala" in payload["capability_preflight"]["fallbacks"]
+    assert "/patch/validate" not in tools["__captured__"]
+
+
+def test_patch_validate_java_syntax_errors_without_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "repo"
+    target = workspace / "src" / "main" / "java" / "App.java"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "class App { void ok() { int value = 1; } }\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(workspace))
+
+    tools = _build_tools({
+        "/patch/validate": {
+            "success": True,
+            "message": "backend should not run",
+        }
+    })
+    raw = _run(tools["omni_patch"](
+        action="validate",
+        file="src/main/java/App.java",
+        content="class App { void broken() { int value = ; } }\n",
+        format="json",
+    ))
+    payload = json.loads(raw)
+
+    assert payload["ok"] is False
+    assert payload["validation_passed"] is False
+    assert payload["validation"]["status"] == "failed"
+    assert payload["validation"]["reason"] == "java_syntax_errors"
+    assert payload["source"] == "tree_sitter_java"
+    assert payload["tools_run"] == ["tree_sitter_java"]
+    assert payload["counts"]["error"] >= 1
+    assert payload["checks"][0]["rule"] == "java-syntax"
+    assert "/patch/validate" not in tools["__captured__"]
+
+
+def test_patch_validate_java_clean_is_partial_not_full_compile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "repo"
+    target = workspace / "src" / "main" / "java" / "App.java"
+    target.parent.mkdir(parents=True)
+    target.write_text("class App {}\n", encoding="utf-8")
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setattr(hlt.shutil, "which", lambda name: None)
+
+    tools = _build_tools({
+        "/patch/validate": {
+            "success": False,
+            "issues": [{"message": "backend should not run"}],
+        }
+    })
+    raw = _run(tools["omni_patch"](
+        action="validate",
+        file="src/main/java/App.java",
+        content="class App { void ok() { int value = 1; } }\n",
+        format="json",
+    ))
+    payload = json.loads(raw)
+
+    assert payload["ok"] is True
+    assert payload["validation_passed"] is None
+    assert payload["validation"]["status"] == "partial"
+    assert payload["validation"]["reason"] == (
+        "java_syntax_only_semantics_not_performed"
+    )
+    assert "java_semantic_validation_not_performed" in payload["warnings"]
+    assert "javac_unavailable" in payload["warnings"]
+    assert payload["source"] == "tree_sitter_java"
+    assert "/patch/validate" not in tools["__captured__"]
+
+
+def test_patch_validate_java_javac_single_file_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "repo"
+    target = workspace / "src" / "main" / "java" / "App.java"
+    target.parent.mkdir(parents=True)
+    target.write_text("class App {}\n", encoding="utf-8")
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(workspace))
+
+    tools = _build_tools({
+        "/patch/validate": {
+            "success": False,
+            "issues": [{"message": "backend should not run"}],
+        }
+    })
+    raw = _run(tools["omni_patch"](
+        action="validate",
+        file="src/main/java/App.java",
+        content="class App { void ok() { int value = 1; } }\n",
+        format="json",
+    ))
+    payload = json.loads(raw)
+
+    assert payload["ok"] is True
+    assert payload["validation_passed"] is True
+    assert payload["validation"]["status"] == "partial"
+    assert payload["validation"]["reason"] == (
+        "java_javac_single_file_passed_project_build_not_performed"
+    )
+    assert payload["source"] == "tree_sitter_java+javac"
+    assert payload["tools_run"] == ["tree_sitter_java", "javac"]
+    assert "java_project_build_not_performed" in payload["warnings"]
+    assert "/patch/validate" not in tools["__captured__"]
+
+
+def test_patch_validate_java_javac_environment_incomplete_is_inconclusive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "repo"
+    target = workspace / "src" / "main" / "java" / "App.java"
+    target.parent.mkdir(parents=True)
+    target.write_text("class App {}\n", encoding="utf-8")
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(workspace))
+
+    tools = _build_tools({
+        "/patch/validate": {
+            "success": False,
+            "issues": [{"message": "backend should not run"}],
+        }
+    })
+    raw = _run(tools["omni_patch"](
+        action="validate",
+        file="src/main/java/App.java",
+        content=(
+            "import missing.Dependency;\n"
+            "class App { Dependency dep; }\n"
+        ),
+        format="json",
+    ))
+    payload = json.loads(raw)
+
+    assert payload["ok"] is True
+    assert payload["validation_passed"] is None
+    assert payload["validation"]["status"] == "environment_incomplete"
+    assert payload["validation"]["reason"] == "java_environment_incomplete"
+    assert payload["source"] == "tree_sitter_java+javac"
+    assert payload["tools_run"] == ["tree_sitter_java", "javac"]
+    assert "java_environment_incomplete" in payload["warnings"]
+    assert payload["counts"]["error"] >= 1
+    assert "/patch/validate" not in tools["__captured__"]
+
+
 # ---------------------------------------------------------------------------
 # 2. path-traversal rejection on apply
 # ---------------------------------------------------------------------------

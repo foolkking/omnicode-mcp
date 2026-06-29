@@ -22,6 +22,8 @@ from .parser import UnifiedASTParser
 
 logger = logging.getLogger(__name__)
 
+CHUNKER_VERSION = "ast-chunker.v1"
+
 
 # ---------------------------------------------------------------------------
 # Language inference — maps file extensions to the names ``UnifiedASTParser``

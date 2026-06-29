@@ -12,7 +12,9 @@ Endpoints:
 
 from __future__ import annotations
 
+import json
 import os
+import time
 from typing import Any, Optional
 
 from fastapi import APIRouter, Header
@@ -63,6 +65,8 @@ def _apply_llm_runtime_status(statuses: list[dict]) -> tuple[list[dict], dict]:
         if item.get("capability") == "llm_enhancement":
             item["available"] = bool(llm["available"])
             item["detail"] = llm["reason"]
+            item["state"] = "ready" if llm["available"] else "unavailable"
+            item["reason"] = llm["reason"]
             if not llm["available"]:
                 item["backend"] = ""
     return statuses, llm
@@ -231,6 +235,305 @@ def _seed_context_from_snapshot_symbol(
     return payload
 
 
+def _apply_snapshot_graph_context(
+    payload: dict[str, Any],
+    *,
+    workspace_id: Optional[str],
+    symbol: Optional[str],
+    symbol_row: Optional[dict[str, Any]],
+    depth: int,
+) -> dict[str, Any]:
+    """Align context impact/capability with the persisted snapshot graph."""
+
+    if not workspace_id or not symbol or not symbol_row:
+        return payload
+    try:
+        from api.v1.routers.graph import (
+            _persisted_graph_impact,
+            _persisted_graph_status,
+        )
+
+        graph_status = _persisted_graph_status(workspace_id)
+        impact = None
+        if graph_status.get("ready"):
+            impact = _persisted_graph_impact(
+                workspace_id=workspace_id,
+                symbol=symbol,
+                depth=depth,
+                symbol_row=symbol_row,
+            )
+        if impact is None:
+            impact = _lightweight_snapshot_graph_context_impact(
+                symbol=symbol,
+                depth=depth,
+                symbol_row=symbol_row,
+                graph_status=graph_status,
+            )
+    except Exception as exc:
+        payload.setdefault("warnings", []).append(
+            f"snapshot_graph_context_unavailable: {exc.__class__.__name__}"
+        )
+        return payload
+
+    return _attach_snapshot_context_impact(payload, impact)
+
+
+def _attach_snapshot_context_impact(
+    payload: dict[str, Any],
+    impact: dict[str, Any],
+) -> dict[str, Any]:
+    """Attach bounded impact metadata to a snapshot context payload."""
+
+    payload["impact"] = impact
+    graph_ready = bool(
+        impact.get("graph_available")
+        and impact.get("graph_status") == "ready"
+    )
+    for capability in payload.get("capability_status") or []:
+        if capability.get("capability") != "impact_analysis":
+            continue
+        capability.update({
+            "available": True,
+            "state": "ready" if graph_ready else "degraded",
+            "detail": (
+                "persisted workspace graph with deterministic fallback"
+                if graph_ready
+                else "deterministic references; persisted graph unavailable"
+            ),
+            "backend": (
+                "workspace_graph_index"
+                if graph_ready
+                else "snapshot_exact_text"
+            ),
+            "reason": (
+                ""
+                if graph_ready
+                else str(
+                    impact.get("fallback_reason")
+                    or impact.get("note")
+                    or "graph_index_unavailable"
+                )
+            ),
+            "metadata": {
+                "graph_index_ready": graph_ready,
+                "graph_status": impact.get("graph_status"),
+                "impact_status": impact.get("impact_status"),
+                "accepted_revision": impact.get("accepted_revision"),
+                "indexed_revision": impact.get("indexed_revision"),
+            },
+        })
+        break
+    payload.setdefault("context_quality", {})["graph_evidence"] = (
+        "persisted_workspace_graph"
+        if graph_ready
+        else "deterministic_fallback"
+    )
+    return payload
+
+
+def _context_fast_graph_probe_enabled() -> bool:
+    raw = os.environ.get("OMNICODE_CONTEXT_FAST_GRAPH")
+    return bool(raw and raw.strip().lower() in {"1", "true", "yes", "on"})
+
+
+def _lightweight_snapshot_graph_context_impact(
+    *,
+    symbol: str,
+    depth: int,
+    symbol_row: dict[str, Any],
+    graph_status: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Return fast, honest graph-degraded context without reference scans.
+
+    ``omni_context`` is an editor opening move. When a large snapshot graph is
+    not ready, synchronously scanning exact text references can dominate the
+    request latency. Keep the verified definition anchor and let callers ask
+    ``omni_impact`` for deeper fallback references when they need them.
+    """
+
+    status = dict(graph_status or {})
+    return {
+        "symbol": symbol,
+        "depth": depth,
+        "affected_symbols": [],
+        "dependent_symbols": [],
+        "direct_callers": [],
+        "direct_callees": [],
+        "affected_count": 0,
+        "dependent_count": 0,
+        "files_involved": [],
+        "files_count": 0,
+        "total_blast_radius": 1,
+        "references": [],
+        "test_candidates": [],
+        "graph_index": status,
+        "graph_available": False,
+        "graph_status": (
+            "degraded"
+            if status.get("files") or status.get("definitions")
+            else "unavailable"
+        ),
+        "impact_status": "unknown",
+        "confidence": "low",
+        "symbol_found": True,
+        "symbol_source": "snapshot_exact_index",
+        "snapshot_symbol": symbol_row,
+        "fallback_used": True,
+        "fallback_reason": "graph_index_unavailable",
+        "fallback": {
+            "reason": "graph_index_unavailable",
+            "references": [],
+            "test_candidates": [],
+            "reference_source": "not_scanned_in_context_fast_path",
+            "test_candidate_source": "not_scanned_in_context_fast_path",
+        },
+        "note": (
+            "Symbol exists in the exact snapshot index, but the workspace "
+            "graph is not ready. Context skipped the expensive reference scan; "
+            "call omni_impact for deeper fallback references."
+        ),
+        "next_actions": [
+            f"omni_impact(symbol='{symbol}', depth={depth}, format='json')",
+        ],
+    }
+
+
+def _estimate_context_tokens(payload: dict[str, Any]) -> int:
+    """Return a conservative JSON token estimate for transport budgeting."""
+
+    probe = dict(payload)
+    probe["token_estimate"] = 0
+    rendered = json.dumps(
+        probe,
+        ensure_ascii=False,
+        default=str,
+        separators=(",", ":"),
+    )
+    return max(1, (len(rendered.encode("utf-8")) + 3) // 4)
+
+
+def _finalize_snapshot_fast_context(
+    payload: dict[str, Any],
+    *,
+    token_budget: int,
+    elapsed_ms: int,
+) -> dict[str, Any]:
+    """Bound graph-heavy fast-path payloads to the requested token budget."""
+
+    truncated_fields: dict[str, dict[str, int]] = {}
+
+    def trim_list(
+        container: dict[str, Any],
+        key: str,
+        limit: int,
+        *,
+        label: Optional[str] = None,
+    ) -> None:
+        value = container.get(key)
+        if not isinstance(value, list) or len(value) <= limit:
+            return
+        field = label or key
+        truncated_fields[field] = {
+            "original": len(value),
+            "returned": max(limit, 0),
+        }
+        container[key] = value[: max(limit, 0)]
+
+    impact = payload.get("impact")
+    if isinstance(impact, dict):
+        budget_scale = max(1, min(int(token_budget), 8000))
+        compact_limits = {
+            "direct_callers": max(5, min(20, budget_scale // 300)),
+            "direct_callees": max(8, min(30, budget_scale // 220)),
+            "references": max(5, min(30, budget_scale // 250)),
+            "test_candidates": max(5, min(20, budget_scale // 300)),
+            "files_involved": max(8, min(30, budget_scale // 220)),
+            "seed_symbols": max(8, min(30, budget_scale // 220)),
+            "ambiguous_seed_symbols": 10,
+            "callers": max(5, min(20, budget_scale // 300)),
+            "callees": max(8, min(30, budget_scale // 220)),
+        }
+        for key, limit in compact_limits.items():
+            trim_list(impact, key, limit, label=f"impact.{key}")
+        inheritance = impact.get("inheritance")
+        if isinstance(inheritance, dict):
+            trim_list(
+                inheritance,
+                "edges",
+                max(5, min(20, budget_scale // 300)),
+                label="impact.inheritance.edges",
+            )
+            trim_list(
+                inheritance,
+                "subclasses",
+                max(5, min(20, budget_scale // 300)),
+                label="impact.inheritance.subclasses",
+            )
+            trim_list(
+                inheritance,
+                "bases",
+                10,
+                label="impact.inheritance.bases",
+            )
+        fallback = impact.get("fallback")
+        if isinstance(fallback, dict):
+            trim_list(
+                fallback,
+                "references",
+                max(5, min(20, budget_scale // 300)),
+                label="impact.fallback.references",
+            )
+            trim_list(
+                fallback,
+                "test_candidates",
+                10,
+                label="impact.fallback.test_candidates",
+            )
+
+    estimate = _estimate_context_tokens(payload)
+    if estimate > token_budget and isinstance(impact, dict):
+        # Tight budgets retain one verifiable sample per evidence category.
+        for key in (
+            "references",
+            "direct_callees",
+            "direct_callers",
+            "files_involved",
+            "test_candidates",
+            "seed_symbols",
+            "callers",
+            "callees",
+        ):
+            trim_list(impact, key, 3, label=f"impact.{key}")
+        inheritance = impact.get("inheritance")
+        if isinstance(inheritance, dict):
+            trim_list(
+                inheritance,
+                "edges",
+                3,
+                label="impact.inheritance.edges",
+            )
+        fallback = impact.get("fallback")
+        if isinstance(fallback, dict):
+            trim_list(
+                fallback,
+                "references",
+                3,
+                label="impact.fallback.references",
+            )
+        estimate = _estimate_context_tokens(payload)
+
+    payload["elapsed_ms"] = max(int(elapsed_ms), 0)
+    payload["truncated"] = bool(truncated_fields)
+    payload["truncation_reasons"] = (
+        ["token_budget"] if truncated_fields else []
+    )
+    payload["truncated_fields"] = truncated_fields
+    payload["token_estimate"] = _estimate_context_tokens(payload)
+    payload["token_budget"] = int(token_budget)
+    payload["budget_respected"] = payload["token_estimate"] <= int(token_budget)
+    return payload
+
+
 def _snapshot_fast_context_allowed(
     req: "IntelligenceRequest",
     *,
@@ -255,13 +558,29 @@ def _build_snapshot_fast_context(
     *,
     row: dict[str, Any],
     freshness: Optional[dict[str, Any]],
+    workspace_id: Optional[str],
 ) -> dict[str, Any]:
     """Build a lightweight context from exact snapshot data only."""
+    started = time.perf_counter()
     file_path = row.get("file_path")
     symbol_name = row.get("symbol_name")
     statuses, llm = _apply_llm_runtime_status(
         [s.to_dict() for s in list_capabilities()]
     )
+    statuses = [
+        {
+            key: status.get(key)
+            for key in (
+                "capability",
+                "available",
+                "state",
+                "backend",
+                "reason",
+            )
+            if key in status
+        }
+        for status in statuses
+    ]
     payload: dict[str, Any] = {
         "request": {
             "task": req.task,
@@ -309,10 +628,36 @@ def _build_snapshot_fast_context(
             "memory or git history"
         ),
     }
-    return _seed_context_from_snapshot_symbol(
+    payload = _seed_context_from_snapshot_symbol(
         payload,
         row=row,
         freshness=freshness,
+    )
+    if _context_fast_graph_probe_enabled():
+        payload = _apply_snapshot_graph_context(
+            payload,
+            workspace_id=workspace_id,
+            symbol=req.symbol,
+            symbol_row=row,
+            depth=req.impact_depth,
+        )
+    elif req.symbol:
+        impact = _lightweight_snapshot_graph_context_impact(
+            symbol=req.symbol,
+            depth=req.impact_depth,
+            symbol_row=row,
+            graph_status={
+                "ready": False,
+                "current": False,
+                "not_checked": True,
+                "reason": "context_fast_path_graph_probe_disabled",
+            },
+        )
+        payload = _attach_snapshot_context_impact(payload, impact)
+    return _finalize_snapshot_fast_context(
+        payload,
+        token_budget=req.token_budget,
+        elapsed_ms=int((time.perf_counter() - started) * 1000),
     )
 
 
@@ -418,6 +763,7 @@ async def build_context(
     freshness = cloud_freshness_state(
         workspace_id=effective_workspace_id,
         min_revision=x_omnicode_min_revision,
+        include_graph=False,
     )
     if snapshot_row and _snapshot_fast_context_allowed(req, row=snapshot_row):
         return _ok(
@@ -425,6 +771,7 @@ async def build_context(
                 req,
                 row=snapshot_row,
                 freshness=freshness,
+                workspace_id=effective_workspace_id,
             )
         )
 
@@ -453,6 +800,13 @@ async def build_context(
             payload,
             row=snapshot_row,
             freshness=freshness,
+        )
+        payload = _apply_snapshot_graph_context(
+            payload,
+            workspace_id=effective_workspace_id,
+            symbol=req.symbol,
+            symbol_row=snapshot_row,
+            depth=req.impact_depth,
         )
     return _ok(payload)
 

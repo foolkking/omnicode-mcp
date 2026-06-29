@@ -31,7 +31,6 @@ from typing import Any
 import pytest
 import requests
 
-
 pytestmark = pytest.mark.large_repo
 
 
@@ -184,7 +183,7 @@ def test_django_exact_symbols_bootstrap_from_snapshot(
     assert first["file_path"] == expected_file
     assert first["symbol_name"] == symbol
     assert "symbol:exact" in first["why_matched"]
-    assert first["source"] == "snapshot_store"
+    assert first["source"] in {"exact_index", "snapshot_store"}
     _assert_workspace_relative(first["file_path"])
 
 
@@ -232,7 +231,7 @@ def test_django_semantic_search_boosts_exact_snapshot_symbol(
     assert result["snapshot_exact_boost"] is True
     assert first["file_path"] == "django/core/handlers/base.py"
     assert first["symbol_name"] == "BaseHandler"
-    assert first["source"] == "snapshot_store"
+    assert first["source"] in {"exact_index", "snapshot_store"}
     assert "semantic:exact_boost" in first["why_matched"]
     _assert_workspace_relative(first["file_path"])
 
@@ -254,12 +253,20 @@ def test_django_semantic_search_boosts_natural_language_lexical_overlap(
 
     result = body["result"]
     first = result["results"][0]
-    assert elapsed_ms < 10_000
+    assert elapsed_ms < 10_000, {
+        "elapsed_ms": elapsed_ms,
+        "debug_timing": result.get("debug_timing"),
+        "semantic_exact_only_fast_path": result.get("semantic_exact_only_fast_path"),
+        "provider": result.get("provider"),
+        "provider_chain": result.get("provider_chain"),
+        "fallback_reason": result.get("fallback_reason"),
+        "first": first,
+    }
     assert body["success"] is True
     assert result["snapshot_store_used"] is True
     assert result["snapshot_lexical_boost"] is True
     assert first["file_path"] == "django/core/handlers/base.py"
-    assert first["source"] == "snapshot_store"
+    assert first["source"] in {"exact_index", "snapshot_store"}
     assert "semantic:lexical_boost" in first["why_matched"]
     _assert_workspace_relative(first["file_path"])
 

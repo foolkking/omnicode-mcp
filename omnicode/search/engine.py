@@ -5,11 +5,12 @@ import os
 import time
 from typing import Any, Dict, List, Optional
 
-from omnicode.ast_engine.chunker import ASTChunker
+from omnicode.ast_engine.chunker import CHUNKER_VERSION, ASTChunker
 from omnicode.ast_engine.parser import UnifiedASTParser
 from omnicode.search.hybrid_search import HybridSearchEngine
 from omnicode.search.models import SearchRequest
 from omnicode.search.vector_store import VectorStore
+from omnicode_core.embeddings.backend import UnavailableEmbeddingBackend
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,25 @@ def _normalize_upsert_item(item: Any) -> tuple[str, str, Dict[str, Any]]:
         path, content = item
         metadata = {}
     return str(path), str(content), dict(metadata) if isinstance(metadata, dict) else {}
+
+
+def _semantic_chunk_limit(metadata: Dict[str, Any]) -> int:
+    try:
+        return int(metadata.get("semantic_max_chunks_per_file") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _limit_semantic_chunks(chunks: list[Any], metadata: Dict[str, Any]) -> list[Any]:
+    limit = _semantic_chunk_limit(metadata)
+    if limit <= 0 or len(chunks) <= limit:
+        return chunks
+    metadata["semantic_chunk_limit_applied"] = True
+    metadata["semantic_chunk_limit"] = limit
+    metadata["semantic_chunks_original"] = len(chunks)
+    metadata["semantic_chunks_dropped"] = len(chunks) - limit
+    return chunks[:limit]
+
 
 class LegacySearchResult:
     """
@@ -144,7 +164,13 @@ class SemanticSearchEngine:
     """
     Bridges the legacy SemanticSearchEngine to the new hybrid Tree-sitter + FAISS + SentenceTransformers search architecture.
     """
-    def __init__(self, working_dir: str, shard_id: Optional[str] = None):
+    def __init__(
+        self,
+        working_dir: str,
+        shard_id: Optional[str] = None,
+        *,
+        db_dir: Optional[str] = None,
+    ):
         self.working_dir = os.path.abspath(working_dir)
 
         # Sharding (Wave 2 W2-10). When ``shard_id`` is omitted the
@@ -163,7 +189,11 @@ class SemanticSearchEngine:
         # named shards are always created fresh.
         if self.shard_id == DEFAULT_SHARD_ID:
             auto_migrate_legacy(self.working_dir)
-        self.db_dir = resolve_shard_dir(self.working_dir, self.shard_id)
+        if db_dir:
+            self.db_dir = os.path.abspath(db_dir)
+            os.makedirs(self.db_dir, exist_ok=True)
+        else:
+            self.db_dir = resolve_shard_dir(self.working_dir, self.shard_id)
 
         # Instantiate Omnicode modules
         self.ast_parser = UnifiedASTParser()
@@ -181,18 +211,154 @@ class SemanticSearchEngine:
             "total_chunks": 0,
             "total_symbols": 0,
             "last_indexed": "never",
-            "index_size": 0
+            "index_size": 0,
+            "semantic_available": False,
+            "semantic_unavailable_reason": "embedding_model_not_loaded",
         }
+
+    def replace_semantic_index_from(
+        self,
+        staging: "SemanticSearchEngine",
+    ) -> Dict[str, Any]:
+        """Activate a fully-built staging semantic index."""
+
+        activation = self.vector_store.replace_from(staging.vector_store)
+        self.keyword_searcher = SqliteKeywordSearcher(self.vector_store)
+        self.hybrid_engine = HybridSearchEngine(
+            self.vector_store,
+            self.keyword_searcher,
+        )
+        self.refresh_stats()
+        return activation
+
+    def _embedding_backend_model_name(self) -> Optional[str]:
+        backend = self.embedding_model
+        if backend is None:
+            return None
+        for attr in ("model_name", "_model_name", "model", "_model"):
+            value = getattr(backend, attr, None)
+            if isinstance(value, str) and value:
+                return value
+        return None
+
+    def _ensure_embedding_backend(self) -> None:
+        """Refresh unavailable/stale embedding backend handles.
+
+        A backend may start before ``omnicode models pull`` has populated the
+        fixed cache directory.  Keep exact search available in that state, but
+        let semantic operations recover after the model appears without
+        requiring a process restart.
+        """
+        from omnicode_core.embeddings import get_default_backend
+        from omnicode_core.embeddings.models import embedding_model_config
+
+        model_name = embedding_model_config().model_name
+        cached_name = self._embedding_backend_model_name()
+        if (
+            self.embedding_model is None
+            or isinstance(self.embedding_model, UnavailableEmbeddingBackend)
+            or (cached_name is not None and cached_name != model_name)
+        ):
+            self.embedding_model = get_default_backend(model_name)
+
+    def _semantic_runtime(self) -> Dict[str, Any]:
+        from omnicode_core.embeddings.models import embedding_model_config
+
+        config = embedding_model_config()
+        backend = self.embedding_model
+        dimension = getattr(backend, "dimension", None)
+        return {
+            "embedding_model": config.model_name,
+            "embedding_revision": config.revision,
+            "embedding_dimension": int(dimension) if dimension else None,
+            "embedding_backend": getattr(backend, "name", "unavailable"),
+            "chunker_version": CHUNKER_VERSION,
+            "normalization": "l2",
+        }
+
+    def semantic_index_status(self) -> Dict[str, Any]:
+        self._ensure_embedding_backend()
+        runtime = self._semantic_runtime()
+        status = self.vector_store.semantic_metadata_status(
+            embedding_model=runtime["embedding_model"],
+            embedding_revision=runtime["embedding_revision"],
+            embedding_dimension=runtime["embedding_dimension"],
+            chunker_version=runtime["chunker_version"],
+        )
+        status["embedding_available"] = self.semantic_available()
+        status["runtime"] = runtime
+        if not self.semantic_available():
+            status["semantic_index_ready"] = False
+            status["semantic_index_stale_reason"] = (
+                self.semantic_unavailable_reason()
+            )
+        return status
+
+    def prepare_semantic_index(
+        self,
+        *,
+        force: bool = False,
+        workspace_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Validate the mounted vectors or reset them for an explicit rebuild."""
+        self._ensure_embedding_backend()
+        runtime = self._semantic_runtime()
+        dimension = runtime.get("embedding_dimension")
+        if not self.semantic_available() or not dimension:
+            raise RuntimeError(
+                "EMBEDDING_UNAVAILABLE: "
+                + (self.semantic_unavailable_reason() or "embedding dimension unavailable")
+            )
+        status = self.semantic_index_status()
+        incompatible = bool(
+            status.get("semantic_index_stale")
+            or status.get("semantic_index_invalid")
+        )
+        metadata_missing = not bool(status.get("metadata"))
+        vector_count = int(status.get("vector_count") or 0)
+        if force:
+            self.vector_store.reset_index(dimension=int(dimension))
+            status = self.semantic_index_status()
+        elif vector_count == 0 and self.vector_store.index_dimension() != int(dimension):
+            self.vector_store.reset_index(dimension=int(dimension))
+            status = self.semantic_index_status()
+        elif incompatible or (vector_count > 0 and metadata_missing):
+            reason = status.get("semantic_index_stale_reason") or "metadata_missing"
+            raise RuntimeError(
+                f"SEMANTIC_INDEX_INCOMPATIBLE: {reason}; "
+                "run omni_index(scope='semantic', force=true)"
+            )
+        if workspace_id:
+            runtime["workspace_id"] = workspace_id
+        return status
+
+    def _write_semantic_metadata(
+        self,
+        *,
+        workspace_id: Optional[str] = None,
+        indexed_revision: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        runtime = self._semantic_runtime()
+        return self.vector_store.set_index_metadata(
+            embedding_model=str(runtime["embedding_model"]),
+            embedding_revision=runtime.get("embedding_revision"),
+            embedding_dimension=runtime.get("embedding_dimension"),
+            embedding_backend=str(runtime["embedding_backend"]),
+            chunker_version=str(runtime["chunker_version"]),
+            normalization=str(runtime["normalization"]),
+            workspace_id=workspace_id,
+            indexed_revision=indexed_revision,
+        )
 
     async def initialize(self) -> None:
         """Initialize the embedding model and verify DB files"""
         logger.info("Initializing Semantic Search Engine...")
         if self.embedding_model is None:
             try:
-                from omnicode.config.settings import get_settings
                 from omnicode_core.embeddings import get_default_backend
+                from omnicode_core.embeddings.models import embedding_model_config
 
-                model_name = get_settings().EMBEDDING_MODEL
+                model_name = embedding_model_config().model_name
                 # ``get_default_backend`` honours OMNICODE_EMBEDDING_BACKEND
                 # (local | remote | hybrid). Local mode keeps the offline
                 # SentenceTransformer behaviour the engine has had.
@@ -255,11 +421,44 @@ class SemanticSearchEngine:
             self.stats["index_size"] = (
                 os.path.getsize(db_file) if os.path.exists(db_file) else 0
             )
+            available = self.semantic_available()
+            self.stats["semantic_available"] = available
+            self.stats["semantic_unavailable_reason"] = (
+                None if available else self.semantic_unavailable_reason()
+            )
+            self.stats.update(self.semantic_index_status())
         except Exception as e:
             logger.warning(f"Failed to refresh search stats from DB: {e}")
 
     def get_stats(self) -> dict:
         return self.stats
+
+    def semantic_available(self) -> bool:
+        backend = self.embedding_model
+        if backend is None:
+            return False
+        if isinstance(backend, UnavailableEmbeddingBackend):
+            return False
+        return callable(getattr(backend, "encode", None))
+
+    def semantic_unavailable_reason(self) -> str:
+        backend = self.embedding_model
+        if backend is None:
+            return "embedding_model_not_loaded"
+        if isinstance(backend, UnavailableEmbeddingBackend):
+            status_fn = getattr(backend, "status", None)
+            if callable(status_fn):
+                try:
+                    status = status_fn()
+                    return (
+                        status.get("error_code")
+                        or status.get("error")
+                        or "embedding_unavailable"
+                    )
+                except Exception:
+                    return "embedding_unavailable"
+            return "embedding_unavailable"
+        return ""
 
     def _dedupe_legacy_path_rows(self) -> int:
         """Drop SQLite chunks whose ``file_path`` contains a backslash.
@@ -365,6 +564,19 @@ class SemanticSearchEngine:
         if workspace_id:
             index_metadata["workspace_id"] = workspace_id
 
+        self._ensure_embedding_backend()
+        if not self.semantic_available():
+            logger.warning(
+                "Semantic upsert skipped for %s: %s",
+                file_path,
+                self.semantic_unavailable_reason(),
+            )
+            if refresh:
+                self.refresh_stats()
+            return 0
+        self.prepare_semantic_index(workspace_id=workspace_id)
+        chunks = _limit_semantic_chunks(chunks, index_metadata)
+
         for chunk in chunks:
             emb = self.embedding_model.encode(chunk.content)
             metadata = {
@@ -383,6 +595,11 @@ class SemanticSearchEngine:
                 content=chunk.content,
                 metadata=metadata,
             )
+        if chunks:
+            self._write_semantic_metadata(
+                workspace_id=workspace_id,
+                indexed_revision=revision,
+            )
 
         # Refresh stats lazily — caller can request /index/stats afterwards.
         if refresh:
@@ -396,13 +613,50 @@ class SemanticSearchEngine:
         refresh: bool = True,
     ) -> int:
         """Index many in-memory file bodies with batched embeddings/writes."""
-        if not files:
+        raw_files = list(files)
+        if not raw_files:
             return 0
+        self._ensure_embedding_backend()
+        if not self.semantic_available():
+            logger.warning(
+                "Semantic bulk upsert skipped for %d files: %s",
+                len(raw_files),
+                self.semantic_unavailable_reason(),
+            )
+            if refresh:
+                self.refresh_stats()
+            return 0
+        batch_workspace_ids = {
+            str(metadata.get("workspace_id"))
+            for _path, _content, metadata in (
+                _normalize_upsert_item(item) for item in raw_files
+            )
+            if metadata.get("workspace_id")
+        }
+        batch_workspace_id = (
+            next(iter(batch_workspace_ids)) if len(batch_workspace_ids) == 1 else None
+        )
+        batch_revisions = [
+            int(metadata.get("snapshot_revision"))
+            for _path, _content, metadata in (
+                _normalize_upsert_item(item) for item in raw_files
+            )
+            if metadata.get("snapshot_revision") is not None
+        ]
+        batch_indexed_revision = max(batch_revisions) if batch_revisions else None
+        self.prepare_semantic_index(workspace_id=batch_workspace_id)
 
         normalized_files = [
             (_norm_path(path), content, metadata)
-            for path, content, metadata in (_normalize_upsert_item(item) for item in files)
+            for path, content, metadata in (
+                _normalize_upsert_item(item) for item in raw_files
+            )
         ]
+        upsert_stats = {
+            "files_seen": len(normalized_files),
+            "files_truncated_by_chunk_limit": 0,
+            "chunks_dropped_by_limit": 0,
+        }
         delete_paths: list[str] = []
         for file_path, _content, _metadata in normalized_files:
             delete_paths.append(file_path)
@@ -420,9 +674,18 @@ class SemanticSearchEngine:
         chunk_texts = []
         for file_path, content, index_metadata in normalized_files:
             language = os.path.splitext(file_path)[1].lstrip(".") or "python"
-            for chunk in self.chunker.chunk_file(content, file_path, language):
+            chunks = self.chunker.chunk_file(content, file_path, language)
+            original_chunk_count = len(chunks)
+            chunks = _limit_semantic_chunks(chunks, index_metadata)
+            if len(chunks) < original_chunk_count:
+                upsert_stats["files_truncated_by_chunk_limit"] += 1
+                upsert_stats["chunks_dropped_by_limit"] += (
+                    original_chunk_count - len(chunks)
+                )
+            for chunk in chunks:
                 chunk_texts.append(chunk.content)
                 chunk_rows.append((file_path, chunk, dict(index_metadata)))
+        self.last_upsert_stats = upsert_stats
 
         if not chunk_rows:
             if refresh:
@@ -453,6 +716,11 @@ class SemanticSearchEngine:
         else:
             for item in add_items:
                 await self.vector_store.add(**item)
+        if add_items:
+            self._write_semantic_metadata(
+                workspace_id=batch_workspace_id,
+                indexed_revision=batch_indexed_revision,
+            )
 
         if refresh:
             self.refresh_stats()
@@ -921,6 +1189,13 @@ class SemanticSearchEngine:
                 ))
         else:
             # Semantic / Hybrid search using RRF
+            semantic_status = self.semantic_index_status()
+            if not semantic_status.get("semantic_index_ready"):
+                reason = (
+                    semantic_status.get("semantic_index_stale_reason")
+                    or "semantic index is not ready"
+                )
+                raise RuntimeError(f"SEMANTIC_INDEX_NOT_READY: {reason}")
             query_emb = self.embedding_model.encode(request.query)
             # Over-fetch when we'll be Python-side glob filtering so the
             # result list isn't suspiciously short on a narrow pattern.

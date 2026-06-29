@@ -29,6 +29,30 @@ def test_readiness_contract_recommends_exact_first_for_large_initial_sync() -> N
     assert "semantic" not in contract["supported_query_modes"]
 
 
+def test_readiness_contract_exact_only_initial_sync_reason_survives_semantic_error() -> None:
+    contract = build_index_readiness_contract(
+        workspace_id="repo-a",
+        accepted_revision=12,
+        semantic_indexed_revision=12,
+        exact_indexed_revision=12,
+        snapshot_files=7000,
+        exact_files=7000,
+        exact_symbols=45000,
+        exact_lines=1100000,
+        semantic_index_coverage="exact_only_initial_sync",
+        semantic_initial_exact_only=True,
+        last_index_error="semantic backend unavailable",
+    )
+
+    assert contract["snapshot_ready"] is True
+    assert contract["exact_index_ready"] is True
+    assert contract["semantic_index_ready"] is False
+    assert contract["search_degraded"] is True
+    assert contract["recommended_query_mode"] == "exact_first"
+    assert contract["query_mode_reason"] == "exact_only_initial_sync"
+    assert contract["semantic"]["last_error"] == "semantic backend unavailable"
+
+
 def test_readiness_contract_recommends_semantic_first_when_full_index_ready() -> None:
     contract = build_index_readiness_contract(
         workspace_id="repo-a",
@@ -47,6 +71,46 @@ def test_readiness_contract_recommends_semantic_first_when_full_index_ready() ->
     assert contract["recommended_query_mode"] == "semantic_first"
     assert contract["query_mode_reason"] == "semantic_full"
     assert contract["strict_semantic_safe"] is True
+    assert "semantic" in contract["supported_query_modes"]
+
+
+def test_readiness_contract_does_not_mark_filtered_empty_as_semantic_ready() -> None:
+    contract = build_index_readiness_contract(
+        workspace_id="repo-a",
+        accepted_revision=12,
+        semantic_indexed_revision=12,
+        exact_indexed_revision=12,
+        snapshot_files=20,
+        exact_files=20,
+        exact_symbols=100,
+        exact_lines=500,
+        semantic_index_coverage="filtered_empty",
+    )
+
+    assert contract["semantic_index_ready"] is False
+    assert contract["search_degraded"] is True
+    assert contract["recommended_query_mode"] == "exact_first"
+    assert contract["query_mode_reason"] == "semantic_filtered_empty"
+    assert contract["semantic_query_safe"] is False
+    assert "semantic" not in contract["supported_query_modes"]
+
+
+def test_readiness_contract_treats_selected_files_as_semantic_ready() -> None:
+    contract = build_index_readiness_contract(
+        workspace_id="repo-a",
+        accepted_revision=12,
+        semantic_indexed_revision=12,
+        exact_indexed_revision=12,
+        snapshot_files=20,
+        exact_files=20,
+        exact_symbols=100,
+        exact_lines=500,
+        semantic_index_coverage="selected_files",
+    )
+
+    assert contract["semantic_index_ready"] is True
+    assert contract["recommended_query_mode"] == "semantic_first"
+    assert contract["query_mode_reason"] == "selected_files"
     assert "semantic" in contract["supported_query_modes"]
 
 

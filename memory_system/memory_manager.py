@@ -7,10 +7,15 @@ import hashlib
 import re as _re
 import numpy as np
 from pathlib import Path
-from typing import List, Optional, Dict
+from typing import Any, List, Optional, Dict
 from datetime import datetime, timedelta
-from sentence_transformers import SentenceTransformer
 from enum import Enum
+
+from omnicode_core.embeddings.backend import (
+    UnavailableEmbeddingBackend,
+    resolve_backend,
+)
+from omnicode_core.embeddings.models import embedding_model_config, embedding_status
 
 from .models import (
     Memory,
@@ -38,6 +43,7 @@ class MemoryManager:
         # Initialize embedding model (same as semantic search)
         self.embedding_model = None
         self.embedding_dimension = 384  # all-MiniLM-L6-v2
+        self.embedding_state: Dict[str, Any] = embedding_status()
 
         # Initialize database
         self._init_database()
@@ -45,8 +51,59 @@ class MemoryManager:
     async def initialize(self):
         """Async initialization for embedding model"""
         if self.embedding_model is None:
-            # Load same model as semantic search for consistency
-            self.embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+            config = embedding_model_config()
+            try:
+                self.embedding_model = resolve_backend(config.model_name)
+            except Exception as exc:
+                self.embedding_model = UnavailableEmbeddingBackend(
+                    config.model_name,
+                    error=exc,
+                    dimension=self.embedding_dimension,
+                )
+            self.embedding_state = self._embedding_backend_status()
+            dim = self.embedding_state.get("dimension")
+            if dim:
+                self.embedding_dimension = int(dim)
+
+    def _embedding_backend_status(self) -> Dict[str, Any]:
+        backend = self.embedding_model
+        if backend is None:
+            return embedding_status()
+        status_fn = getattr(backend, "status", None)
+        if callable(status_fn):
+            try:
+                return status_fn()
+            except Exception as exc:
+                return embedding_status(error=exc)
+        return embedding_status(
+            loaded=not isinstance(backend, UnavailableEmbeddingBackend),
+            dimension=getattr(backend, "dimension", None),
+        )
+
+    def get_embedding_status(self) -> Dict[str, Any]:
+        """Return deployment-visible memory embedding status."""
+        return dict(self.embedding_state)
+
+    def _encode_text(self, text: str) -> Optional[np.ndarray]:
+        """Encode text when semantic embeddings are available.
+
+        Embeddings are optional for production readiness.  If the configured
+        model was not pre-downloaded or a runtime encoder fails, memory keeps
+        working with lexical/tag scoring and stores NULL vectors.
+        """
+        backend = self.embedding_model
+        if backend is None or isinstance(backend, UnavailableEmbeddingBackend):
+            return None
+        try:
+            return np.asarray(backend.encode(text), dtype=np.float32)  # type: ignore[attr-defined]
+        except Exception as exc:
+            self.embedding_model = UnavailableEmbeddingBackend(
+                self.embedding_state.get("model") or embedding_model_config().model_name,
+                error=exc,
+                dimension=self.embedding_dimension,
+            )
+            self.embedding_state = self._embedding_backend_status()
+            return None
 
     def _init_database(self):
         """Initialize memory tables in SQLite"""
@@ -319,8 +376,12 @@ class MemoryManager:
                 return self._memory_from_row(row)
 
             # No duplicate — insert as usual
-            embedding = self.embedding_model.encode(request.content)  # type:ignore
-            embedding_blob = self._serialize_embedding(embedding)  # type:ignore
+            embedding = self._encode_text(request.content)
+            embedding_blob = (
+                self._serialize_embedding(embedding)
+                if embedding is not None
+                else None
+            )
             session_id = request.session_id or str(uuid.uuid4())
             cursor = conn.execute(
                 """
@@ -578,7 +639,7 @@ class MemoryManager:
         if not query or not memories:
             return []
 
-        query_emb = self.embedding_model.encode(query) if self.embedding_model else None  # type: ignore
+        query_emb = self._encode_text(query)
         query_norm = float(np.linalg.norm(query_emb)) if query_emb is not None else 0.0
         # Tokenise the query: split on whitespace + punctuation, lowercase.
         import re as _re

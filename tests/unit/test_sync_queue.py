@@ -55,6 +55,38 @@ def test_delete_op_is_included_in_batch(tmp_path: Path) -> None:
     assert [d.path for d in batch.deletes] == ["src/old.py"]
 
 
+def test_missing_pending_upsert_is_sent_as_delete(tmp_path: Path) -> None:
+    manifest = _manifest(tmp_path)
+    file = manifest.workspace.root / "src" / "gone.py"
+    file.parent.mkdir()
+    file.write_text("gone = True\n", encoding="utf-8")
+    manifest.mark_changed("src/gone.py")
+    file.unlink()
+
+    batch = SyncQueue(manifest).next_batch()
+
+    assert batch is not None
+    assert batch.files == []
+    assert [d.path for d in batch.deletes] == ["src/gone.py"]
+
+
+def test_mark_accepted_removes_deleted_file_metadata(tmp_path: Path) -> None:
+    manifest = _manifest(tmp_path)
+    file = manifest.workspace.root / "src" / "gone.py"
+    file.parent.mkdir()
+    file.write_text("gone = True\n", encoding="utf-8")
+    manifest.mark_changed("src/gone.py")
+    file.unlink()
+    queue = SyncQueue(manifest)
+    batch = queue.next_batch()
+    assert batch is not None
+
+    queue.mark_accepted(batch, accepted_revision=2, indexed_revision=2)
+
+    assert manifest.pending == []
+    assert "src/gone.py" not in manifest.files
+
+
 def test_next_batch_respects_max_files(tmp_path: Path) -> None:
     manifest = _manifest(tmp_path)
     for name in ("a.py", "b.py"):

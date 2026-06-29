@@ -46,6 +46,7 @@ def build_capability_contract(
     *,
     local_llm_available: Optional[bool] = None,
     local_embedding_available: Optional[bool] = None,
+    cloud_embedding_available: Optional[bool] = None,
 ) -> CapabilityContract:
     """Build a deterministic capability contract from runtime config."""
     cloud_configured = bool(runtime.backend_url)
@@ -61,6 +62,7 @@ def build_capability_contract(
         local_available=True
         if local_embedding_available is None
         else bool(local_embedding_available),
+        cloud_available=cloud_embedding_available,
     )
     diagnostics = _diagnostics_policy(
         runtime.diagnostics_mode,
@@ -158,6 +160,7 @@ def _embedding_policy(
     *,
     cloud_configured: bool,
     local_available: bool,
+    cloud_available: Optional[bool] = None,
 ) -> CapabilityPolicy:
     mode = (mode or "off").lower()
     if mode == "off":
@@ -180,6 +183,23 @@ def _embedding_policy(
             local_allowed=True,
         )
     if mode == "cloud":
+        if cloud_available is not None:
+            available = cloud_configured and bool(cloud_available)
+            return CapabilityPolicy(
+                name="embedding",
+                mode=mode,
+                target="cloud",
+                available=available,
+                reason="cloud embedding backend is available"
+                if available
+                else (
+                    "cloud embedding backend is unavailable"
+                    if cloud_configured
+                    else "cloud embedding requested but cloud backend is not configured"
+                ),
+                cloud_allowed=True,
+                requires_cloud=True,
+            )
         return CapabilityPolicy(
             name="embedding",
             mode=mode,

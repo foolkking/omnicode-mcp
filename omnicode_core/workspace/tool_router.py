@@ -40,10 +40,23 @@ class SyncRevisionState:
     accepted_revision: int = 0
     indexed_revision: int = 0
     cloud_available: bool = True
+    pending_count: int = 0
+    required_revision: Optional[int] = None
+
+    @property
+    def cloud_required_revision(self) -> int:
+        if self.required_revision is not None:
+            return max(0, int(self.required_revision))
+        if self.pending_count <= 0 and self.accepted_revision > 0:
+            return self.accepted_revision
+        return self.local_revision
 
     @property
     def cloud_is_current(self) -> bool:
-        return self.indexed_revision >= self.local_revision
+        return (
+            self.pending_count <= 0
+            and self.indexed_revision >= self.cloud_required_revision
+        )
 
 
 @dataclass(frozen=True)
@@ -141,13 +154,29 @@ class HybridToolRouter:
                         "Retry after the cloud backend is reachable.",
                     ],
                 )
+            if state.pending_count > 0:
+                return ToolRoute(
+                    tool=name,
+                    target="blocked",
+                    reason="local changes are pending sync",
+                    requires_barrier=True,
+                    barrier_min_revision=state.cloud_required_revision,
+                    stale=True,
+                    local_revision=state.local_revision,
+                    accepted_revision=state.accepted_revision,
+                    indexed_revision=state.indexed_revision,
+                    next_actions=[
+                        "Push pending sync changes and wait for indexing to finish.",
+                        "Run omni_status() to inspect sync state.",
+                    ],
+                )
             if state.cloud_is_current:
                 return ToolRoute(
                     tool=name,
                     target="cloud",
                     reason="cloud index is current for the local revision",
                     requires_barrier=True,
-                    barrier_min_revision=state.local_revision,
+                    barrier_min_revision=state.cloud_required_revision,
                     local_revision=state.local_revision,
                     accepted_revision=state.accepted_revision,
                     indexed_revision=state.indexed_revision,
@@ -157,7 +186,7 @@ class HybridToolRouter:
                 target="blocked",
                 reason="cloud index is stale for the local revision",
                 requires_barrier=True,
-                barrier_min_revision=state.local_revision,
+                barrier_min_revision=state.cloud_required_revision,
                 stale=True,
                 local_revision=state.local_revision,
                 accepted_revision=state.accepted_revision,

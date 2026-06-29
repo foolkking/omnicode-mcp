@@ -23,8 +23,6 @@ import datetime as _dt
 import json
 from typing import Any, Callable, Dict, List
 
-import pytest
-
 from omnicode_adapters.mcp_server.high_level_tools import (
     _CONTRACT_VERSIONS,
     _HANDLER_VERSION,
@@ -430,6 +428,6 @@ def test_handler_version_is_r6() -> None:
     # And the bundle is at least the r6 baseline this test was written for.
     # Use numeric round comparison so r10+ doesn't trip on string ordering.
     import re as _re
-    m = _re.search(r"\.r(\d+)$", _HANDLER_VERSION)
+    m = _re.search(r"r(\d+)$", _HANDLER_VERSION)
     assert m, f"unexpected handler_version shape: {_HANDLER_VERSION}"
     assert int(m.group(1)) >= 6

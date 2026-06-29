@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict
 
@@ -105,6 +106,7 @@ def test_omni_status_returns_required_fields() -> None:
         "handler_version",
         "handler_features",
         "backend_url",
+        "status_probe_timeout_seconds",
         "registered_tools",
         "deprecated_aliases_present",
         "warnings",
@@ -118,6 +120,7 @@ def test_omni_status_returns_required_fields() -> None:
     assert len(payload["module_sha1"]) == 40  # full sha1 hex
     assert payload["handler_version"] == hlt._HANDLER_VERSION
     assert isinstance(payload["registered_tools"], list)
+    assert payload["status_probe_timeout_seconds"] >= 0.05
     assert "omni_status" in payload["registered_tools"]
     assert "sync" in payload
     assert isinstance(payload["sync"], dict)
@@ -125,6 +128,187 @@ def test_omni_status_returns_required_fields() -> None:
     assert isinstance(payload["capability_contract"], dict)
     assert "agent_auto" in payload
     assert isinstance(payload["agent_auto"], dict)
+
+
+def test_omni_status_compact_detail_omits_heavy_fields() -> None:
+    raw = _run(_build_status_tool()("compact"))
+    payload = json.loads(raw)
+
+    assert payload["ok"] is True
+    assert payload["detail"] == "compact"
+    assert payload["handler_version"] == hlt._HANDLER_VERSION
+    assert "handler_features" not in payload
+    assert "expected_contract_versions" not in payload
+    assert "routes" not in payload["sync"]
+    assert isinstance(payload["handler_features_count"], int)
+    assert payload["registered_tools_count"] >= 13
+    assert "sync" in payload
+    assert "embedding" in payload
+    assert "local_cache_available" in payload["embedding"]
+    assert "capabilities" in payload
+    assert "toolchains" in payload
+    assert "java" in payload["toolchains"]
+    assert "scala" in payload["toolchains"]
+    assert payload["contract_version"] == "status.v1"
+
+
+def test_omni_status_compact_skips_search_stats_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ID", "repo-a")
+    monkeypatch.setenv("OMNICODE_EXECUTOR_MODE", "hybrid")
+    monkeypatch.delenv("OMNICODE_REMOTE", raising=False)
+    monkeypatch.setenv("OMNICODE_FASTAPI_BASE_URL", "http://cloud")
+    monkeypatch.setenv("OMNICODE_EMBEDDING_MODE", "cloud")
+
+    endpoints: list[str] = []
+
+    async def cloud_request(
+        _method: str,
+        endpoint: str,
+        **_kwargs: Any,
+    ) -> Dict[str, Any]:
+        endpoints.append(endpoint)
+        if endpoint == "/sync/status":
+            return {
+                "ok": True,
+                "accepted_revision": 11,
+                "indexed_revision": 11,
+                "exact_index_ready": True,
+                "exact_query_safe": True,
+                "semantic_query_safe": False,
+                "strict_semantic_safe": False,
+                "recommended_query_mode": "exact_first",
+                "snapshot_store": {
+                    "latest_revision": 11,
+                    "accepted_revision": 11,
+                    "indexed_revision": 11,
+                    "files": 2,
+                    "deletes": 0,
+                },
+            }
+        if endpoint == "/search/stats":
+            raise AssertionError("compact status must not call /search/stats")
+        if endpoint == "/read":
+            raise AssertionError("compact status must not call /read root probe")
+        return {}
+
+    raw = _run(_build_status_tool_with_request(cloud_request)("compact"))
+    payload = json.loads(raw)
+
+    assert "/sync/status" in endpoints
+    assert "/read" not in endpoints
+    assert "/search/stats" not in endpoints
+    assert payload["detail"] == "compact"
+    assert payload["sync"]["semantic_query_safe"] is False
+    assert payload["embedding"]["available"] is False
+    assert payload["embedding"]["runtime_available"] is False
+    assert (
+        payload["embedding"]["error_code"]
+        == "semantic_runtime_not_probed_in_compact_status"
+    )
+    assert payload["capability_contract"]["embedding"]["available"] is False
+    assert not any(
+        "backend root probe failed" in warning
+        for warning in payload["warnings"]
+    )
+
+
+def test_omni_status_compact_uses_sync_semantic_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    cache_snapshot = (
+        tmp_path
+        / "models"
+        / "models--BAAI--bge-small-en-v1.5"
+        / "snapshots"
+        / "snapshot"
+    )
+    cache_snapshot.mkdir(parents=True)
+    (cache_snapshot / "config.json").write_text("{}", encoding="utf-8")
+    (cache_snapshot / "modules.json").write_text("[]", encoding="utf-8")
+    (cache_snapshot / "model.safetensors").write_bytes(b"stub")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ID", "repo-a")
+    monkeypatch.setenv("OMNICODE_EXECUTOR_MODE", "hybrid")
+    monkeypatch.delenv("OMNICODE_REMOTE", raising=False)
+    monkeypatch.setenv("OMNICODE_FASTAPI_BASE_URL", "http://cloud")
+    monkeypatch.setenv("OMNICODE_EMBEDDING_MODE", "cloud")
+    monkeypatch.setenv("OMNICODE_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
+    monkeypatch.setenv("OMNICODE_EMBEDDING_CACHE_DIR", str(tmp_path / "models"))
+    monkeypatch.setenv("OMNICODE_EMBEDDING_LOCAL_FILES_ONLY", "true")
+
+    async def cloud_request(
+        _method: str,
+        endpoint: str,
+        **_kwargs: Any,
+    ) -> Dict[str, Any]:
+        if endpoint == "/sync/status":
+            return {
+                "ok": True,
+                "accepted_revision": 11,
+                "indexed_revision": 11,
+                "exact_index_ready": True,
+                "exact_query_safe": True,
+                "semantic_index_ready": False,
+                "semantic_query_safe": False,
+                "strict_semantic_safe": False,
+                "semantic_runtime_ready": True,
+                "semantic_runtime": {
+                    "ready": True,
+                    "embedding_available": True,
+                    "model": "BAAI/bge-small-en-v1.5",
+                    "dimension": 384,
+                    "faiss_dimension": 384,
+                    "chunker_version": "ast-chunker.v1",
+                    "vector_count": 12,
+                    "stale": False,
+                    "invalid": False,
+                    "stale_reason": None,
+                    "metadata": {
+                        "embedding_model": "BAAI/bge-small-en-v1.5",
+                        "embedding_dimension": 384,
+                        "chunker_version": "ast-chunker.v1",
+                    },
+                },
+                "snapshot_store": {
+                    "latest_revision": 11,
+                    "accepted_revision": 11,
+                    "indexed_revision": 11,
+                    "files": 2,
+                    "deletes": 0,
+                },
+            }
+        if endpoint == "/search/stats":
+            raise AssertionError("compact status must not call /search/stats")
+        return {}
+
+    raw = _run(_build_status_tool_with_request(cloud_request)("compact"))
+    payload = json.loads(raw)
+
+    assert payload["detail"] == "compact"
+    assert payload["sync"]["semantic_runtime_ready"] is True
+    assert payload["sync"]["semantic_query_safe"] is False
+    assert payload["embedding"]["runtime_source"] == "cloud_semantic_index"
+    assert payload["embedding"]["runtime_available"] is True
+    assert payload["embedding"]["available"] is True
+    assert payload["embedding"]["error_code"] is None
+    assert payload["capability_contract"]["embedding"]["available"] is True
 
 
 def test_omni_status_clean_when_source_and_runtime_agree() -> None:
@@ -171,6 +355,24 @@ def test_omni_status_handler_features_match_module_constant() -> None:
     raw = _run(_build_status_tool()())
     payload = json.loads(raw)
     assert tuple(payload["handler_features"]) == hlt._HANDLER_FEATURES
+
+
+def test_omni_status_advertises_pending_drain_contract() -> None:
+    raw = _run(_build_status_tool()())
+    payload = json.loads(raw)
+
+    assert payload["handler_version"] == hlt._HANDLER_VERSION
+    assert "sync.pending_force_after_local_patch" in payload["handler_features"]
+
+
+def test_omni_status_compact_surfaces_line_fts_policy() -> None:
+    raw = _run(_build_status_tool()(detail="compact"))
+    payload = json.loads(raw)
+
+    local_index = payload["local_index"]
+    assert "local_line_fts_mode" in local_index
+    assert "local_line_fts_auto_line_limit" in local_index
+    assert "local_line_fts_reason" in local_index
 
 
 def test_omni_status_pid_matches_current_process() -> None:
@@ -302,6 +504,162 @@ def test_omni_status_prefers_cloud_snapshot_for_index_readiness(
     assert readiness["graph_index_ready"] is False
 
 
+def test_omni_status_surfaces_backend_semantic_metadata_status(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ID", "repo-a")
+    monkeypatch.setenv("OMNICODE_EXECUTOR_MODE", "hybrid")
+    monkeypatch.delenv("OMNICODE_REMOTE", raising=False)
+    monkeypatch.setenv("OMNICODE_FASTAPI_BASE_URL", "http://cloud")
+
+    async def cloud_request(
+        _method: str,
+        endpoint: str,
+        **_kwargs: Any,
+    ) -> Dict[str, Any]:
+        if endpoint == "/sync/status":
+            return {
+                "ok": True,
+                "accepted_revision": 7,
+                "indexed_revision": 7,
+                "exact_index_ready": True,
+                "semantic_index_ready": True,
+                "exact_query_safe": True,
+                "strict_semantic_safe": True,
+                "snapshot_store": {
+                    "latest_revision": 7,
+                    "accepted_revision": 7,
+                    "indexed_revision": 7,
+                    "files": 2,
+                    "deletes": 0,
+                },
+            }
+        if endpoint == "/search/stats":
+            return {
+                "index_stats": {},
+                "semantic_index": {
+                    "semantic_index_ready": False,
+                    "semantic_index_model": "sentence-transformers/all-MiniLM-L6-v2",
+                    "semantic_index_dimension": 384,
+                    "faiss_dimension": 384,
+                    "semantic_index_stale_reason": "embedding_dimension_mismatch",
+                    "semantic_index_invalid": True,
+                    "semantic_index_stale": False,
+                    "chunker_version": "ast-chunker.v1",
+                    "vector_count": 12,
+                },
+            }
+        return {}
+
+    raw = _run(_build_status_tool_with_request(cloud_request)())
+    payload = json.loads(raw)
+
+    semantic = payload["sync"]["semantic_index"]
+    readiness = payload["sync"]["index_readiness"]
+    assert semantic["semantic_index_invalid"] is True
+    assert readiness["semantic_index_ready"] is False
+    assert readiness["semantic_index_model"] == "sentence-transformers/all-MiniLM-L6-v2"
+    assert readiness["semantic_index_dimension"] == 384
+    assert readiness["semantic_index_invalid"] is True
+    assert readiness["semantic_index_stale_reason"] == "embedding_dimension_mismatch"
+    assert readiness["semantic_index_chunker_version"] == "ast-chunker.v1"
+    assert readiness["semantic_vector_count"] == 12
+    assert readiness["strict_semantic_safe"] is False
+    assert readiness["semantic_query_safe"] is False
+    assert readiness["recommended_query_mode"] == "exact_first"
+    assert "semantic" not in readiness["supported_query_modes"]
+    assert payload["capabilities"]["search.semantic"]["state"] == "unavailable"
+
+
+def test_omni_status_cloud_embedding_uses_runtime_availability(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    cache_snapshot = (
+        tmp_path
+        / "models"
+        / "models--BAAI--bge-small-en-v1.5"
+        / "snapshots"
+        / "snapshot"
+    )
+    cache_snapshot.mkdir(parents=True)
+    (cache_snapshot / "config.json").write_text("{}", encoding="utf-8")
+    (cache_snapshot / "modules.json").write_text("[]", encoding="utf-8")
+    (cache_snapshot / "model.safetensors").write_bytes(b"stub")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ID", "repo-a")
+    monkeypatch.setenv("OMNICODE_EXECUTOR_MODE", "hybrid")
+    monkeypatch.delenv("OMNICODE_REMOTE", raising=False)
+    monkeypatch.setenv("OMNICODE_FASTAPI_BASE_URL", "http://cloud")
+    monkeypatch.setenv("OMNICODE_EMBEDDING_MODE", "cloud")
+    monkeypatch.setenv("OMNICODE_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
+    monkeypatch.setenv("OMNICODE_EMBEDDING_CACHE_DIR", str(tmp_path / "models"))
+    monkeypatch.setenv("OMNICODE_EMBEDDING_LOCAL_FILES_ONLY", "true")
+
+    async def cloud_request(
+        _method: str,
+        endpoint: str,
+        **_kwargs: Any,
+    ) -> Dict[str, Any]:
+        if endpoint == "/sync/status":
+            return {
+                "ok": True,
+                "accepted_revision": 9,
+                "indexed_revision": 9,
+                "exact_index_ready": True,
+                "exact_query_safe": True,
+                "snapshot_store": {
+                    "latest_revision": 9,
+                    "accepted_revision": 9,
+                    "indexed_revision": 9,
+                    "files": 2,
+                    "deletes": 0,
+                },
+            }
+        if endpoint == "/search/stats":
+            return {
+                "index_stats": {},
+                "semantic_index": {
+                    "semantic_index_ready": False,
+                    "semantic_index_model": "BAAI/bge-small-en-v1.5",
+                    "semantic_index_dimension": 384,
+                    "semantic_index_stale_reason": "EMBEDDING_MODEL_NOT_FOUND",
+                    "embedding_available": False,
+                    "chunker_version": "ast-chunker.v1",
+                    "vector_count": 12,
+                },
+            }
+        return {}
+
+    raw = _run(_build_status_tool_with_request(cloud_request)())
+    payload = json.loads(raw)
+
+    embedding = payload["embedding"]
+    assert embedding["cached"] is True
+    assert embedding["local_cache_available"] is True
+    assert embedding["runtime_source"] == "cloud_semantic_index"
+    assert embedding["runtime_available"] is False
+    assert embedding["available"] is False
+    assert embedding["error_code"] == "EMBEDDING_MODEL_NOT_FOUND"
+    assert payload["capability_contract"]["embedding"]["available"] is False
+    assert payload["capabilities"]["embedding.local"]["state"] == "unavailable"
+    assert payload["capabilities"]["search.semantic"]["state"] == "unavailable"
+
+
 def test_omni_status_reports_cloud_unavailable(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -341,6 +699,49 @@ def test_omni_status_reports_cloud_unavailable(
     assert sync["cloud_unavailable"] is True
     assert "502" in sync["cloud_status_warning"]
     assert sync["routes"]["omni_search"]["reason"] == "cloud backend is unavailable"
+
+
+def test_omni_status_probe_timeout_degrades_quickly(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("OMNICODE_WORKSPACE_ID", "repo-a")
+    monkeypatch.setenv("OMNICODE_EXECUTOR_MODE", "hybrid")
+    monkeypatch.delenv("OMNICODE_REMOTE", raising=False)
+    monkeypatch.setenv("OMNICODE_FASTAPI_BASE_URL", "http://cloud")
+    monkeypatch.setenv("OMNICODE_STATUS_PROBE_TIMEOUT", "0.05")
+
+    async def slow_request(
+        _method: str,
+        _endpoint: str,
+        **_kwargs: Any,
+    ) -> Dict[str, Any]:
+        await asyncio.sleep(0.2)
+        return {}
+
+    started_at = time.perf_counter()
+    raw = _run(_build_status_tool_with_request(slow_request)())
+    elapsed = time.perf_counter() - started_at
+    payload = json.loads(raw)
+
+    assert elapsed < 1.0
+    assert payload["ok"] is False
+    assert payload["status_probe_timeout_seconds"] == 0.05
+    assert any(
+        item.startswith("status_probe_timeout:")
+        for item in payload["warnings"]
+    )
+    sync = payload["sync"]
+    assert sync["cloud_available"] is False
+    assert sync["cloud_unavailable"] is True
+    assert "timed out" in sync["cloud_status_warning"]
 
 
 def test_omni_status_capability_contract_reports_cloud_availability(

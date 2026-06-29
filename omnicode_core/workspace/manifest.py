@@ -135,11 +135,21 @@ class LocalManifest:
                 return True
         return False
 
-    def mark_changed(self, path: str | Path) -> Optional[ManifestChange]:
+    def mark_changed(
+        self,
+        path: str | Path,
+        *,
+        force: bool = False,
+    ) -> Optional[ManifestChange]:
         """Update manifest state for one local path.
 
         Returns a ManifestChange when the pending queue changed, otherwise
         None for no-op / ignored / unsupported file.
+
+        ``force=True`` is for trusted write paths such as MCP patch
+        apply/rollback. Those paths have already performed the edit before the
+        manifest is loaded, so a lazy baseline can otherwise make a real write
+        look unchanged and skip the pending sync queue.
         """
         rel = self.workspace.to_relative(path)
         if self.is_ignored(rel):
@@ -147,7 +157,7 @@ class LocalManifest:
 
         abs_path = self.workspace.to_absolute(rel)
         if not abs_path.exists():
-            return self._record_delete(rel)
+            return self._record_delete(rel, force=force)
         if not abs_path.is_file():
             return None
 
@@ -161,7 +171,7 @@ class LocalManifest:
 
         digest = _sha256_bytes(content)
         current = self.files.get(rel) or {}
-        if current.get("hash") == digest:
+        if current.get("hash") == digest and not force:
             current["last_seen_at"] = _utc_now()
             self.files[rel] = current
             return None
@@ -177,8 +187,13 @@ class LocalManifest:
         self._replace_pending({"op": "upsert", "path": rel, "hash": digest})
         return ManifestChange("upsert", rel, digest, revision)
 
-    def _record_delete(self, rel: str) -> Optional[ManifestChange]:
-        if rel not in self.files:
+    def _record_delete(
+        self,
+        rel: str,
+        *,
+        force: bool = False,
+    ) -> Optional[ManifestChange]:
+        if rel not in self.files and not force:
             return None
         self.files.pop(rel, None)
         revision = self._next_revision()

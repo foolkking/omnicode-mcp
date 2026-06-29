@@ -109,6 +109,7 @@ class SyncQueue:
             meta = self.manifest.files.get(path) or {}
             abs_path = self.manifest.workspace.to_absolute(path)
             if not abs_path.is_file():
+                deletes.append(SyncDelete(path=path))
                 continue
             raw_content = abs_path.read_bytes()
             content = raw_content.decode("utf-8", errors="replace")
@@ -163,6 +164,8 @@ class SyncQueue:
             if isinstance(meta, dict):
                 meta["last_uploaded_revision"] = accepted
                 self.manifest.files[f.path] = meta
+        for d in batch.deletes:
+            self.manifest.files.pop(d.path, None)
 
     def mark_failed(self, batch: SyncBatch, *, error: str) -> dict[str, Any]:
         """Return a structured failure without mutating pending entries."""

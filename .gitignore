@@ -41,6 +41,7 @@ wheels/
 .installed.cfg
 *.egg
 .pytest_cache/
+.tmp_*/
 .coverage
 htmlcov/
 .tox/
@@ -73,6 +74,7 @@ data/metadata.db
 data/vector_index/
 .codebase/
 .kiro/
+.claude/
 
 # ---------------------------------------------------------------------------
 # Front-end deps
@@ -119,6 +121,7 @@ _*.json
 # Persistent project documentation that happens to start with `_` is
 # allowed too:
 !_README*
+!**/__init__.py
 
 # CI / GitHub Actions output we explicitly version (currently nothing —
 # but leave the slot here so future ``ci-baseline.json`` etc. can be

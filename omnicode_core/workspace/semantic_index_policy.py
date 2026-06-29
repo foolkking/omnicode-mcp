@@ -53,6 +53,74 @@ DEFAULT_SEMANTIC_FILENAMES = frozenset(
 )
 DEFAULT_SEMANTIC_MAX_FILE_BYTES = 500_000
 DEFAULT_SEMANTIC_INITIAL_FILE_LIMIT = 2_000
+DEFAULT_SEMANTIC_SELECTED_FILE_LIMIT = 100
+DEFAULT_SEMANTIC_MAX_CHUNKS_PER_FILE = 32
+DEFAULT_SEMANTIC_TEST_MAX_CHUNKS_PER_FILE = 12
+DEFAULT_SEMANTIC_TEST_MAX_FILE_BYTES = 160_000
+DEFAULT_SEMANTIC_EXCLUDED_PARTS = frozenset(
+    {
+        ".cache",
+        ".git",
+        ".hg",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
+        ".venv",
+        "build",
+        "coverage",
+        "dist",
+        "fixtures",
+        "locale",
+        "node_modules",
+        "site-packages",
+        "static",
+        "target",
+        "third_party",
+        "vendor",
+        "vendors",
+        "__pycache__",
+    }
+)
+DEFAULT_SEMANTIC_TEST_PARTS = frozenset(
+    {
+        "__tests__",
+        "spec",
+        "specs",
+        "test",
+        "tests",
+        "testing",
+    }
+)
+DEFAULT_SEMANTIC_LOW_VALUE_TEST_PARTS = frozenset(
+    {
+        "benchmark",
+        "benchmarks",
+        "ducktape",
+        "e2e",
+        "end-to-end",
+        "integration-test",
+        "integration-tests",
+        "integration_test",
+        "integration_tests",
+        "perf",
+        "performance",
+        "smoke-test",
+        "smoke-tests",
+        "system-test",
+        "system-tests",
+        "system_test",
+        "system_tests",
+    }
+)
+DEFAULT_SEMANTIC_EXCLUDED_SUFFIXES = frozenset(
+    {
+        ".min.css",
+        ".min.js",
+        ".bundle.js",
+        ".bundle.css",
+    }
+)
 
 
 def semantic_index_extensions() -> Optional[frozenset[str]]:
@@ -75,6 +143,26 @@ def semantic_index_filenames() -> frozenset[str]:
     if not raw:
         return DEFAULT_SEMANTIC_FILENAMES
     return frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
+
+
+def semantic_index_excluded_parts() -> frozenset[str]:
+    raw = (os.environ.get("OMNICODE_SYNC_SEMANTIC_EXCLUDE_PARTS") or "").strip()
+    if not raw:
+        return DEFAULT_SEMANTIC_EXCLUDED_PARTS
+    tokens = frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
+    if any(token in {"0", "false", "none", "off"} for token in tokens):
+        return frozenset()
+    return tokens
+
+
+def semantic_index_excluded_suffixes() -> frozenset[str]:
+    raw = (os.environ.get("OMNICODE_SYNC_SEMANTIC_EXCLUDE_SUFFIXES") or "").strip()
+    if not raw:
+        return DEFAULT_SEMANTIC_EXCLUDED_SUFFIXES
+    tokens = frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
+    if any(token in {"0", "false", "none", "off"} for token in tokens):
+        return frozenset()
+    return tokens
 
 
 def semantic_index_max_file_bytes() -> Optional[int]:
@@ -101,6 +189,106 @@ def semantic_initial_file_limit() -> int:
     except ValueError:
         return DEFAULT_SEMANTIC_INITIAL_FILE_LIMIT
     return max(0, value)
+
+
+def semantic_selected_file_limit() -> int:
+    raw = (
+        os.environ.get("OMNICODE_SYNC_SEMANTIC_SELECTED_FILE_LIMIT") or ""
+    ).strip()
+    if not raw:
+        return DEFAULT_SEMANTIC_SELECTED_FILE_LIMIT
+    if raw.lower() in {"0", "none", "off", "unlimited"}:
+        return 0
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_SEMANTIC_SELECTED_FILE_LIMIT
+    return max(0, value)
+
+
+def _env_int(name: str, default: int, *, allow_unlimited: bool = False) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    if allow_unlimited and raw.lower() in {"0", "none", "off", "unlimited"}:
+        return 0
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(0 if allow_unlimited else 1, value)
+
+
+def semantic_test_mode() -> str:
+    raw = (os.environ.get("OMNICODE_SEMANTIC_TEST_MODE") or "limited").strip().lower()
+    if raw in {"full", "all", "include"}:
+        return "full"
+    if raw in {"off", "none", "skip", "exclude"}:
+        return "off"
+    return "limited"
+
+
+def semantic_test_max_file_bytes() -> int:
+    return _env_int(
+        "OMNICODE_SEMANTIC_TEST_MAX_FILE_BYTES",
+        DEFAULT_SEMANTIC_TEST_MAX_FILE_BYTES,
+    )
+
+
+def semantic_max_chunks_per_file(path: Optional[str] = None) -> int:
+    default = DEFAULT_SEMANTIC_MAX_CHUNKS_PER_FILE
+    if path and semantic_path_category(path) in {"test", "low_value_test"}:
+        default = DEFAULT_SEMANTIC_TEST_MAX_CHUNKS_PER_FILE
+    return _env_int(
+        "OMNICODE_SEMANTIC_MAX_CHUNKS_PER_FILE",
+        default,
+        allow_unlimited=True,
+    )
+
+
+def semantic_path_category(path: str) -> str:
+    parts = {part.lower() for part in Path(path).parts}
+    if parts & DEFAULT_SEMANTIC_LOW_VALUE_TEST_PARTS:
+        return "low_value_test"
+    for part in parts:
+        compact = part.replace("_", "-")
+        if "test" in compact and any(
+            marker in compact
+            for marker in (
+                "bench",
+                "ducktape",
+                "e2e",
+                "integration",
+                "perf",
+                "smoke",
+                "system",
+            )
+        ):
+            return "low_value_test"
+    if parts & DEFAULT_SEMANTIC_TEST_PARTS:
+        return "test"
+    if any(part.endswith("tests") or part.endswith("-test") for part in parts):
+        return "test"
+    return "source"
+
+
+def semantic_index_metadata(
+    path: str,
+    content: str,
+    metadata: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Metadata consumed by the semantic engine for bounded large-repo indexing."""
+
+    category = semantic_path_category(path)
+    max_chunks = semantic_max_chunks_per_file(path)
+    return {
+        "semantic_path_category": category,
+        "semantic_test_mode": semantic_test_mode(),
+        "semantic_content_bytes": content_bytes(content),
+        "semantic_max_chunks_per_file": max_chunks,
+        "semantic_policy": "workspace_semantic.v2",
+        **(metadata or {}),
+    }
 
 
 def _metadata_int(metadata: dict[str, Any], *keys: str) -> int:
@@ -137,6 +325,18 @@ def content_bytes(content: str) -> int:
     return len(content.encode("utf-8", errors="replace"))
 
 
+def semantic_path_skip_reason(path: str) -> Optional[str]:
+    path_obj = Path(path)
+    parts = {part.lower() for part in path_obj.parts}
+    if parts & semantic_index_excluded_parts():
+        return "path_excluded"
+    lower = path_obj.name.lower()
+    for suffix in semantic_index_excluded_suffixes():
+        if lower.endswith(suffix):
+            return "path_excluded"
+    return None
+
+
 def semantic_index_decision(
     path: str,
     content: str,
@@ -148,6 +348,23 @@ def semantic_index_decision(
     extensions = semantic_index_extensions()
     if extensions == frozenset():
         return False, "semantic_indexing_disabled"
+    path_skip = semantic_path_skip_reason(path)
+    if path_skip:
+        return False, path_skip
+    metadata = metadata or {}
+    phase = str(metadata.get("phase") or "").strip().lower()
+    category = semantic_path_category(path)
+    test_mode = semantic_test_mode()
+    if category in {"test", "low_value_test"}:
+        if test_mode == "off":
+            return False, "semantic_test_path_excluded"
+        if test_mode == "limited":
+            if phase == "semantic_full_bootstrap":
+                return False, "semantic_test_path_limited_bootstrap"
+            if category == "low_value_test":
+                return False, "semantic_low_value_test_path"
+            if content_bytes(content) > semantic_test_max_file_bytes():
+                return False, "semantic_test_file_too_large"
     filename = Path(path).name.lower()
     suffix = Path(path).suffix.lower()
     if (
@@ -168,10 +385,19 @@ def semantic_index_policy_payload() -> dict[str, Any]:
         "extensions": ["*"] if extensions is None else sorted(extensions),
         "filenames": sorted(semantic_index_filenames()),
         "max_file_bytes": semantic_index_max_file_bytes(),
+        "exclude_parts": sorted(semantic_index_excluded_parts()),
+        "exclude_suffixes": sorted(semantic_index_excluded_suffixes()),
         "initial_sync_mode": (
             os.environ.get("OMNICODE_SYNC_SEMANTIC_INITIAL_MODE") or "auto"
         ).strip().lower(),
         "initial_sync_file_limit": semantic_initial_file_limit(),
+        "selected_file_limit": semantic_selected_file_limit(),
+        "test_mode": semantic_test_mode(),
+        "test_max_file_bytes": semantic_test_max_file_bytes(),
+        "max_chunks_per_file": semantic_max_chunks_per_file(),
+        "test_max_chunks_per_file": semantic_max_chunks_per_file("tests/example.py"),
+        "test_parts": sorted(DEFAULT_SEMANTIC_TEST_PARTS),
+        "low_value_test_parts": sorted(DEFAULT_SEMANTIC_LOW_VALUE_TEST_PARTS),
     }
 
 
@@ -200,6 +426,10 @@ def merge_semantic_coverages(coverages: set[str]) -> str:
     if not cleaned:
         return "unknown"
     if "exact_only_initial_sync" in cleaned:
+        if "selected_files" in cleaned:
+            return "selected_files"
+        if "filtered" in cleaned:
+            return "filtered"
         return (
             "partial_after_exact_only"
             if len(cleaned - {"exact_only_initial_sync"}) > 0
@@ -214,4 +444,3 @@ def merge_semantic_coverages(coverages: set[str]) -> str:
     if "deletes_only" in cleaned:
         return "deletes_only"
     return sorted(cleaned)[0]
-

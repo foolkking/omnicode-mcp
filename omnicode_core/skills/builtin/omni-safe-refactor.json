@@ -4,6 +4,8 @@
   "version": "2.1.0",
   "when_to_use": "You have a concrete file/symbol to change and you want the full safety net: pre-edit understanding, blast-radius check, lint/type review, memory advisory, preview-validate-apply, and a rollback path on regret.",
   "tools_used": [
+    "omni_status",
+    "omni_index",
     "omni_context",
     "omni_impact",
     "omni_diagnostics",
@@ -14,6 +16,8 @@
   ],
   "does_execute": false,
   "recipe_for_handler_features": [
+    "status.capability_registry",
+    "index.lsp_bootstrap_control",
     "patch.workspace_path_guard",
     "patch.apply_validate_gate",
     "patch.structured_validation",
@@ -63,6 +67,51 @@
     }
   ],
   "steps": [
+    {
+      "id": "capability_status",
+      "title": "Check live capabilities before choosing analysis providers",
+      "tool": "omni_status",
+      "purpose": "Treat omni_status as the capability source of truth. Confirm exact search, deterministic context, graph, semantic, diagnostics, and language-server readiness before invoking optional advanced steps. Missing graph or semantic capability must cause an explicit degraded workflow, not a fabricated success.",
+      "args": {
+        "detail": "compact"
+      },
+      "required": true,
+      "condition": "always",
+      "consume_fields": [
+        "capabilities",
+        "sync.index_readiness",
+        "embedding",
+        "toolchains",
+        "warnings"
+      ],
+      "failure_policy": {
+        "on_error": "abort_recipe",
+        "notes": "Do not select providers when the live capability state is unknown."
+      }
+    },
+    {
+      "id": "bootstrap_graph",
+      "title": "Bootstrap graph only when impact capability is not ready",
+      "tool": "omni_index",
+      "purpose": "Run only when omni_status reports impact.graph degraded/unavailable and the user needs graph-backed blast-radius analysis. Exact read/search/patch remain usable while graph indexing is absent.",
+      "args": {
+        "action": "bootstrap",
+        "scope": "graph",
+        "background": true,
+        "format": "json"
+      },
+      "required": false,
+      "condition": "symbol_provided_and_impact_graph_not_ready",
+      "consume_fields": [
+        "job_id",
+        "state",
+        "next_actions"
+      ],
+      "failure_policy": {
+        "on_error": "continue_with_reduced_confidence",
+        "notes": "Continue with deterministic references/test candidates and mark graph capability missing."
+      }
+    },
     {
       "id": "context",
       "title": "Gather minimum-necessary context",
@@ -117,8 +166,8 @@
         "confidence"
       ],
       "failure_policy": {
-        "on_error": "abort_recipe",
-        "notes": "Without a blast-radius read the patch can silently break N callers."
+        "on_error": "continue_with_reduced_confidence",
+        "notes": "When graph is unavailable, require the structured deterministic references/test fallback and preserve risk='unknown'; abort only if the symbol itself cannot be resolved."
       }
     },
     {
@@ -334,7 +383,9 @@
     "If force=True was used, validation_bypassed=true is captured AND force_reason explains why"
   ],
   "next_actions": [
-    "Start with omni_context(file='${file}', symbol='${symbol}', task='${task}', token_budget=4000, format='json') to anchor the workflow",
+    "Start with omni_status(detail='compact') and inspect capabilities before selecting semantic, graph, or language-server providers",
+    "If impact.graph is degraded and graph-backed analysis is required, run omni_index(action='bootstrap', scope='graph', background=true, format='json')",
+    "Then use omni_context(file='${file}', symbol='${symbol}', task='${task}', token_budget=4000, format='json') to anchor the deterministic workflow",
     "Then omni_impact(symbol='${symbol}', depth=2, format='json') to read the blast radius",
     "Run omni_memory(action='advisory', symbol='${symbol}', task='${task}', format='json') and review action_items before drafting content",
     "After applying, omni_diagnostics(file='${file}', severity='all', format='json') to confirm no regressions",

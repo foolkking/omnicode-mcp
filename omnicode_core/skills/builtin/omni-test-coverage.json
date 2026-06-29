@@ -3,9 +3,11 @@
   "description": "Find tests related to a symbol and surface targeted commands to run them; flag a coverage gap and suggest adding a test when nothing matches.",
   "version": "2.1.0",
   "when_to_use": "After (or alongside) a refactor — answers 'what targeted command should I run to verify nothing regressed?'. Falls back to suggesting a new test when the call graph and search both come up empty.",
-  "tools_used": ["omni_impact", "omni_search"],
+  "tools_used": ["omni_status", "omni_index", "omni_impact", "omni_search"],
   "does_execute": false,
   "recipe_for_handler_features": [
+    "status.capability_registry",
+    "index.lsp_bootstrap_control",
     "impact.boundary_contracts",
     "search.source_confidence"
   ],
@@ -27,6 +29,44 @@
     }
   ],
   "steps": [
+    {
+      "id": "capability_status",
+      "title": "Check graph and exact-search readiness",
+      "tool": "omni_status",
+      "purpose": "Use the live capability registry to decide whether test discovery can use graph edges or must rely on exact references/path heuristics.",
+      "args": {"detail": "compact"},
+      "required": true,
+      "condition": "always",
+      "consume_fields": [
+        "capabilities.impact.graph",
+        "capabilities.search.symbol_exact",
+        "capabilities.search.text_exact",
+        "warnings"
+      ],
+      "failure_policy": {
+        "on_error": "abort_recipe",
+        "notes": "Do not claim graph-backed coverage when capability state is unknown."
+      }
+    },
+    {
+      "id": "bootstrap_exact",
+      "title": "Bootstrap deterministic workspace index when missing",
+      "tool": "omni_index",
+      "purpose": "Exact symbol/text search is the required fallback when graph coverage is absent. Run only when omni_status reports the local exact index is not ready.",
+      "args": {
+        "action": "bootstrap",
+        "scope": "workspace",
+        "background": false,
+        "format": "json"
+      },
+      "required": false,
+      "condition": "exact_symbol_or_text_index_not_ready",
+      "consume_fields": ["result", "next_actions"],
+      "failure_policy": {
+        "on_error": "continue_with_reduced_confidence",
+        "notes": "Report that both graph and deterministic search coverage are incomplete."
+      }
+    },
     {
       "id": "impact_tests",
       "title": "Pull the suggested-tests list from the call graph",
@@ -98,7 +138,9 @@
     "When suggested_commands are surfaced, they are kept as targeted invocations (e.g. `pytest tests/unit/test_X.py`), not whole-suite runs"
   ],
   "next_actions": [
-    "Run omni_impact(symbol='${symbol}', format='json') to pull the suggested-tests list",
+    "Start with omni_status(detail='compact') and inspect graph/exact-search readiness",
+    "If exact symbol/text is not ready, run omni_index(action='bootstrap', scope='workspace', background=false, format='json')",
+    "Run omni_impact(symbol='${symbol}', format='json') to pull graph-backed or deterministic suggested tests",
     "Then omni_search(query='test ${symbol}', mode='hybrid', around_file='tests/', format='json') to catch dynamic-dispatch tests",
     "If both steps produced empty results, follow the suggest_new_test step's template and add a focused unit test before patching",
     "If you found tests, run the targeted suggested_commands (and only fall back to the full suite if they pass)"

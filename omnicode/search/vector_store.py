@@ -1,7 +1,9 @@
 import json
 import logging
+import os
 import sqlite3
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -46,6 +48,87 @@ class VectorStore:
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("Failed to persist FAISS index to %s: %s", self.faiss_path, exc)
 
+    def close(self) -> None:
+        """Close the SQLite handle owned by this store."""
+        with self._lock:
+            try:
+                self.conn.close()
+            except Exception:
+                pass
+
+    def replace_from(self, staging: "VectorStore") -> Dict[str, Any]:
+        """Atomically replace this store from a completed staging store.
+
+        Semantic full rebuilds can take minutes on large repositories. Build
+        them away from the active store, then hold the active lock only for the
+        final SQLite/FAISS swap so queries never observe a half-built index.
+        """
+
+        if staging is self:
+            raise ValueError("staging vector store must differ from active store")
+        target_dimension = staging.index_dimension()
+        db_tmp = Path(f"{self.db_path}.activate.tmp")
+        faiss_tmp = Path(f"{self.faiss_path}.activate.tmp")
+        with self._lock, staging._lock:
+            staging.conn.commit()
+            staging._persist_index()
+            if db_tmp.exists():
+                db_tmp.unlink()
+            if faiss_tmp.exists():
+                faiss_tmp.unlink()
+
+            backup_conn = sqlite3.connect(db_tmp)
+            try:
+                staging.conn.backup(backup_conn)
+                backup_conn.commit()
+            finally:
+                backup_conn.close()
+            faiss.write_index(staging.index, str(faiss_tmp))
+
+            self.conn.close()
+            try:
+                os.replace(db_tmp, self.db_path)
+                os.replace(faiss_tmp, self.faiss_path)
+            finally:
+                if db_tmp.exists():
+                    db_tmp.unlink()
+                if faiss_tmp.exists():
+                    faiss_tmp.unlink()
+
+            self.dimension = int(target_dimension)
+            self.index = faiss.read_index(str(self.faiss_path))
+            self._init_db()
+            return {
+                "activated": True,
+                "dimension": self.index_dimension(),
+                "vector_count": int(self.index.ntotal),
+                "db_path": str(self.db_path),
+            }
+
+    def index_dimension(self) -> int:
+        """Return the dimension expected by the mounted FAISS index."""
+        return int(getattr(self.index, "d", self.dimension))
+
+    def reset_index(self, *, dimension: int, clear_metadata: bool = True) -> None:
+        """Clear semantic vectors and recreate FAISS for ``dimension``.
+
+        This is intentionally explicit and is used only by a requested
+        semantic rebuild. A model switch must never silently discard an
+        existing vector index during ordinary startup or query handling.
+        """
+        target = int(dimension)
+        if target <= 0:
+            raise ValueError("semantic index dimension must be positive")
+        with self._lock:
+            self.dimension = target
+            self.index = faiss.IndexIDMap(faiss.IndexFlatIP(target))
+            cursor = self.conn.cursor()
+            cursor.execute("DELETE FROM chunks")
+            if clear_metadata:
+                cursor.execute("DELETE FROM index_meta")
+            self.conn.commit()
+            self._persist_index()
+
     def _init_db(self):
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
@@ -68,6 +151,12 @@ class VectorStore:
         cols = {row[1] for row in cursor.fetchall()}
         if "embedding" not in cols:
             cursor.execute("ALTER TABLE chunks ADD COLUMN embedding BLOB")
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS index_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        ''')
         self.conn.commit()
 
         # Self-heal: if SQLite has chunks but the FAISS index doesn't, try
@@ -289,3 +378,113 @@ class VectorStore:
                         break
 
             return results
+
+    def set_index_metadata(
+        self,
+        *,
+        embedding_model: str,
+        embedding_dimension: int | None,
+        embedding_backend: str,
+        embedding_revision: str | None = None,
+        chunker_version: str = "unknown",
+        normalization: str = "l2",
+        workspace_id: str | None = None,
+        indexed_revision: int | None = None,
+    ) -> Dict[str, Any]:
+        """Persist semantic-index metadata tied to the embedding model."""
+        metadata = {
+            "embedding_model": embedding_model,
+            "embedding_revision": embedding_revision,
+            "embedding_dimension": embedding_dimension,
+            "embedding_backend": embedding_backend,
+            "chunker_version": chunker_version,
+            "normalization": normalization,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "workspace_id": workspace_id,
+            "indexed_revision": indexed_revision,
+        }
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.executemany(
+                "INSERT OR REPLACE INTO index_meta(key, value) VALUES(?, ?)",
+                [(key, json.dumps(value)) for key, value in metadata.items()],
+            )
+            self.conn.commit()
+        return metadata
+
+    def get_index_metadata(self) -> Dict[str, Any]:
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT key, value FROM index_meta")
+            rows = cursor.fetchall()
+        out: Dict[str, Any] = {}
+        for row in rows:
+            try:
+                out[str(row["key"])] = json.loads(row["value"])
+            except Exception:
+                out[str(row["key"])] = row["value"]
+        return out
+
+    def semantic_metadata_status(
+        self,
+        *,
+        embedding_model: str | None = None,
+        embedding_revision: str | None = None,
+        embedding_dimension: int | None = None,
+        chunker_version: str | None = None,
+        minimum_indexed_revision: int | None = None,
+    ) -> Dict[str, Any]:
+        metadata = self.get_index_metadata()
+        stale_reasons: List[str] = []
+        invalid_reasons: List[str] = []
+        mounted_dimension = self.index_dimension()
+        if embedding_dimension and mounted_dimension != int(embedding_dimension):
+            invalid_reasons.append("faiss_dimension_mismatch")
+        if embedding_model and metadata.get("embedding_model") not in {
+            None,
+            embedding_model,
+        }:
+            stale_reasons.append("embedding_model_mismatch")
+        if embedding_revision and metadata.get("embedding_revision") not in {
+            None,
+            embedding_revision,
+        }:
+            stale_reasons.append("embedding_revision_mismatch")
+        if embedding_dimension and metadata.get("embedding_dimension") not in {
+            None,
+            embedding_dimension,
+        }:
+            invalid_reasons.append("embedding_dimension_mismatch")
+        if chunker_version and metadata.get("chunker_version") not in {
+            None,
+            chunker_version,
+        }:
+            stale_reasons.append("chunker_version_mismatch")
+        if (
+            minimum_indexed_revision is not None
+            and int(metadata.get("indexed_revision") or 0)
+            < int(minimum_indexed_revision)
+        ):
+            stale_reasons.append("indexed_revision_behind")
+        ready = bool(self.index.ntotal > 0 and metadata)
+        stale_reason = (
+            ";".join(invalid_reasons)
+            if invalid_reasons
+            else ";".join(stale_reasons)
+            if stale_reasons
+            else None
+        )
+        return {
+            "semantic_index_ready": ready and not stale_reasons and not invalid_reasons,
+            "semantic_index_model": metadata.get("embedding_model"),
+            "semantic_index_dimension": metadata.get("embedding_dimension"),
+            "faiss_dimension": mounted_dimension,
+            "semantic_index_stale_reason": stale_reason,
+            "semantic_index_invalid": bool(invalid_reasons),
+            "semantic_index_stale": bool(stale_reasons),
+            "chunker_version": metadata.get("chunker_version"),
+            "workspace_id": metadata.get("workspace_id"),
+            "indexed_revision": metadata.get("indexed_revision"),
+            "vector_count": int(self.index.ntotal),
+            "metadata": metadata,
+        }

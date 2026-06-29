@@ -3,9 +3,11 @@
   "description": "Pull the impact + risk + references + advisory bundle for a symbol before editing it. The recommended pre-edit ritual.",
   "version": "2.1.0",
   "when_to_use": "Before any non-trivial edit on an existing symbol — answers 'who depends on this' (graph + line-level), 'what diagnostics already exist on the file', and 'are there past lessons I should remember'.",
-  "tools_used": ["omni_impact", "omni_search", "omni_diagnostics", "omni_memory"],
+  "tools_used": ["omni_status", "omni_index", "omni_impact", "omni_search", "omni_diagnostics", "omni_memory"],
   "does_execute": false,
   "recipe_for_handler_features": [
+    "status.capability_registry",
+    "index.lsp_bootstrap_control",
     "impact.boundary_contracts",
     "search.source_confidence",
     "memory.id_passthrough",
@@ -40,6 +42,45 @@
   ],
   "steps": [
     {
+      "id": "capability_status",
+      "title": "Check graph, references, and diagnostics readiness",
+      "tool": "omni_status",
+      "purpose": "Read the live capability registry before selecting graph/LSP providers. If graph is degraded, the review must explicitly use deterministic references and test-candidate fallback.",
+      "args": {"detail": "compact"},
+      "required": true,
+      "condition": "always",
+      "consume_fields": [
+        "capabilities.impact.graph",
+        "capabilities.search.references",
+        "capabilities.diagnostics.java.workspace",
+        "capabilities.diagnostics.scala.workspace",
+        "warnings"
+      ],
+      "failure_policy": {
+        "on_error": "abort_recipe",
+        "notes": "Impact provider selection is unsafe without a live capability snapshot."
+      }
+    },
+    {
+      "id": "bootstrap_graph",
+      "title": "Start graph bootstrap when full impact evidence is required",
+      "tool": "omni_index",
+      "purpose": "Optional background bootstrap. Do not block deterministic symbol/reference fallback while the graph job is running.",
+      "args": {
+        "action": "bootstrap",
+        "scope": "graph",
+        "background": true,
+        "format": "json"
+      },
+      "required": false,
+      "condition": "impact_graph_not_ready_and_full_graph_required",
+      "consume_fields": ["job_id", "state", "next_actions"],
+      "failure_policy": {
+        "on_error": "continue_with_reduced_confidence",
+        "notes": "Proceed with text/indexed references and report graph capability missing."
+      }
+    },
+    {
       "id": "impact",
       "title": "Get callers, callees, risk badge, suggested tests",
       "tool": "omni_impact",
@@ -66,8 +107,8 @@
         "If risk='unknown' with confidence='low', the symbol is not in the call graph — re-verify via omni_search(mode='symbol') before continuing."
       ],
       "failure_policy": {
-        "on_error": "abort_recipe",
-        "notes": "Without an impact read the rest of this recipe is just guesswork."
+        "on_error": "continue_with_reduced_confidence",
+        "notes": "A missing graph must degrade to deterministic references/test candidates; abort only when the symbol cannot be resolved."
       }
     },
     {
@@ -146,7 +187,9 @@
     "memory_advisory action_items have been reviewed (or noted as empty)"
   ],
   "next_actions": [
-    "Start with omni_impact(symbol='${symbol}', depth=2, format='json') for the blast radius",
+    "Start with omni_status(detail='compact') and inspect impact.graph plus language-server capabilities",
+    "If full graph evidence is required and impact.graph is not ready, run omni_index(action='bootstrap', scope='graph', background=true, format='json')",
+    "Then run omni_impact(symbol='${symbol}', depth=2, format='json') for graph or deterministic fallback evidence",
     "Then omni_search(query='${symbol}', mode='references', format='json') for line-level callsites",
     "Run omni_memory(action='advisory', symbol='${symbol}', task='${task}', format='json') to surface prior lessons",
     "If you'll edit the symbol next, hand off to the omni-safe-refactor recipe"

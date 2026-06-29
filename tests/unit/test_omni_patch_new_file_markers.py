@@ -311,7 +311,7 @@ def test_patch_apply_existing_file_marks_new_file_false() -> None:
 def test_patch_new_file_does_not_bypass_path_guard_traversal() -> None:
     tools = _build_tools({})
     for action in ("preview", "validate", "apply"):
-        raw = _run(tools[action_field := "omni_patch"](
+        raw = _run(tools["omni_patch"](
             action=action, file="../../outside_new.py",
             content="print('bad')\n", format="json",
         ))

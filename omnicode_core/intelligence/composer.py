@@ -49,14 +49,24 @@ class CapabilityStatus:
     available: bool
     detail: str = ""
     backend: str = ""
+    state: str = ""
+    reason: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "capability": self.capability.value,
             "available": self.available,
             "detail": self.detail,
             "backend": self.backend,
         }
+        if self.state:
+            data["state"] = self.state
+        if self.reason:
+            data["reason"] = self.reason
+        if self.metadata:
+            data["metadata"] = dict(self.metadata)
+        return data
 
 
 def list_capabilities() -> List[CapabilityStatus]:
@@ -108,14 +118,58 @@ def list_capabilities() -> List[CapabilityStatus]:
 
     # 3. Search — SearchEngine (semantic + symbol + text)
     engine = get_search_engine()
+    search_state = "unavailable"
+    search_detail = "engine not initialised"
+    search_reason = ""
+    search_backend = ""
+    search_meta: Dict[str, Any] = {}
+    if engine:
+        try:
+            stats = engine.get_stats()
+        except Exception:
+            stats = {}
+        embedding_model = getattr(engine, "embedding_model", None)
+        search_backend = getattr(embedding_model, "name", "") or ""
+        semantic_available = bool(
+            stats.get("semantic_available")
+            if "semantic_available" in stats
+            else (
+                getattr(engine, "semantic_available", lambda: False)()
+                if callable(getattr(engine, "semantic_available", None))
+                else False
+            )
+        )
+        search_meta = {
+            "semantic_available": semantic_available,
+            "total_files": stats.get("total_files"),
+            "total_chunks": stats.get("total_chunks"),
+            "total_symbols": stats.get("total_symbols"),
+            "semantic_unavailable_reason": stats.get(
+                "semantic_unavailable_reason"
+            ),
+        }
+        if semantic_available:
+            search_state = "ready"
+            search_detail = "semantic + deterministic symbol/text search"
+        else:
+            search_state = "degraded"
+            search_detail = (
+                "deterministic symbol/text search available; semantic "
+                "embeddings are unavailable"
+            )
+            search_reason = (
+                str(stats.get("semantic_unavailable_reason") or "")
+                or "semantic embedding backend unavailable"
+            )
     statuses.append(
         CapabilityStatus(
             Capability.SEARCH,
             available=engine is not None,
-            detail=("semantic + symbol + hybrid (RRF)" if engine else "engine not initialised"),
-            backend=getattr(getattr(engine, "embedding_model", None), "name", "")
-            if engine
-            else "",
+            detail=search_detail,
+            backend=search_backend,
+            state=search_state,
+            reason=search_reason,
+            metadata=search_meta,
         )
     )
 
@@ -127,8 +181,14 @@ def list_capabilities() -> List[CapabilityStatus]:
             CapabilityStatus(
                 Capability.IMPACT_ANALYSIS,
                 available=True,
-                detail="BFS over call/inheritance graph",
+                detail="deterministic fallback; graph BFS when graph is available",
                 backend="omnicode_core.graph.impact",
+                state="degraded",
+                reason=(
+                    "graph index is not persisted by default; impact should "
+                    "return low-confidence fallback unless graph evidence exists"
+                ),
+                metadata={"graph_index_ready": False},
             )
         )
     except Exception as exc:
@@ -163,12 +223,39 @@ def list_capabilities() -> List[CapabilityStatus]:
 
     # 6. Memory recall — MemoryAdvisor wraps MemoryManager
     mem = get_memory_manager()
+    memory_state = "ready" if mem is not None else "unavailable"
+    memory_detail = "MemoryAdvisor + multi-angle search"
+    memory_reason = ""
+    memory_meta: Dict[str, Any] = {}
+    if mem is not None:
+        status_fn = getattr(mem, "get_embedding_status", None)
+        if callable(status_fn):
+            try:
+                memory_meta["embedding"] = status_fn()
+            except Exception as exc:
+                memory_meta["embedding"] = {
+                    "available": False,
+                    "error": str(exc),
+                }
+        embedding = memory_meta.get("embedding") or {}
+        if embedding and not bool(embedding.get("available")):
+            memory_state = "degraded"
+            memory_detail = (
+                "lexical/tag memory recall; semantic memory vectors unavailable"
+            )
+            memory_reason = (
+                str(embedding.get("error_code") or "")
+                or "memory embedding backend unavailable"
+            )
     statuses.append(
         CapabilityStatus(
             Capability.MEMORY_RECALL,
             available=mem is not None,
-            detail="MemoryAdvisor + multi-angle search",
+            detail=memory_detail,
             backend="omnicode_core.memory.advisory",
+            state=memory_state,
+            reason=memory_reason,
+            metadata=memory_meta,
         )
     )
 

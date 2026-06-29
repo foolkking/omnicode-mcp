@@ -24,11 +24,17 @@ def test_capability_status_serialises():
         available=True,
         detail="ok",
         backend="x",
+        state="degraded",
+        reason="semantic unavailable",
+        metadata={"semantic_available": False},
     )
     d = s.to_dict()
     assert d["capability"] == "search"
     assert d["available"] is True
     assert d["detail"] == "ok"
+    assert d["state"] == "degraded"
+    assert d["reason"] == "semantic unavailable"
+    assert d["metadata"]["semantic_available"] is False
 
 
 def test_list_capabilities_returns_eight(monkeypatch):
@@ -59,6 +65,49 @@ def test_list_capabilities_returns_eight(monkeypatch):
     assert by_cap[Capability.SEARCH].available is False
     assert by_cap[Capability.MEMORY_RECALL].available is False
     assert by_cap[Capability.LLM_ENHANCEMENT].available is False
+
+
+def test_list_capabilities_marks_semantic_and_memory_degraded(monkeypatch):
+    import core
+
+    class _Embedding:
+        name = "embedding-unavailable"
+
+    class _SearchEngine:
+        embedding_model = _Embedding()
+
+        def get_stats(self):
+            return {
+                "semantic_available": False,
+                "semantic_unavailable_reason": "EMBEDDING_MODEL_NOT_FOUND",
+                "total_files": 10,
+                "total_chunks": 0,
+                "total_symbols": 4,
+            }
+
+    class _Memory:
+        def get_embedding_status(self):
+            return {
+                "available": False,
+                "error_code": "EMBEDDING_MODEL_NOT_FOUND",
+            }
+
+    monkeypatch.setattr(core, "get_search_engine", lambda: _SearchEngine())
+    monkeypatch.setattr(core, "get_memory_manager", lambda: _Memory())
+    monkeypatch.setattr(core, "get_llm_router", lambda: None)
+    monkeypatch.setattr(core, "get_ast_parser", lambda: None)
+
+    out = list_capabilities()
+    by_cap = {s.capability: s.to_dict() for s in out}
+
+    assert by_cap[Capability.SEARCH]["available"] is True
+    assert by_cap[Capability.SEARCH]["state"] == "degraded"
+    assert by_cap[Capability.SEARCH]["metadata"]["semantic_available"] is False
+    assert "EMBEDDING_MODEL_NOT_FOUND" in by_cap[Capability.SEARCH]["reason"]
+    assert by_cap[Capability.MEMORY_RECALL]["available"] is True
+    assert by_cap[Capability.MEMORY_RECALL]["state"] == "degraded"
+    assert by_cap[Capability.MEMORY_RECALL]["reason"] == "EMBEDDING_MODEL_NOT_FOUND"
+    assert by_cap[Capability.IMPACT_ANALYSIS]["state"] == "degraded"
 
 
 @pytest.mark.asyncio

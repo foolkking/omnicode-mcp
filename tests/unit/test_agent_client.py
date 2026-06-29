@@ -75,8 +75,8 @@ def test_agent_client_defaults_use_large_repo_batching(tmp_path: Path) -> None:
         workspace_id="repo-a",
     )
 
-    assert client._batch_max_files == 100
-    assert client._batch_max_bytes == 1_000_000
+    assert client._batch_max_files == 500
+    assert client._batch_max_bytes == 8_000_000
 
 
 def _sync_batch_response(revision: int = 1, files: int = 1, deletes: int = 0) -> httpx.Response:

@@ -424,9 +424,17 @@ Latest CI: **433 passed, 12 skipped** — the 12 skipped are LSP-binary
 probes that auto-skip when the language server isn't installed
 locally.
 
+For the current r60 verification snapshot, use
+[`PROJECT_STATE.md`](PROJECT_STATE.md); the historical count above may lag
+the active development branch.
+
 ---
 
 ## 📚 Documentation
+
+Start with [`PROJECT_STATE.md`](PROJECT_STATE.md) for the current
+AI-readable implementation snapshot, then use [`docs/index.md`](docs/index.md)
+as the durable documentation map.
 
 Main docs by category:
 

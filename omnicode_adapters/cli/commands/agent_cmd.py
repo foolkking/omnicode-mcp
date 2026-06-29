@@ -16,6 +16,8 @@ def run(
     initial_sync: bool = True,
     debounce_ms: int = 800,
     exclude: tuple[str, ...] = (),
+    batch_max_files: Optional[int] = None,
+    batch_max_bytes: Optional[int] = None,
 ) -> None:
     """Watch ``workspace`` and push changes to ``remote``."""
     # TOML config support — the agent honours [agent] section if present.
@@ -52,6 +54,8 @@ def run(
             initial_sync=initial_sync,
             excludes=exclude,
             debounce_ms=debounce_ms,
+            batch_max_files=batch_max_files,
+            batch_max_bytes=batch_max_bytes,
         )
     except KeyboardInterrupt:
         print("\n[agent] stopping…")

@@ -52,6 +52,30 @@ def test_same_hash_is_noop(tmp_path: Path) -> None:
     assert manifest.pending == []
 
 
+def test_force_same_hash_records_pending_upsert(tmp_path: Path) -> None:
+    ws = _workspace(tmp_path)
+    file = ws.root / "src" / "app.py"
+    file.parent.mkdir()
+    file.write_text("print('v1')\n", encoding="utf-8")
+    manifest = LocalManifest.load(
+        workspace=ws, path=tmp_path / "manifest.json",
+    )
+
+    first = manifest.mark_changed("src/app.py")
+    assert first is not None
+    manifest.pending.clear()
+    forced = manifest.mark_changed("src/app.py", force=True)
+
+    assert forced is not None
+    assert forced.op == "upsert"
+    assert forced.path == "src/app.py"
+    assert forced.hash == first.hash
+    assert manifest.local_revision == 2
+    assert manifest.pending == [
+        {"op": "upsert", "path": "src/app.py", "hash": forced.hash}
+    ]
+
+
 def test_changed_hash_replaces_pending_for_same_path(tmp_path: Path) -> None:
     ws = _workspace(tmp_path)
     file = ws.root / "src" / "app.py"
@@ -92,6 +116,22 @@ def test_deleted_file_generates_delete_op(tmp_path: Path) -> None:
     assert change.hash is None
     assert manifest.pending == [{"op": "delete", "path": "src/app.py"}]
     assert "src/app.py" not in manifest.files
+
+
+def test_force_delete_records_pending_even_without_baseline(tmp_path: Path) -> None:
+    ws = _workspace(tmp_path)
+    manifest = LocalManifest.load(
+        workspace=ws, path=tmp_path / "manifest.json",
+    )
+
+    change = manifest.mark_changed("src/missing.py", force=True)
+
+    assert change is not None
+    assert change.op == "delete"
+    assert change.path == "src/missing.py"
+    assert change.hash is None
+    assert manifest.local_revision == 1
+    assert manifest.pending == [{"op": "delete", "path": "src/missing.py"}]
 
 
 def test_ignore_paths_skip_changes(tmp_path: Path) -> None:

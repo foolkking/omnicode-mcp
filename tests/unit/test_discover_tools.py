@@ -7,8 +7,6 @@ behaviour, deprecated-alias handling, and the ``matcher`` switch.
 
 from __future__ import annotations
 
-import pytest
-
 from omnicode_adapters.mcp_server.high_level_tools import (
     _INTENT_REGISTRY,
     _TOOL_CATALOGUE,
