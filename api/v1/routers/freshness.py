@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from omnicode_core.workspace.readiness import build_index_readiness_contract
 from omnicode_core.workspace.exact_index import SnapshotExactIndex
+from omnicode_core.workspace.graph_index import WorkspaceGraphIndex
+from omnicode_core.workspace.readiness import build_index_readiness_contract
 from omnicode_core.workspace.snapshot_store import CloudSnapshotStore
 
 
@@ -13,6 +14,8 @@ def cloud_freshness_state(
     *,
     workspace_id: Optional[str],
     min_revision: Optional[int],
+    include_exact: bool = True,
+    include_graph: bool = True,
 ) -> Optional[dict[str, Any]]:
     """Return cloud revision state for a hybrid freshness requirement.
 
@@ -41,17 +44,59 @@ def cloud_freshness_state(
     semantic_index_coverage = str(
         status.get("semantic_index_coverage") or "unknown"
     )
-    try:
-        exact_status = SnapshotExactIndex().status(workspace_id=workspace_id.strip())
-    except Exception:
+    if include_exact:
+        try:
+            exact_index = SnapshotExactIndex()
+            if hasattr(exact_index, "try_status"):
+                exact_status = exact_index.try_status(
+                    workspace_id=workspace_id.strip(),
+                    lock_timeout_ms=75,
+                )
+            else:
+                exact_status = exact_index.status(
+                    workspace_id=workspace_id.strip()
+                )
+        except Exception:
+            exact_status = {}
+    else:
         exact_status = {}
+    if include_graph:
+        try:
+            graph_index = WorkspaceGraphIndex(store=CloudSnapshotStore())
+            readiness_probe = getattr(graph_index, "try_readiness", None)
+            if callable(readiness_probe):
+                graph_status = readiness_probe(
+                    workspace_id=workspace_id.strip(),
+                    accepted_revision=accepted_revision,
+                    lock_timeout_ms=75,
+                )
+            elif hasattr(graph_index, "try_status"):
+                graph_status = graph_index.try_status(
+                    workspace_id=workspace_id.strip(),
+                    accepted_revision=accepted_revision,
+                    lock_timeout_ms=75,
+                )
+            else:
+                graph_status = graph_index.status(
+                    workspace_id=workspace_id.strip(),
+                    accepted_revision=accepted_revision,
+                )
+        except Exception:
+            graph_status = {}
+    else:
+        graph_status = {}
     exact_indexed_revision = int(exact_status.get("exact_indexed_revision") or 0)
+    graph_indexed_revision = int(graph_status.get("graph_indexed_revision") or 0)
     required_revision = max(min_revision, accepted_revision)
     snapshot_required_revision = min_revision
     semantic_fresh = (
         indexed_revision >= required_revision and not semantic_initial_exact_only
     )
     exact_fresh = exact_indexed_revision >= required_revision
+    graph_fresh = bool(
+        graph_status.get("ready")
+        and graph_indexed_revision >= required_revision
+    )
     snapshot_fresh = accepted_revision >= snapshot_required_revision
     freshness = (
         "fresh"
@@ -80,18 +125,21 @@ def cloud_freshness_state(
         ),
         semantic_index_coverage=semantic_index_coverage,
         semantic_initial_exact_only=semantic_initial_exact_only,
+        graph_index_ready=graph_fresh,
     )
     return {
         "workspace_id": workspace_id.strip(),
         "accepted_revision": accepted_revision,
         "indexed_revision": indexed_revision,
         "exact_indexed_revision": exact_indexed_revision,
+        "graph_indexed_revision": graph_indexed_revision,
         "required_revision": required_revision,
         "snapshot_required_revision": snapshot_required_revision,
         "semantic_fresh": semantic_fresh,
         "semantic_index_coverage": semantic_index_coverage,
         "semantic_initial_exact_only": semantic_initial_exact_only,
         "exact_fresh": exact_fresh,
+        "graph_fresh": graph_fresh,
         "snapshot_fresh": snapshot_fresh,
         "semantic_stale": not semantic_fresh,
         "exact_stale": not exact_fresh,
@@ -110,6 +158,7 @@ def cloud_freshness_error(
     min_revision: Optional[int],
     allow_snapshot_fresh: bool = False,
     allow_exact_fresh: bool = False,
+    allow_graph_fresh: bool = False,
 ) -> Optional[dict[str, Any]]:
     """Return a structured stale-index error when a min revision is unmet.
 
@@ -118,6 +167,14 @@ def cloud_freshness_error(
     routes may proceed when the snapshot has accepted the requested revision
     even if the semantic/vector index is still catching up.
     """
+    if allow_snapshot_fresh and min_revision and min_revision > 0 and workspace_id:
+        try:
+            status = CloudSnapshotStore().status(workspace_id.strip())
+            if int(status.get("accepted_revision", 0)) >= int(min_revision):
+                return None
+        except Exception:
+            pass
+
     state = cloud_freshness_state(
         workspace_id=workspace_id,
         min_revision=min_revision,
@@ -134,6 +191,8 @@ def cloud_freshness_error(
     if state["semantic_fresh"]:
         return None
     if allow_exact_fresh and state.get("exact_fresh"):
+        return None
+    if allow_graph_fresh and state.get("graph_fresh"):
         return None
     if allow_snapshot_fresh and state["snapshot_fresh"]:
         return None
@@ -153,6 +212,7 @@ def cloud_freshness_error(
         "accepted_revision": state["accepted_revision"],
         "indexed_revision": state["indexed_revision"],
         "exact_indexed_revision": state.get("exact_indexed_revision", 0),
+        "graph_indexed_revision": state.get("graph_indexed_revision", 0),
         "required_revision": state["required_revision"],
         "semantic_index_coverage": state.get("semantic_index_coverage", "unknown"),
         "semantic_initial_exact_only": bool(
@@ -163,6 +223,7 @@ def cloud_freshness_error(
         "supported_query_modes": state.get("supported_query_modes", []),
         "strict_semantic_safe": bool(state.get("strict_semantic_safe", False)),
         "exact_query_safe": bool(state.get("exact_query_safe", False)),
+        "graph_query_safe": bool(state.get("graph_fresh", False)),
         "next_actions": [
             (
                 "Use exact symbol/text search for fresh code lookup, or wait for "
