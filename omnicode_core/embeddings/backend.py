@@ -17,14 +17,15 @@ methods are conveniences for callers that want the split behaviour.
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
 import urllib.request
-import inspect
 from typing import Any, List, Optional, Sequence
 
 from omnicode_core.embeddings.models import (
+    EmbeddingModelConfig,
     apply_embedding_cache_env,
     embedding_model_config,
     embedding_status,
@@ -143,6 +144,13 @@ class LocalSentenceTransformerBackend(EmbeddingBackend):
         self.local_files_only = bool(local_files_only)
         self.revision = revision
         self.device = device
+        try:
+            self.batch_size = max(
+                1,
+                int(os.environ.get("OMNICODE_EMBEDDING_BATCH_SIZE", "64")),
+            )
+        except (TypeError, ValueError):
+            self.batch_size = 64
         apply_embedding_cache_env(cache_dir)
         kwargs = {}
         if cache_dir:
@@ -178,7 +186,11 @@ class LocalSentenceTransformerBackend(EmbeddingBackend):
         logger.info("✅ Local embedding backend ready: %s (dim=%s)", model_name, self.dimension)
 
     def encode(self, text):
-        return self._model.encode(text)
+        return self._model.encode(
+            text,
+            batch_size=self.batch_size,
+            show_progress_bar=False,
+        )
 
     def status(self) -> dict:
         env_overrides = {
@@ -195,11 +207,13 @@ class LocalSentenceTransformerBackend(EmbeddingBackend):
             else:
                 os.environ.pop(key, None)
         try:
-            return embedding_status(
+            status = embedding_status(
                 self._model_name,
                 loaded=True,
                 dimension=self.dimension,
             )
+            status["batch_size"] = self.batch_size
+            return status
         finally:
             for key, value in previous.items():
                 if value is None:
@@ -381,13 +395,56 @@ def resolve_backend(model_name: str) -> EmbeddingBackend:
 
 
 _DEFAULT: Optional[EmbeddingBackend] = None
+_DEFAULT_KEY: Optional[tuple[Any, ...]] = None
+
+
+def _backend_model_name(backend: EmbeddingBackend) -> Optional[str]:
+    """Best-effort configured model name for cache invalidation."""
+    for attr in ("model_name", "_model_name", "model", "_model"):
+        value = getattr(backend, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _backend_cache_key(model_name: str, config: EmbeddingModelConfig) -> tuple[Any, ...]:
+    """Return the process cache key for a configured embedding runtime."""
+
+    backend = _env("OMNICODE_EMBEDDING_BACKEND", "local").lower().strip()
+    return (
+        backend,
+        config.model_name,
+        config.cache_dir,
+        bool(config.local_files_only),
+        config.revision,
+        config.device,
+        _env("OMNICODE_EMBEDDING_REMOTE_URL"),
+        _env("OMNICODE_EMBEDDING_REMOTE_MODEL", model_name),
+    )
 
 
 def get_default_backend(model_name: str) -> EmbeddingBackend:
-    """Return a process-wide cached backend (lazy)."""
-    global _DEFAULT
-    if _DEFAULT is None:
+    """Return a process-wide cached backend (lazy).
+
+    An unavailable backend is intentionally not sticky.  Cloud deployments often
+    start before ``omnicode models pull`` finishes; once the fixed cache dir is
+    populated, the next semantic operation should be able to recover without a
+    process restart.  We also refresh when the requested model changes so a
+    384-dim index can never silently reuse a 768-dim model runtime.
+    """
+    global _DEFAULT, _DEFAULT_KEY
+    config = embedding_model_config(model_name)
+    model_name = config.model_name
+    cache_key = _backend_cache_key(model_name, config)
+    cached_model = _backend_model_name(_DEFAULT) if _DEFAULT is not None else None
+    if (
+        _DEFAULT is None
+        or isinstance(_DEFAULT, UnavailableEmbeddingBackend)
+        or _DEFAULT_KEY != cache_key
+        or (cached_model is not None and cached_model != model_name)
+    ):
         _DEFAULT = resolve_backend(model_name)
+        _DEFAULT_KEY = cache_key
     return _DEFAULT
 
 

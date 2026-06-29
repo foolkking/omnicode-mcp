@@ -34,9 +34,9 @@ _bridge = None
 def _get_bridge():
     global _bridge
     if _bridge is None:
-        from omnicode_core.lsp.bridge import LSPBridge
+        from omnicode_core.lsp.bridge import get_lsp_bridge
         settings = get_settings()
-        _bridge = LSPBridge(settings.WORKING_DIR)
+        _bridge = get_lsp_bridge(settings.WORKING_DIR)
     return _bridge
 
 

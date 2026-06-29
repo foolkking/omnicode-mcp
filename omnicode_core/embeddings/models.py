@@ -108,9 +108,6 @@ def embedding_model_config(
     resolved_cache_dir = (
         cache_dir
         or _env("OMNICODE_EMBEDDING_CACHE_DIR")
-        or _env("SENTENCE_TRANSFORMERS_HOME")
-        or _env("HF_HUB_CACHE")
-        or _env("HF_HOME")
         or default_embedding_cache_dir()
     )
     return EmbeddingModelConfig(

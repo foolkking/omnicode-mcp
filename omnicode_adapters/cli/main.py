@@ -250,6 +250,21 @@ def main():
         help="Debounce window for filesystem events (default: 800 ms).",
     )
     agent_parser.add_argument(
+        "--batch-max-files",
+        type=int,
+        default=None,
+        help="Maximum files per sync request (default: 500).",
+    )
+    agent_parser.add_argument(
+        "--batch-max-bytes",
+        type=int,
+        default=None,
+        help=(
+            "Approximate content bytes per sync request (default: 8000000). "
+            "Lower this when a reverse proxy has a smaller body limit."
+        ),
+    )
+    agent_parser.add_argument(
         "--exclude",
         action="append",
         default=[],
@@ -383,6 +398,8 @@ def main():
             initial_sync=not args.no_initial_sync,
             debounce_ms=args.debounce_ms,
             exclude=tuple(args.exclude or ()),
+            batch_max_files=args.batch_max_files,
+            batch_max_bytes=args.batch_max_bytes,
         )
     elif args.command == "doctor":
         from omnicode_adapters.cli.commands.doctor_cmd import run

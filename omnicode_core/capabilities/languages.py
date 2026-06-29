@@ -46,8 +46,8 @@ LANGUAGE_CAPABILITY_MATRIX: dict[str, LanguageCapabilities] = {
         read="ready",
         symbol="partial",
         text_search="ready",
-        diagnostics="optional",
-        validate="optional",
+        diagnostics="partial",
+        validate="partial",
         graph="partial",
     ),
     "scala": LanguageCapabilities(
